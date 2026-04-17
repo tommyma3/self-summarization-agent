@@ -1,0 +1,3 @@
+[submodule "bc-plus"]
+	path = bc-plus
+	url = https://github.com/texttron/BrowseComp-Plus.git
