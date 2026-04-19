@@ -1,0 +1,74 @@
+from pathlib import Path
+
+from self_summarization_agent.config import load_run_config, load_train_config
+
+
+def test_load_run_config_applies_overrides(tmp_path: Path) -> None:
+    config_path = tmp_path / "run.yaml"
+    config_path.write_text(
+        """
+experiment:
+  name: demo
+  seed: 7
+  output_root: output
+  bc_plus_root: bc-plus
+dataset: {}
+retrieval:
+  backend: faiss
+  index_path: indexes/corpus.pkl
+model:
+  backend: transformers
+  model_path: model-dir
+runtime:
+  context_threshold_tokens: 32
+  max_context_tokens: 64
+  tool_budget: 4
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_run_config(
+        config_path,
+        {"dataset.limit": 3, "retrieval.backend": "bm25", "runtime.tool_budget": 2},
+    )
+
+    assert config.dataset.limit == 3
+    assert config.retrieval.backend == "bm25"
+    assert config.runtime.tool_budget == 2
+
+
+def test_load_train_config_reads_training_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        """
+experiment:
+  name: demo
+  seed: 7
+  output_root: output
+  bc_plus_root: bc-plus
+dataset: {}
+retrieval:
+  backend: faiss
+  index_path: indexes/corpus.pkl
+model:
+  backend: transformers
+  model_path: model-dir
+runtime:
+  context_threshold_tokens: 32
+  max_context_tokens: 64
+  tool_budget: 4
+judge:
+  enabled: true
+training:
+  steps: 3
+  batch_size: 2
+  group_size: 2
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_train_config(config_path)
+
+    assert config.training.steps == 3
+    assert config.training.batch_size == 2
+    assert config.training.group_size == 2

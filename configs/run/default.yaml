@@ -1,0 +1,38 @@
+experiment:
+  name: qwen-bcplus-run
+  seed: 7
+  output_root: .
+  bc_plus_root: ./bc-plus
+
+dataset:
+  decrypted_path: ./bc-plus/data/browsecomp_plus_decrypted.jsonl
+  offset: 0
+  limit: 10
+  shuffle: false
+
+retrieval:
+  backend: faiss
+  top_k: 5
+  index_path: ./bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
+  model_name: Qwen/Qwen3-Embedding-8B
+  normalize: true
+  pooling: eos
+  torch_dtype: bfloat16
+  dataset_name: Tevatron/browsecomp-plus-corpus
+  max_length: 8192
+
+model:
+  backend: transformers
+  model_path: /path/to/qwen-model
+  dtype: bfloat16
+  device_map: auto
+  max_new_tokens: 512
+  temperature: 0.0
+  top_p: 1.0
+  do_sample: false
+  trust_remote_code: false
+
+runtime:
+  context_threshold_tokens: 24000
+  max_context_tokens: 32768
+  tool_budget: 16

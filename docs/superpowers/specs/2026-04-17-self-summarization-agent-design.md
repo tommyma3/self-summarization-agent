@@ -30,7 +30,7 @@ If the runtime compresses long interaction histories at safe boundaries and the 
 
 ## High-Level Approach
 
-The system will run benchmark episodes in a custom RL environment. The model uses the benchmark's fixed `search` and `get_document` tools to gather evidence. When the runtime estimates that the next packed context would exceed a configured threshold, it waits until the current tool round is complete and then injects a synthetic summarization turn. The model writes a new summary, which replaces the older compactable history. The agent continues from a packed context containing the system prompt, user prompt, latest summary, and a recent raw tail.
+The system will run benchmark episodes in a custom RL environment. The model uses the benchmark's fixed `search` and `get_document` tools to gather evidence. The runtime tracks context growth against a strict threshold that is intentionally lower than the base model's maximum context window. When that threshold is crossed, the runtime waits until the current tool round is complete and then injects a synthetic summarization turn over the older context before the latest round. The model writes a new summary, which replaces the older compactable history. The agent continues from a packed context containing the system prompt, user prompt, latest summary, and a recent raw tail.
 
 RL is applied only to:
 
@@ -74,14 +74,15 @@ The runtime, not the model, decides when summarization is required.
 
 Builds packed contexts for acting, summarizing, and final answering. It is responsible for:
 
-- estimating packed token length with the system tokenizer
+- counting tokens with the system tokenizer
 - preserving fixed headers such as the system prompt and user prompt
 - retaining a recent unsummarized raw tail
-- selecting the compactable prefix that will be summarized
+- selecting the older context before the most recent completed round as the default compactable prefix
+- performing a hard pre-call pack check so the runtime never exceeds the model context window
 
 ### SummaryInjector
 
-Creates a synthetic summary turn after a completed tool round when the runtime determines that compaction is needed. It produces the summary-generation input, calls the model, records the output summary, and updates the compact state.
+Creates a synthetic summary turn after a completed tool round when the runtime determines that the fixed summarization threshold has been crossed. It produces the summary-generation input, calls the model, records the output summary, and updates the compact state.
 
 ### RewardEngine
 
@@ -121,7 +122,7 @@ Each episode starts with:
 - empty previous summary
 - empty interaction history
 - configured tool budget
-- configured runtime context threshold
+- configured runtime context threshold below the model's maximum context window
 
 ### Acting Loop
 
@@ -135,16 +136,18 @@ After each valid tool call, the runtime executes the tool and appends the tool r
 
 ### Summarization Trigger
 
-The runtime estimates token length using the system tokenizer and future packing rules. The model does not decide whether summarization is needed.
+The runtime measures token length using the system tokenizer. The model does not decide whether summarization is needed.
 
 After each completed `assistant -> tool call -> tool result` round:
 
-1. The runtime estimates the next packed context length.
-2. If it remains under the configured threshold, the agent continues.
+1. The runtime updates the running context length.
+2. If it remains under the configured summarization threshold, the agent continues.
 3. If it exceeds the threshold, the runtime marks summarization as required.
 4. The runtime injects a synthetic summarization turn only after the current tool round is complete.
 
 This avoids summarizing across broken action-observation pairs.
+
+In addition to the summarize trigger, the runtime performs a hard pack check before every model call. This is a safety layer that guarantees the packed prompt still fits inside the model's maximum context window even if tool results or tokenization details are larger than expected.
 
 ### Synthetic Summary Turn
 
@@ -163,6 +166,8 @@ After the new summary is generated, the active context becomes:
 - user prompt
 - new summary
 - retained recent raw tail
+
+By default, the summarized portion is the older context before the latest completed tool round, so the most recent round remains available in raw form after compaction.
 
 ### Final Answer Turn
 

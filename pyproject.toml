@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "self-summarization-agent"
+version = "0.1.0"
+description = "Self-summarization runtime for BrowseComp-Plus"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "datasets>=4.0.0",
+  "PyYAML>=6.0.2",
+  "torch>=2.7.0",
+  "transformers>=4.57.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
