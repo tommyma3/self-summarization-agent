@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 from transformers import AutoModelForMultimodalLM, AutoTokenizer
@@ -32,6 +33,9 @@ class UpdateMetrics:
 class TransformersPolicyTrainer:
     model_config: ModelConfig
     training_config: TrainingConfig
+    tokenizer: Any = field(init=False)
+    model: Any = field(init=False)
+    optimizer: torch.optim.Optimizer = field(init=False)
 
     def __post_init__(self) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(

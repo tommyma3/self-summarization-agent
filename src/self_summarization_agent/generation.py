@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -39,6 +39,8 @@ class TransformersGenerator:
     dtype: str = "auto"
     device_map: str = "auto"
     trust_remote_code: bool = False
+    tokenizer: Any = field(init=False)
+    model: Any = field(init=False)
 
     def __post_init__(self) -> None:
         torch_dtype = _resolve_torch_dtype(self.dtype)
@@ -87,6 +89,9 @@ class VLLMGenerator:
     top_p: float
     do_sample: bool
     trust_remote_code: bool = False
+    tokenizer: Any = field(init=False)
+    llm: Any = field(init=False)
+    _sampling_params_cls: Any = field(init=False)
 
     def __post_init__(self) -> None:
         try:
