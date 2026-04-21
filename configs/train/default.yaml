@@ -5,7 +5,7 @@ experiment:
   bc_plus_root: /124090467/self-summarization-agent/bc-plus
 
 dataset:
-  decrypted_path: /124090467/self-summarization-agent//bc-plus/data/browsecomp_plus_decrypted.jsonl
+  decrypted_path: /124090467/self-summarization-agent/bc-plus/data/browsecomp_plus_decrypted.jsonl
   offset: 0
   limit: 128
   shuffle: true

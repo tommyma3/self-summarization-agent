@@ -8,3 +8,4 @@ tevatron
 torch>=2.7.0
 torchvision>=0.26.0
 transformers>=4.57.0
+flash-attn

@@ -14,6 +14,7 @@ Requires-Dist: tevatron
 Requires-Dist: torch>=2.7.0
 Requires-Dist: torchvision>=0.26.0
 Requires-Dist: transformers>=4.57.0
+Requires-Dist: flash-attn
 
 # Self-Summarization Agent
 
