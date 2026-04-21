@@ -71,7 +71,9 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert result.status == "completed"
     assert result.final_answer == "done"
     assert len(model.prompts) == 2
-    assert '{"label": "SYSTEM", "content": "Solve the benchmark question using the provided tools. Use search and get_document to gather evidence. Do not invent unsupported claims. Return a concise final answer when the evidence is sufficient."}' in model.prompts[1]
+    assert '"label": "SYSTEM"' in model.prompts[1]
+    assert "exactly one JSON object" in model.prompts[1]
+    assert "Available tools:" in model.prompts[1]
     assert '{"label": "USER", "content": "question"}' in model.prompts[1]
     assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"q\\"}}"}' in model.prompts[1]
     assert '{"label": "TOOL_RESULT", "content": "[\\"doc-1\\"]"}' in model.prompts[1]
@@ -122,7 +124,9 @@ def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> N
     assert result.status == "completed"
     assert len(model.prompts) == 4
     acting_prompt_after_summary = model.prompts[3]
-    assert '{"label": "SYSTEM", "content": "Solve the benchmark question using the provided tools. Use search and get_document to gather evidence. Do not invent unsupported claims. Return a concise final answer when the evidence is sufficient."}' in acting_prompt_after_summary
+    assert '"label": "SYSTEM"' in acting_prompt_after_summary
+    assert "exactly one JSON object" in acting_prompt_after_summary
+    assert "Available tools:" in acting_prompt_after_summary
     assert '{"label": "USER", "content": "question"}' in acting_prompt_after_summary
     assert '{"label": "SUMMARY", "content": "summary of old-doc only"}' in acting_prompt_after_summary
     assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"first\\"}}"}' not in acting_prompt_after_summary
