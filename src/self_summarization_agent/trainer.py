@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForMultimodalLM, AutoTokenizer
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
 from self_summarization_agent.trajectory import RLSample
@@ -40,7 +40,7 @@ class TransformersPolicyTrainer:
         )
         if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.model = AutoModelForMultimodalLM.from_pretrained(
             self.model_config.model_path,
             torch_dtype=self._torch_dtype(),
             device_map=self.model_config.device_map,
