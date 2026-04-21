@@ -35,6 +35,7 @@ class DatasetConfig:
 class RetrievalConfig:
     backend: str = "faiss"
     top_k: int = 5
+    snippet_max_tokens: int | None = 512
     index_path: str = ""
     model_name: str | None = None
     normalize: bool = False

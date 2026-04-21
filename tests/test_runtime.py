@@ -25,7 +25,7 @@ def test_fake_backend_returns_search_hits_and_document() -> None:
         documents={"doc-1": "doc-1 body"},
     )
 
-    assert backend.search("who won") == ["doc-1"]
+    assert backend.search("who won") == [{"docid": "doc-1", "snippet": "doc-1 body"}]
     assert backend.get_document("doc-1") == "doc-1 body"
 
 
@@ -128,7 +128,7 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert "Available tools:" in model.prompts[1]
     assert "### USER\nquestion" in model.prompts[1]
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in model.prompts[1]
-    assert '### TOOL_RESULT\n["doc-1"]' in model.prompts[1]
+    assert '### TOOL_RESULT\n[{"docid": "doc-1", "snippet": "fact from doc-1"}]' in model.prompts[1]
     assert "### NEXT_ACTION" in model.prompts[1]
 
 
@@ -183,9 +183,9 @@ def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> N
     assert "### USER\nquestion" in acting_prompt_after_summary
     assert "### SUMMARY\nsummary of old-doc only" in acting_prompt_after_summary
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' not in acting_prompt_after_summary
-    assert '### TOOL_RESULT\n["old-doc"]' not in acting_prompt_after_summary
+    assert '### TOOL_RESULT\n[{"docid": "old-doc", "snippet": ""}]' not in acting_prompt_after_summary
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' in acting_prompt_after_summary
-    assert '### TOOL_RESULT\n["trigger-doc"]' in acting_prompt_after_summary
+    assert '### TOOL_RESULT\n[{"docid": "trigger-doc", "snippet": ""}]' in acting_prompt_after_summary
     assert "### NEXT_ACTION" in acting_prompt_after_summary
 
 
@@ -255,7 +255,7 @@ def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None
     acting_prompt = model.prompts[1]
     assert "### SUMMARY" not in acting_prompt
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in acting_prompt
-    assert '### TOOL_RESULT\n["doc-1"]' in acting_prompt
+    assert '### TOOL_RESULT\n[{"docid": "doc-1", "snippet": "fact from doc-1"}]' in acting_prompt
 
 
 def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
@@ -290,9 +290,9 @@ def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
     acting_prompt_after_empty_summary = model.prompts[3]
     assert "### SUMMARY" not in acting_prompt_after_empty_summary
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' in acting_prompt_after_empty_summary
-    assert '### TOOL_RESULT\n["old-doc"]' in acting_prompt_after_empty_summary
+    assert '### TOOL_RESULT\n[{"docid": "old-doc", "snippet": ""}]' in acting_prompt_after_empty_summary
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' in acting_prompt_after_empty_summary
-    assert '### TOOL_RESULT\n["trigger-doc"]' in acting_prompt_after_empty_summary
+    assert '### TOOL_RESULT\n[{"docid": "trigger-doc", "snippet": ""}]' in acting_prompt_after_empty_summary
 
 
 def test_runtime_records_trainable_summary_and_final_answer_turns() -> None:

@@ -223,10 +223,10 @@ def trace_collection(
                 if not isinstance(query, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: search.query is not a string\n")
                     return
-                doc_ids = runtime.backend.search(query)
+                search_results = runtime.backend.search(query)
                 tool_call_counts["search"] += 1
-                runtime._record_retrieved_docids(retrieved_docids, doc_ids)
-                tool_result = json.dumps(doc_ids, ensure_ascii=False)
+                runtime._record_search_result_docids(retrieved_docids, search_results)
+                tool_result = json.dumps(search_results, ensure_ascii=False)
             elif tool_name == "get_document":
                 doc_id = arguments.get("doc_id") if isinstance(arguments, dict) else None
                 if not isinstance(doc_id, str):

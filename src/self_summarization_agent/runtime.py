@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
-from self_summarization_agent.backend import BrowseCompBackend
+from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCallRecord, ToolRound
 from self_summarization_agent.prompts import build_system_prompt
@@ -176,6 +176,14 @@ class EpisodeRuntime:
                 retrieved_docids.append(doc_id)
                 seen.add(doc_id)
 
+    def _record_search_result_docids(
+        self,
+        retrieved_docids: list[str],
+        search_results: list[SearchResult],
+    ) -> None:
+        doc_ids = [str(result["docid"]) for result in search_results if result.get("docid") is not None]
+        self._record_retrieved_docids(retrieved_docids, doc_ids)
+
     def run(self, query_id: str, user_prompt: str) -> RuntimeResult:
         state = EpisodeState(
             query_id=query_id,
@@ -264,10 +272,10 @@ class EpisodeRuntime:
                         tool_call_counts,
                         turn_records,
                 )
-                doc_ids = self.backend.search(query)
+                search_results = self.backend.search(query)
                 tool_call_counts["search"] += 1
-                self._record_retrieved_docids(retrieved_docids, doc_ids)
-                tool_result = json.dumps(doc_ids)
+                self._record_search_result_docids(retrieved_docids, search_results)
+                tool_result = json.dumps(search_results, ensure_ascii=False)
             elif tool_name == "get_document":
                 doc_id = arguments.get("doc_id")
                 if not isinstance(doc_id, str):
