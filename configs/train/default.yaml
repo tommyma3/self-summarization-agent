@@ -40,7 +40,7 @@ runtime:
 
 judge:
   enabled: true
-  max_new_tokens: 512
+  max_new_tokens: 2048
   temperature: 0.0
   top_p: 1.0
   do_sample: false
