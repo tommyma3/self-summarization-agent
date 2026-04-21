@@ -14,19 +14,19 @@ retrieval:
   backend: faiss
   top_k: 5
   index_path: ./bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
-  model_name: Qwen/Qwen3-Embedding-8B
+  model_name: /124090467/Qwen/Qwen3-Embedding-8B
   normalize: true
   pooling: eos
   torch_dtype: bfloat16
   dataset_name: Tevatron/browsecomp-plus-corpus
-  max_length: 8192
+  max_length: 4096
 
 model:
   backend: transformers
-  model_path: /path/to/qwen-model
+  model_path: /124090467/Qwen/Qwen3.5-9B
   dtype: bfloat16
   device_map: auto
-  max_new_tokens: 512
+  max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
   do_sample: false
@@ -35,4 +35,4 @@ model:
 runtime:
   context_threshold_tokens: 24000
   max_context_tokens: 32768
-  tool_budget: 16
+  tool_budget: 20
