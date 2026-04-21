@@ -31,6 +31,7 @@ model:
   top_p: 0.95
   do_sample: true
   trust_remote_code: false
+  enable_thinking: true
 
 runtime:
   context_threshold_tokens: 24000

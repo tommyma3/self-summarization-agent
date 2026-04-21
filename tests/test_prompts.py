@@ -8,6 +8,9 @@ def test_build_system_prompt_mentions_tools() -> None:
     assert "get_document" in prompt
     assert "finish" in prompt
     assert "exactly one JSON object" in prompt
+    assert "Do not wrap the JSON in ``` fences" in prompt
+    assert "After any internal reasoning" in prompt
+    assert "Never call finish from background knowledge or a guess" in prompt
     assert '{"tool_name": "search", "arguments": {"query": "..."}}' in prompt
     assert '{"tool_name": "get_document", "arguments": {"doc_id": "..."}}' in prompt
     assert '{"tool_name": "finish", "arguments": {"answer": "..."}}' in prompt

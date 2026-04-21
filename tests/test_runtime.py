@@ -5,7 +5,7 @@ import json
 import main as cli_entrypoint
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.cli import build_smoke_run_record
-from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel
+from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, parse_model_tool_call
 from self_summarization_agent.trajectory import extract_trainable_samples
 
 
@@ -54,6 +54,58 @@ def test_runtime_stops_on_malformed_tool_call() -> None:
 
     assert result.status == "malformed_tool_call"
     assert result.turn_rewards == {"tool-1": -1.0}
+
+
+def test_parse_model_tool_call_accepts_thinking_and_fenced_json() -> None:
+    raw_output = """
+<think>
+I should search first.
+</think>
+
+```json
+{"tool_name": "search", "arguments": {"query": "focused query"}}
+```
+"""
+
+    parsed = parse_model_tool_call(raw_output)
+
+    assert parsed is not None
+    payload, normalized_output = parsed
+    assert payload == {"tool_name": "search", "arguments": {"query": "focused query"}}
+    assert normalized_output == '{"tool_name": "search", "arguments": {"query": "focused query"}}'
+
+
+def test_parse_model_tool_call_uses_first_valid_action_when_model_outputs_multiple() -> None:
+    raw_output = """
+```json
+{"tool_name": "search", "arguments": {"query": "first query"}}
+```
+```json
+{"tool_name": "finish", "arguments": {"answer": "unsupported"}}
+```
+"""
+
+    parsed = parse_model_tool_call(raw_output)
+
+    assert parsed is not None
+    payload, _ = parsed
+    assert payload == {"tool_name": "search", "arguments": {"query": "first query"}}
+
+
+def test_runtime_records_clean_tool_call_when_model_outputs_thinking() -> None:
+    backend = FakeBackend(search_index={"focused query": ["doc-1"]}, documents={"doc-1": "fact from doc-1"})
+    model = ScriptedModel(
+        outputs=[
+            '<think>I should search.</think>\n```json\n{"tool_name": "search", "arguments": {"query": "focused query"}}\n```',
+            '<think>The document supports it.</think>\n{"tool_name": "finish", "arguments": {"answer": "done"}}',
+        ]
+    )
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=256)
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.turn_records[0]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
 
 
 def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:

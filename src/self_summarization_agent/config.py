@@ -57,6 +57,7 @@ class ModelConfig:
     top_p: float = 1.0
     do_sample: bool = False
     trust_remote_code: bool = False
+    enable_thinking: bool = True
 
 
 @dataclass(slots=True)

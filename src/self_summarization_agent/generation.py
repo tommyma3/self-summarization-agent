@@ -39,6 +39,7 @@ class TransformersGenerator:
     dtype: str = "auto"
     device_map: str = "auto"
     trust_remote_code: bool = False
+    enable_thinking: bool = False
     tokenizer: Any = field(init=False)
     model: Any = field(init=False)
 
@@ -61,8 +62,26 @@ class TransformersGenerator:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def _format_prompt(self, prompt: str) -> str:
+        if not getattr(self.tokenizer, "chat_template", None):
+            return prompt
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=self.enable_thinking,
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
     def generate(self, prompt: str) -> str:
-        encoded = self.tokenizer(prompt, return_tensors="pt")
+        encoded = self.tokenizer(self._format_prompt(prompt), return_tensors="pt")
         encoded = {name: tensor.to(self.model.device) for name, tensor in encoded.items()}
         generation_kwargs = {
             "max_new_tokens": self.max_new_tokens,
@@ -89,6 +108,7 @@ class VLLMGenerator:
     top_p: float
     do_sample: bool
     trust_remote_code: bool = False
+    enable_thinking: bool = False
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
     _sampling_params_cls: Any = field(init=False)
@@ -108,6 +128,24 @@ class VLLMGenerator:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def _format_prompt(self, prompt: str) -> str:
+        if not getattr(self.tokenizer, "chat_template", None):
+            return prompt
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=self.enable_thinking,
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
     def generate(self, prompt: str) -> str:
         sampling_kwargs = {
             "max_tokens": self.max_new_tokens,
@@ -116,7 +154,7 @@ class VLLMGenerator:
         if self.do_sample:
             sampling_kwargs["top_p"] = self.top_p
         outputs = self.llm.generate(
-            [prompt],
+            [self._format_prompt(prompt)],
             self._sampling_params_cls(**sampling_kwargs),
         )
         if not outputs or not outputs[0].outputs:
@@ -141,6 +179,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             dtype=model_config.dtype,
             device_map=model_config.device_map,
             trust_remote_code=model_config.trust_remote_code,
+            enable_thinking=model_config.enable_thinking,
         )
     if backend_name == "vllm":
         return VLLMGenerator(
@@ -150,5 +189,6 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             top_p=top_p,
             do_sample=do_sample,
             trust_remote_code=model_config.trust_remote_code,
+            enable_thinking=model_config.enable_thinking,
         )
     raise ValueError(f"Unsupported model backend: {model_config.backend}")

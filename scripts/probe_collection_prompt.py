@@ -18,6 +18,7 @@ from self_summarization_agent.dataset import load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.launcher_utils import build_runtime
 from self_summarization_agent.models import EpisodeState
+from self_summarization_agent.runtime import parse_model_tool_call
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,18 +50,27 @@ def choose_example(examples, *, sample_index: int | None, seed: int):
     return examples[selected_index], selected_index
 
 
+def format_prompt_for_display(generator, prompt: str) -> str:
+    formatter = getattr(generator, "_format_prompt", None)
+    if callable(formatter):
+        return formatter(prompt)
+    return prompt
+
+
 def print_thinking_diagnostics(generator, raw_output: str) -> None:
     tokenizer = getattr(generator, "tokenizer", None)
     chat_template = getattr(tokenizer, "chat_template", None)
     chat_template_text = chat_template if isinstance(chat_template, str) else ""
     output_lower = raw_output.lower()
+    uses_chat_template = bool(chat_template_text)
+    enable_thinking = bool(getattr(generator, "enable_thinking", False))
 
     print("\n=== Thinking Check ===")
-    print("uses_chat_template: False")
-    print("passes_enable_thinking: False")
+    print(f"uses_chat_template: {uses_chat_template}")
+    print(f"enable_thinking_config: {enable_thinking}")
     print(f"tokenizer_template_mentions_enable_thinking: {'enable_thinking' in chat_template_text}")
     print(f"output_contains_think_tags: {'<think' in output_lower or '</think>' in output_lower}")
-    print("note: this probe and the training runtime pass a raw prompt through tokenizer(...), so thinking is not explicitly enabled or disabled by this code.")
+    print("note: when the tokenizer has a chat template, this code applies it and passes enable_thinking from the model config.")
 
 
 def main() -> None:
@@ -87,6 +97,7 @@ def main() -> None:
         context_threshold_tokens=config.runtime.context_threshold_tokens,
     )
     prompt = runtime._build_runtime_prompt(state)
+    model_prompt = format_prompt_for_display(generator, prompt)
     raw_output = generator.generate(prompt)
 
     print("=== Sample ===")
@@ -98,7 +109,7 @@ def main() -> None:
 
     if not args.hide_prompt:
         print("\n=== Prompt Sent To Model ===")
-        print(prompt)
+        print(model_prompt)
 
     print("\n=== Raw Model Output ===")
     print(raw_output)
@@ -106,11 +117,18 @@ def main() -> None:
     print_thinking_diagnostics(generator, raw_output)
 
     print("\n=== JSON Format Check ===")
-    try:
-        parsed = json.loads(raw_output)
-    except json.JSONDecodeError as exc:
-        print(f"invalid_json: {exc}")
+    parsed_tool_call = parse_model_tool_call(raw_output)
+    if parsed_tool_call is None:
+        try:
+            json.loads(raw_output)
+        except json.JSONDecodeError as exc:
+            print(f"invalid_json: {exc}")
+        else:
+            print("invalid_tool_call: parsed JSON does not contain tool_name and object arguments")
         return
+    parsed, normalized_output = parsed_tool_call
+    if raw_output.strip() != normalized_output:
+        print("accepted_after_cleanup: True")
     print(json.dumps(parsed, indent=2, ensure_ascii=False))
     tool_name = parsed.get("tool_name") if isinstance(parsed, dict) else None
     arguments = parsed.get("arguments") if isinstance(parsed, dict) else None

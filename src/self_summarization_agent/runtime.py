@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -7,6 +8,37 @@ from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCallRecord, ToolRound
 from self_summarization_agent.prompts import build_system_prompt
 from self_summarization_agent.rewards import apply_malformed_tool_penalty, apply_terminal_reward
+
+
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _strip_thinking_blocks(text: str) -> str:
+    return re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _iter_json_objects(text: str):
+    cleaned = _strip_thinking_blocks(text).strip()
+    for index, char in enumerate(cleaned):
+        if char != "{":
+            continue
+        try:
+            parsed, _ = _JSON_DECODER.raw_decode(cleaned[index:])
+        except json.JSONDecodeError:
+            continue
+        yield parsed
+
+
+def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
+    for candidate in _iter_json_objects(raw_output):
+        if not isinstance(candidate, dict):
+            continue
+        tool_name = candidate.get("tool_name")
+        arguments = candidate.get("arguments")
+        if isinstance(tool_name, str) and isinstance(arguments, dict):
+            normalized = {"tool_name": tool_name, "arguments": arguments}
+            return normalized, json.dumps(normalized, ensure_ascii=False)
+    return None
 
 
 @dataclass(slots=True)
@@ -82,7 +114,9 @@ class EpisodeRuntime:
         pieces.append(
             "### NEXT_ACTION\n"
             "Return exactly one JSON object for the next tool call. "
-            "Do not include labels, markdown, explanations, or any text before or after the JSON object."
+            "After any thinking, the final visible action must be only the JSON object. "
+            "Do not include labels, markdown, code fences, explanations, or any text before or after the final JSON object. "
+            "Return one action only."
         )
         return "\n".join(pieces)
 
@@ -170,11 +204,8 @@ class EpisodeRuntime:
             acting_prompt = self._build_runtime_prompt(state)
             context_manager.assert_fits(acting_prompt)
             raw_output = self.model.generate(acting_prompt)
-            try:
-                payload = json.loads(raw_output)
-                tool_name = payload["tool_name"]
-                arguments = payload["arguments"]
-            except (json.JSONDecodeError, KeyError, TypeError):
+            parsed_tool_call = parse_model_tool_call(raw_output)
+            if parsed_tool_call is None:
                 return self._malformed_result(
                     state,
                     query_id,
@@ -183,16 +214,9 @@ class EpisodeRuntime:
                     tool_call_counts,
                     turn_records,
                 )
-
-            if not isinstance(tool_name, str) or not isinstance(arguments, dict):
-                return self._malformed_result(
-                    state,
-                    query_id,
-                    summary_turns,
-                    retrieved_docids,
-                    tool_call_counts,
-                    turn_records,
-                )
+            payload, normalized_output = parsed_tool_call
+            tool_name = payload["tool_name"]
+            arguments = payload["arguments"]
 
             if tool_name == "finish":
                 answer = arguments.get("answer")
@@ -211,7 +235,7 @@ class EpisodeRuntime:
                         "turn_id": "final-answer",
                         "kind": "final_answer",
                         "prompt": acting_prompt,
-                        "completion": raw_output,
+                        "completion": normalized_output,
                     }
                 )
                 return RuntimeResult(
@@ -270,8 +294,8 @@ class EpisodeRuntime:
 
             state.rounds.append(
                 ToolRound(
-                    assistant_message=Message(role="assistant", content=raw_output),
-                    tool_call=ToolCallRecord(tool_name=tool_name, arguments=arguments, raw_output=raw_output),
+                    assistant_message=Message(role="assistant", content=normalized_output),
+                    tool_call=ToolCallRecord(tool_name=tool_name, arguments=arguments, raw_output=normalized_output),
                     tool_result=Message(role="tool", content=tool_result),
                 )
             )
