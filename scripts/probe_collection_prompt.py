@@ -49,6 +49,20 @@ def choose_example(examples, *, sample_index: int | None, seed: int):
     return examples[selected_index], selected_index
 
 
+def print_thinking_diagnostics(generator, raw_output: str) -> None:
+    tokenizer = getattr(generator, "tokenizer", None)
+    chat_template = getattr(tokenizer, "chat_template", None)
+    chat_template_text = chat_template if isinstance(chat_template, str) else ""
+    output_lower = raw_output.lower()
+
+    print("\n=== Thinking Check ===")
+    print("uses_chat_template: False")
+    print("passes_enable_thinking: False")
+    print(f"tokenizer_template_mentions_enable_thinking: {'enable_thinking' in chat_template_text}")
+    print(f"output_contains_think_tags: {'<think' in output_lower or '</think>' in output_lower}")
+    print("note: this probe and the training runtime pass a raw prompt through tokenizer(...), so thinking is not explicitly enabled or disabled by this code.")
+
+
 def main() -> None:
     args = parse_args()
     config = load_train_config(args.config, parse_cli_overrides(args.overrides))
@@ -88,6 +102,8 @@ def main() -> None:
 
     print("\n=== Raw Model Output ===")
     print(raw_output)
+
+    print_thinking_diagnostics(generator, raw_output)
 
     print("\n=== JSON Format Check ===")
     try:

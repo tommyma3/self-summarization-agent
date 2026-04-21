@@ -71,12 +71,13 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert result.status == "completed"
     assert result.final_answer == "done"
     assert len(model.prompts) == 2
-    assert '"label": "SYSTEM"' in model.prompts[1]
+    assert "### SYSTEM" in model.prompts[1]
     assert "exactly one JSON object" in model.prompts[1]
     assert "Available tools:" in model.prompts[1]
-    assert '{"label": "USER", "content": "question"}' in model.prompts[1]
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"q\\"}}"}' in model.prompts[1]
-    assert '{"label": "TOOL_RESULT", "content": "[\\"doc-1\\"]"}' in model.prompts[1]
+    assert "### USER\nquestion" in model.prompts[1]
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in model.prompts[1]
+    assert '### TOOL_RESULT\n["doc-1"]' in model.prompts[1]
+    assert "### NEXT_ACTION" in model.prompts[1]
 
 
 def test_runtime_attributes_malformed_penalty_to_second_tool_turn() -> None:
@@ -124,15 +125,16 @@ def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> N
     assert result.status == "completed"
     assert len(model.prompts) == 4
     acting_prompt_after_summary = model.prompts[3]
-    assert '"label": "SYSTEM"' in acting_prompt_after_summary
+    assert "### SYSTEM" in acting_prompt_after_summary
     assert "exactly one JSON object" in acting_prompt_after_summary
     assert "Available tools:" in acting_prompt_after_summary
-    assert '{"label": "USER", "content": "question"}' in acting_prompt_after_summary
-    assert '{"label": "SUMMARY", "content": "summary of old-doc only"}' in acting_prompt_after_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"first\\"}}"}' not in acting_prompt_after_summary
-    assert '{"label": "TOOL_RESULT", "content": "[\\"old-doc\\"]"}' not in acting_prompt_after_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"second\\"}}"}' in acting_prompt_after_summary
-    assert '{"label": "TOOL_RESULT", "content": "[\\"trigger-doc\\"]"}' in acting_prompt_after_summary
+    assert "### USER\nquestion" in acting_prompt_after_summary
+    assert "### SUMMARY\nsummary of old-doc only" in acting_prompt_after_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' not in acting_prompt_after_summary
+    assert '### TOOL_RESULT\n["old-doc"]' not in acting_prompt_after_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' in acting_prompt_after_summary
+    assert '### TOOL_RESULT\n["trigger-doc"]' in acting_prompt_after_summary
+    assert "### NEXT_ACTION" in acting_prompt_after_summary
 
 
 def test_runtime_summarizes_two_of_three_raw_rounds_and_leaves_newest_raw() -> None:
@@ -171,10 +173,10 @@ def test_runtime_summarizes_two_of_three_raw_rounds_and_leaves_newest_raw() -> N
     assert '{"query": "second"}' in summary_prompt
     assert '{"query": "third"}' not in summary_prompt
     acting_prompt_after_summary = model.prompts[4]
-    assert '{"label": "SUMMARY", "content": "summary of first two rounds"}' in acting_prompt_after_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"first\\"}}"}' not in acting_prompt_after_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"second\\"}}"}' not in acting_prompt_after_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"third\\"}}"}' in acting_prompt_after_summary
+    assert "### SUMMARY\nsummary of first two rounds" in acting_prompt_after_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' not in acting_prompt_after_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' not in acting_prompt_after_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "third"}}' in acting_prompt_after_summary
 
 
 def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None:
@@ -199,9 +201,9 @@ def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None
     assert result.summary_turns == []
     assert len(model.prompts) == 2
     acting_prompt = model.prompts[1]
-    assert '{"label": "SUMMARY",' not in acting_prompt
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"q\\"}}"}' in acting_prompt
-    assert '{"label": "TOOL_RESULT", "content": "[\\"doc-1\\"]"}' in acting_prompt
+    assert "### SUMMARY" not in acting_prompt
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in acting_prompt
+    assert '### TOOL_RESULT\n["doc-1"]' in acting_prompt
 
 
 def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
@@ -234,11 +236,11 @@ def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
     assert result.summary_turns == []
     assert len(model.prompts) == 4
     acting_prompt_after_empty_summary = model.prompts[3]
-    assert '{"label": "SUMMARY",' not in acting_prompt_after_empty_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"first\\"}}"}' in acting_prompt_after_empty_summary
-    assert '{"label": "TOOL_RESULT", "content": "[\\"old-doc\\"]"}' in acting_prompt_after_empty_summary
-    assert '{"label": "ASSISTANT_TOOL_CALL", "content": "{\\"tool_name\\": \\"search\\", \\"arguments\\": {\\"query\\": \\"second\\"}}"}' in acting_prompt_after_empty_summary
-    assert '{"label": "TOOL_RESULT", "content": "[\\"trigger-doc\\"]"}' in acting_prompt_after_empty_summary
+    assert "### SUMMARY" not in acting_prompt_after_empty_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' in acting_prompt_after_empty_summary
+    assert '### TOOL_RESULT\n["old-doc"]' in acting_prompt_after_empty_summary
+    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' in acting_prompt_after_empty_summary
+    assert '### TOOL_RESULT\n["trigger-doc"]' in acting_prompt_after_empty_summary
 
 
 def test_runtime_records_trainable_summary_and_final_answer_turns() -> None:

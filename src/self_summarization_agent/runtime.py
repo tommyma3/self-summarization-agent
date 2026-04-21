@@ -31,7 +31,7 @@ class EpisodeRuntime:
     token_counter: Callable[[str], int] = field(default=lambda text: len(text.split()))
 
     def _build_transcript_block(self, label: str, content: str) -> str:
-        return json.dumps({"label": label, "content": content})
+        return f"### {label}\n{content}"
 
     def _raw_tail_rounds(self, state: EpisodeState) -> list[ToolRound]:
         return state.rounds[state.summarized_round_count :]
@@ -79,6 +79,11 @@ class EpisodeRuntime:
                     self._build_transcript_block("TOOL_RESULT", round_record.tool_result.content),
                 ]
             )
+        pieces.append(
+            "### NEXT_ACTION\n"
+            "Return exactly one JSON object for the next tool call. "
+            "Do not include labels, markdown, explanations, or any text before or after the JSON object."
+        )
         return "\n".join(pieces)
 
     def _next_tool_turn_id(self, state: EpisodeState) -> str:
