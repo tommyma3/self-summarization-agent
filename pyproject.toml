@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "datasets>=4.0.0",
+  "faiss-cpu>=1.13.2",
   "pyserini>=2.0.0",
   "PyYAML>=6.0.2",
+  "tevatron>=0.1.0",
   "torch>=2.7.0",
   "transformers>=4.57.0",
 ]
@@ -26,3 +28,13 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
