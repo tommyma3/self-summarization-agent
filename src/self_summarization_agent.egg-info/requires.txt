@@ -1,7 +1,10 @@
 datasets>=4.0.0
 faiss-cpu>=1.13.2
+peft>=0.19.1
 pyserini>=2.0.0
 PyYAML>=6.0.2
-tevatron>=0.1.0
+qwen-omni-utils>=0.0.9
+tevatron
 torch>=2.7.0
+torchvision>=0.26.0
 transformers>=4.57.0

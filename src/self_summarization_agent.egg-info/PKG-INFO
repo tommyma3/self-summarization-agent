@@ -6,10 +6,13 @@ Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: datasets>=4.0.0
 Requires-Dist: faiss-cpu>=1.13.2
+Requires-Dist: peft>=0.19.1
 Requires-Dist: pyserini>=2.0.0
 Requires-Dist: PyYAML>=6.0.2
-Requires-Dist: tevatron>=0.1.0
+Requires-Dist: qwen-omni-utils>=0.0.9
+Requires-Dist: tevatron
 Requires-Dist: torch>=2.7.0
+Requires-Dist: torchvision>=0.26.0
 Requires-Dist: transformers>=4.57.0
 
 # Self-Summarization Agent

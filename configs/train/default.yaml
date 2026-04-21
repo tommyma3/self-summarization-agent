@@ -1,11 +1,11 @@
 experiment:
   name: qwen-bcplus-train
   seed: 7
-  output_root: .
-  bc_plus_root: ./bc-plus
+  output_root: /124090467/self-summarization-agent/
+  bc_plus_root: /124090467/self-summarization-agent/bc-plus
 
 dataset:
-  decrypted_path: ./bc-plus/data/browsecomp_plus_decrypted.jsonl
+  decrypted_path: /124090467/self-summarization-agent//bc-plus/data/browsecomp_plus_decrypted.jsonl
   offset: 0
   limit: 128
   shuffle: true
@@ -13,7 +13,7 @@ dataset:
 retrieval:
   backend: faiss
   top_k: 5
-  index_path: ./bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
+  index_path: /124090467/self-summarization-agent/bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
   model_name: /124090467/Qwen/Qwen3-Embedding-8B
   normalize: true
   pooling: eos
