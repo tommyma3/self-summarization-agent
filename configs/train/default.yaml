@@ -50,7 +50,7 @@ judge:
 training:
   epochs: 10
   steps: 10
-  group_size: 2
+  group_size: 4
   learning_rate: 1.0e-6
   checkpoint_interval: 5
   eval_interval: 0
