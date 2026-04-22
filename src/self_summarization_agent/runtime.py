@@ -11,14 +11,34 @@ from self_summarization_agent.rewards import apply_malformed_tool_penalty, apply
 
 
 _JSON_DECODER = json.JSONDecoder()
+_THINK_END_RE = re.compile(r"</think\s*>", flags=re.IGNORECASE)
+_THINK_START_RE = re.compile(r"^\s*<think\b[^>]*>", flags=re.IGNORECASE)
 
 
-def _strip_thinking_blocks(text: str) -> str:
-    return re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+@dataclass(frozen=True, slots=True)
+class SummaryExtraction:
+    thinking: str
+    summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class ThinkingExtraction:
+    thinking: str
+    remainder: str
+
+
+def _extract_completed_thinking(raw_output: str) -> ThinkingExtraction | None:
+    think_end = _THINK_END_RE.search(raw_output)
+    if think_end is None:
+        return None
+    thinking = raw_output[: think_end.start()]
+    thinking = _THINK_START_RE.sub("", thinking).strip()
+    remainder = raw_output[think_end.end() :].strip()
+    return ThinkingExtraction(thinking=thinking, remainder=remainder)
 
 
 def _iter_json_objects(text: str):
-    cleaned = _strip_thinking_blocks(text).strip()
+    cleaned = text.strip()
     for index, char in enumerate(cleaned):
         if char != "{":
             continue
@@ -30,15 +50,26 @@ def _iter_json_objects(text: str):
 
 
 def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
-    for candidate in _iter_json_objects(raw_output):
+    extracted = _extract_completed_thinking(raw_output)
+    if extracted is None:
+        return None
+    for candidate in _iter_json_objects(extracted.remainder):
         if not isinstance(candidate, dict):
-            continue
+            return None
         tool_name = candidate.get("tool_name")
         arguments = candidate.get("arguments")
         if isinstance(tool_name, str) and isinstance(arguments, dict):
             normalized = {"tool_name": tool_name, "arguments": arguments}
             return normalized, json.dumps(normalized, ensure_ascii=False)
+        return None
     return None
+
+
+def extract_summary_output(raw_output: str) -> SummaryExtraction:
+    extracted = _extract_completed_thinking(raw_output)
+    if extracted is None:
+        return SummaryExtraction(thinking="", summary=raw_output.strip())
+    return SummaryExtraction(thinking=extracted.thinking, summary=extracted.remainder)
 
 
 @dataclass(slots=True)
@@ -316,9 +347,10 @@ class EpisodeRuntime:
                 summary_generation_prompt = context_manager.build_summary_context(summary_state)
                 context_manager.assert_fits(summary_generation_prompt)
                 generated_summary = self.model.generate(summary_generation_prompt)
-                if not generated_summary.strip():
+                summary_extraction = extract_summary_output(generated_summary)
+                if not summary_extraction.summary:
                     continue
-                state.latest_summary = generated_summary
+                state.latest_summary = summary_extraction.summary
                 state.summarized_round_count += retired_count
                 state.summary_count += 1
                 summary_turn_id = f"summary-{state.summary_count}"
@@ -330,5 +362,7 @@ class EpisodeRuntime:
                         "kind": "summary",
                         "prompt": summary_generation_prompt,
                         "completion": generated_summary,
+                        "thinking": summary_extraction.thinking,
+                        "summary": summary_extraction.summary,
                     }
                 )

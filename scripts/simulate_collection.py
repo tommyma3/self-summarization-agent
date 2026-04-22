@@ -20,7 +20,7 @@ from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir, utc_timestamp
 from self_summarization_agent.models import EpisodeState, Message, ToolCallRecord, ToolRound
-from self_summarization_agent.runtime import EpisodeRuntime, parse_model_tool_call
+from self_summarization_agent.runtime import EpisodeRuntime, extract_summary_output, parse_model_tool_call
 
 
 def parse_args() -> argparse.Namespace:
@@ -311,13 +311,26 @@ def trace_collection(
             )
             generated_summary = runtime.model.generate(summary_prompt)
             write_section(handle, f"Summary {state.summary_count + 1} Model Output", generated_summary)
-            if not generated_summary.strip():
-                write_section(handle, f"Summary {state.summary_count + 1} Skipped", "reason: model returned an empty summary\n")
+            summary_extraction = extract_summary_output(generated_summary)
+            if not summary_extraction.summary:
+                write_section(handle, f"Summary {state.summary_count + 1} Skipped", "reason: model returned an empty summary body\n")
                 continue
 
-            state.latest_summary = generated_summary
+            state.latest_summary = summary_extraction.summary
             state.summarized_round_count += retired_count
             state.summary_count += 1
+            write_section(
+                handle,
+                f"Summary {state.summary_count} Extracted",
+                json.dumps(
+                    {
+                        "thinking": summary_extraction.thinking,
+                        "summary": summary_extraction.summary,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            )
             write_section(
                 handle,
                 f"Summary {state.summary_count} Applied",

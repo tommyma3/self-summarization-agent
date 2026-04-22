@@ -4,6 +4,10 @@ from self_summarization_agent.models import RuntimeResult
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel
 
 
+def tool_output(json_text: str) -> str:
+    return f"<think>thinking</think>\n{json_text}"
+
+
 def test_build_run_record_matches_browsecomp_plus_shape() -> None:
     result = RuntimeResult(
         query_id="q1",
@@ -35,11 +39,11 @@ def test_runtime_result_export_populates_tool_call_counts() -> None:
     backend = FakeBackend(search_index={"clue": ["doc-1"]}, documents={"doc-1": "fact"})
     model = ScriptedModel(
         outputs=[
-            '{"tool_name": "search", "arguments": {"query": "clue"}}',
-            '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            tool_output('{"tool_name": "search", "arguments": {"query": "clue"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=256)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
 
     result = runtime.run(query_id="q1", user_prompt="question")
     record = build_run_record(result)
@@ -54,12 +58,12 @@ def test_runtime_export_tracks_all_retrieved_documents_from_search_and_get_docum
     backend = FakeBackend(search_index={"clue": ["doc-1"]}, documents={"doc-1": "fact"})
     model = ScriptedModel(
         outputs=[
-            '{"tool_name": "search", "arguments": {"query": "clue"}}',
-            '{"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}',
-            '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            tool_output('{"tool_name": "search", "arguments": {"query": "clue"}}'),
+            tool_output('{"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=256)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
 
     result = runtime.run(query_id="q1", user_prompt="question")
     record = build_run_record(result)

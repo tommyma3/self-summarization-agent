@@ -5,6 +5,10 @@ from self_summarization_agent.export import build_run_record
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel
 
 
+def _tool_output(json_text: str) -> str:
+    return f"<think>select next action</think>\n{json_text}"
+
+
 def build_smoke_run_record() -> dict[str, object]:
     backend = FakeBackend(
         search_index={"smoke question": ["smoke-doc"]},
@@ -12,12 +16,12 @@ def build_smoke_run_record() -> dict[str, object]:
     )
     model = ScriptedModel(
         outputs=[
-            '{"tool_name": "search", "arguments": {"query": "smoke question"}}',
-            '{"tool_name": "get_document", "arguments": {"doc_id": "smoke-doc"}}',
-            '{"tool_name": "finish", "arguments": {"answer": "smoke answer"}}',
+            _tool_output('{"tool_name": "search", "arguments": {"query": "smoke question"}}'),
+            _tool_output('{"tool_name": "get_document", "arguments": {"doc_id": "smoke-doc"}}'),
+            _tool_output('{"tool_name": "finish", "arguments": {"answer": "smoke answer"}}'),
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=256)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
     result = runtime.run(query_id="smoke-q1", user_prompt="smoke question")
     return build_run_record(result)
 

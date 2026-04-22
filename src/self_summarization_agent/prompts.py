@@ -29,6 +29,9 @@ def build_summary_system_prompt() -> str:
 
 Your task is to summarize the previous research context so another step of the same agent can continue the task.
 Return only the summary text after thinking.
+Do not emit a JSON tool call.
+Do not call search, get_document, or finish.
+Do not include markdown fences, labels, or meta-commentary.
 """
 
 

@@ -33,6 +33,10 @@ class CyclingGenerator:
         return len(text.split())
 
 
+def tool_output(json_text: str) -> str:
+    return f"<think>thinking</think>\n{json_text}"
+
+
 @dataclass(slots=True)
 class FakeJudgeDecision:
     outcome: str
@@ -91,13 +95,13 @@ def test_run_launcher_writes_run_and_trajectory_artifacts(tmp_path: Path) -> Non
         dataset=DatasetConfig(limit=1),
         retrieval=RetrievalConfig(backend="faiss", index_path="unused"),
         model=ModelConfig(backend="transformers", model_path="unused"),
-        runtime=RuntimeConfig(context_threshold_tokens=100, max_context_tokens=256, tool_budget=4),
+        runtime=RuntimeConfig(context_threshold_tokens=1000, max_context_tokens=1024, tool_budget=4),
     )
     backend = FakeBackend(search_index={"question": ["doc-1"]}, documents={"doc-1": "fact"})
     generator = CyclingGenerator(
         [
-            '{"tool_name": "search", "arguments": {"query": "question"}}',
-            '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            tool_output('{"tool_name": "search", "arguments": {"query": "question"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
     examples = [QueryExample(query_id="q1", query="question")]
@@ -123,15 +127,15 @@ def test_train_launcher_writes_metrics_and_rollouts(tmp_path: Path) -> None:
         dataset=DatasetConfig(limit=1),
         retrieval=RetrievalConfig(backend="faiss", index_path="unused"),
         model=ModelConfig(backend="transformers", model_path="unused"),
-        runtime=RuntimeConfig(context_threshold_tokens=100, max_context_tokens=256, tool_budget=4),
+        runtime=RuntimeConfig(context_threshold_tokens=1000, max_context_tokens=1024, tool_budget=4),
         judge=JudgeConfig(enabled=True),
         training=TrainingConfig(steps=1, batch_size=1, group_size=2, checkpoint_interval=1),
     )
     backend = FakeBackend(search_index={"question": ["doc-1"]}, documents={"doc-1": "fact"})
     generator = CyclingGenerator(
         [
-            '{"tool_name": "search", "arguments": {"query": "question"}}',
-            '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            tool_output('{"tool_name": "search", "arguments": {"query": "question"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
     examples = [QueryExample(query_id="q1", query="question", answer="done")]
