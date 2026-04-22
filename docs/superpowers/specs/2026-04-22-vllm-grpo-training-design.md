@@ -8,7 +8,7 @@ The training loop should use vLLM for fast rollout generation while preserving t
 
 ## Decision
 
-Use offline vLLM for rollout collection and keep Transformers as the trainable policy/logprob engine. Run them in separate subprocesses so each phase can use all four GPUs and release memory cleanly before the next phase starts.
+Use offline vLLM for rollout collection and use a distributed long-context Transformers trainer for the policy/logprob update. Run them in separate subprocesses so each phase can use all four GPUs and release memory cleanly before the next phase starts.
 
 The training loop should keep the current high-level cadence: process the full configured training set, then apply one gradient step.
 
@@ -20,7 +20,7 @@ The training loop should keep the current high-level cadence: process the full c
 6. Store rollout records as text, rewards, and metadata.
 7. Compute group-relative advantages within each query group.
 8. Flatten trainable turns across all query groups in the epoch.
-9. Recompute current-policy logprobs in the Transformers trainer with microbatching and gradient accumulation.
+9. Recompute current-policy logprobs in a 4-rank FSDP2 plus context-parallel trainer with microbatching and gradient accumulation.
 10. Apply exactly one optimizer step after all configured training queries have been processed.
 11. Discard the rollouts.
 
@@ -31,7 +31,7 @@ This remains on-policy because all rollouts for the update are generated from th
 The default hardware layout should be phase-based:
 
 - Rollout phase: GPUs 0-3 run offline vLLM inference.
-- Training phase: GPUs 0-3 run the Transformers trainer and optimizer.
+- Training phase: GPUs 0-3 run the distributed Transformers trainer with FSDP2, context parallelism, activation checkpointing, and optimizer state sharding.
 
 The two phases should not coexist in one long-lived process. A parent launcher should run rollout collection in one subprocess, wait for it to exit, then run the training step in a second subprocess. This avoids contention between vLLM KV cache allocation and training memory, and it avoids relying on partial CUDA cleanup inside one Python interpreter.
 
@@ -87,9 +87,18 @@ The batched collector is an optimization, not required to validate the process-i
 
 ### Trainer
 
-Keep `TransformersPolicyTrainer` as the owner of trainable weights, optimizer state, logprob recomputation, gradient clipping, and checkpoint saving.
+Replace the current single-process `TransformersPolicyTrainer` with a distributed full-training path. The training subprocess should launch one rank per GPU and use:
+
+- FSDP2 for parameter, gradient, and optimizer-state sharding.
+- Context parallelism across the four ranks for 24k-26k token sequence activations.
+- Activation checkpointing to reduce residual activation memory.
+- Microbatch size of one trainable turn, with gradient accumulation across the full rollout set.
 
 vLLM should not be used for gradient computation. It only generates candidate trajectories. The training subprocess should load the checkpoint used by rollout collection, consume the rollout JSONL, compute the single update, and save the next checkpoint.
+
+The trainer must not gather full-sequence logits onto one rank. Each rank should compute logprobs/loss for its local context-parallel sequence shard, then reduce scalar loss or numerator/denominator statistics across ranks.
+
+The current `device_map="balanced_low_0"` loading mode should not be used for the long-context full-training path. Context parallelism is a distributed training strategy, not a model placement heuristic.
 
 ### Parent Launcher
 
@@ -128,8 +137,13 @@ rollout:
   do_sample: true
 
 training:
-  backend: transformers
+  backend: fsdp2_context_parallel
   gpu_ids: [0, 1, 2, 3]
+  fsdp_version: 2
+  context_parallel_size: 4
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  activation_checkpointing: true
   group_size: 8
   gradient_accumulation_microbatch_size: 1
 ```
@@ -152,6 +166,29 @@ optimizer.step()
 ```
 
 This preserves the current "one gradient step after all training sequences" behavior while keeping GPU memory bounded. Rollout artifacts can be stored as JSONL text; only the active microbatch needs a live computation graph.
+
+### Context-Parallel Logprobs
+
+For 24k-26k token trainable turns, context parallelism should split the sequence across four ranks. A 26k-token sequence becomes roughly 6.5k tokens per rank for activation-heavy work.
+
+The loss path must be context-parallel aware:
+
+- manually create shifted input/target tensors before context sharding
+- shard `input_ids`, labels, completion masks, and advantage masks consistently along the sequence dimension
+- run the forward pass under the context-parallel/FSDP2 runtime
+- compute token logprobs only for local shard positions
+- mask prompt tokens and keep only completion-token logprobs
+- reduce local summed logprob and token count across ranks
+- multiply the reduced mean logprob by the sample advantage
+
+This avoids the current memory-heavy pattern:
+
+```python
+logits = outputs.logits[:, :-1, :]
+log_probs = torch.log_softmax(logits, dim=-1)
+```
+
+The implementation should use a memory-conscious cross-entropy/logprob path that gathers only target-token logprobs, not a persistent full `seq_len x vocab_size` `log_probs` tensor.
 
 ## Weight Synchronization
 
@@ -205,7 +242,9 @@ for iteration:
         exit and release GPUs
 
     train_one_step subprocess:
-        load current_checkpoint with Transformers on GPUs 0-3
+        launch 4 distributed ranks on GPUs 0-3
+        load current_checkpoint with FSDP2
+        enable context parallelism with cp_size=4
         read rollout JSONL for current_checkpoint
         group samples by query
         compute group-relative advantages
@@ -227,6 +266,7 @@ Evaluation can run less frequently than training. It does not need to be part of
 - If all rollouts in a full training pass are malformed or produce no trainable samples, skip the optimizer update and log the skipped step.
 - If a query group has zero reward variance, its advantages should remain centered at zero and contribute no gradient signal.
 - If the number of contributing samples is zero after filtering zero-advantage samples, skip backward and log a zero-loss update record.
+- If context-parallel sequence sharding cannot preserve causal label alignment, fail fast before running the optimizer step.
 
 ## Testing
 
@@ -236,7 +276,8 @@ Add tests around the orchestration boundaries rather than requiring vLLM in unit
 - training step processes all configured training queries and `group_size` rollouts per query
 - advantages are normalized per query group, not globally
 - exactly one optimizer update is applied per full training pass
-- trainer backpropagates through microbatches while applying one optimizer step at the end
+- FSDP2/context-parallel trainer backpropagates through microbatches while applying one optimizer step at the end
+- context-parallel loss computation masks prompt tokens and reduces completion logprob statistics across ranks
 - rollout samples are discarded after the update
 - offline vLLM rollout subprocess writes checkpoint-tagged JSONL artifacts
 - parent launcher does not start training if rollout collection fails
@@ -251,3 +292,4 @@ Integration testing with real vLLM should be optional and gated by environment v
 - `eval_interval` should become effective so full train/eval accuracy is not recomputed after every optimizer step unless explicitly requested.
 - Rollout artifacts should keep the policy checkpoint or step id used to generate them, so stale rollout bugs are visible in logs.
 - The current trainer accumulates `losses` as live tensors before one backward call; that must be replaced with streaming gradient accumulation before using 24k-26k token sequences.
+- The current trainer should not be extended with `device_map="balanced_low_0"` for this path; implement a separate distributed trainer entrypoint.
