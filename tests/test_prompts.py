@@ -1,5 +1,5 @@
 from self_summarization_agent.models import EpisodeState
-from self_summarization_agent.prompts import build_summary_prompt, build_system_prompt
+from self_summarization_agent.prompts import build_summary_prompt, build_summary_system_prompt, build_system_prompt
 
 
 def test_build_system_prompt_mentions_tools() -> None:
@@ -20,6 +20,14 @@ def test_build_summary_prompt_mentions_doc_ids() -> None:
     prompt = build_summary_prompt()
     assert "doc_id" in prompt
     assert "essential information" in prompt
+
+
+def test_build_summary_system_prompt_replaces_tool_call_contract() -> None:
+    prompt = build_summary_system_prompt()
+    assert "summarize the previous research context" in prompt
+    assert "Return only the summary text" in prompt
+    assert "Do not emit a JSON tool call" in prompt
+    assert "exactly one JSON object" not in prompt
 
 
 def test_episode_state_starts_with_empty_summary() -> None:

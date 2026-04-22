@@ -221,6 +221,10 @@ def test_runtime_summarizes_two_of_three_raw_rounds_and_leaves_newest_raw() -> N
     assert result.summary_turns == ["summary-1"]
     assert len(model.prompts) == 5
     summary_prompt = model.prompts[3]
+    assert "summarize the previous research context" in summary_prompt
+    assert "Do not emit a JSON tool call" in summary_prompt
+    assert "exactly one JSON object" not in summary_prompt
+    assert "Available tools:" not in summary_prompt
     assert '{"query": "first"}' in summary_prompt
     assert '{"query": "second"}' in summary_prompt
     assert '{"query": "third"}' not in summary_prompt

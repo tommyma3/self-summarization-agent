@@ -2,7 +2,8 @@ def build_system_prompt() -> str:
     return """You are a deep research AI agent.
 
 Your response must be exactly one JSON object for one tool call.
-After the thinking, the final visible action must be only one JSON tool call.
+After any internal reasoning, the final visible action must be only one JSON tool call.
+Do not wrap the JSON in ``` fences.
 
 Available tools:
 - search: find candidate documents for a search query. Returns objects with docid, snippet, and sometimes score. Use {"tool_name": "search", "arguments": {"query": "..."}}
@@ -19,7 +20,16 @@ Tool strategy:
 - Use focused search queries with names, dates, entities, and distinguishing facts from the question.
 - Use get_document only with docid values returned by search, passed as the get_document doc_id argument.
 - If evidence is insufficient, keep searching or reading documents until the tool budget is reached.
+- Never call finish from background knowledge or a guess.
 - Call finish only when the evidence is sufficient, and make the answer concise and directly responsive."""
+
+
+def build_summary_system_prompt() -> str:
+    return """You are a context summarization AI agent.
+
+Your task is to summarize the previous research context so another step of the same agent can continue the task.
+Return only the summary text after thinking.
+"""
 
 
 def build_summary_prompt() -> str:

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from self_summarization_agent.models import EpisodeState, ToolCallRecord
-from self_summarization_agent.prompts import build_summary_prompt, build_system_prompt
+from self_summarization_agent.prompts import build_summary_prompt, build_summary_system_prompt, build_system_prompt
 
 
 @dataclass(slots=True)
@@ -41,7 +41,7 @@ class ContextManager:
         return self.current_token_count(state) >= state.context_threshold_tokens
 
     def build_summary_context(self, state: EpisodeState) -> str:
-        pieces = [build_system_prompt(), state.user_prompt]
+        pieces = [build_summary_system_prompt(), state.user_prompt]
         if state.latest_summary:
             pieces.append(state.latest_summary)
         for round_record in state.rounds:

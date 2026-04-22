@@ -1,5 +1,6 @@
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, ToolCallRecord, ToolRound
+from self_summarization_agent.prompts import build_summary_system_prompt, build_system_prompt
 
 
 def test_threshold_crossing_marks_summary_after_completed_round() -> None:
@@ -35,6 +36,8 @@ def test_pack_summary_input_uses_all_rounds_it_is_given() -> None:
     )
 
     packed = manager.build_summary_context(state)
+    assert packed.startswith(build_summary_system_prompt())
+    assert build_system_prompt() not in packed
     assert "older search" in packed
     assert '"query": "older"' in packed
     assert "latest search" in packed
