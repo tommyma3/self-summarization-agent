@@ -9,6 +9,7 @@ from self_summarization_agent.config import (
     JudgeConfig,
     ModelConfig,
     RetrievalConfig,
+    RolloutConfig,
     RunConfig,
     RuntimeConfig,
     TrainConfig,
@@ -96,6 +97,7 @@ def test_run_launcher_writes_run_and_trajectory_artifacts(tmp_path: Path) -> Non
         dataset=DatasetConfig(limit=1),
         retrieval=RetrievalConfig(backend="faiss", index_path="unused"),
         model=ModelConfig(backend="transformers", model_path="unused"),
+        rollout=RolloutConfig(),
         runtime=RuntimeConfig(context_threshold_tokens=1000, max_context_tokens=1024, tool_budget=4),
     )
     backend = FakeBackend(search_index={"question": ["doc-1"]}, documents={"doc-1": "fact"})

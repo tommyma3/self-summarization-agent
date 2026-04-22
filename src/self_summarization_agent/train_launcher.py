@@ -144,6 +144,12 @@ def train_experiment(
     seed_everything(config.experiment.seed)
     if config.model.backend.lower() == "vllm":
         raise NotImplementedError("Training with rollout backend='vllm' is reserved for a later swap. Use backend='transformers' for now.")
+    if config.training.backend.lower() != "transformers":
+        raise NotImplementedError(
+            "train_launcher supports only training.backend='transformers'. "
+            "Use self_summarization_agent.iteration_launcher for process-isolated vLLM rollout "
+            "and long-context distributed training backends."
+        )
 
     examples = examples or load_query_examples(
         config.experiment.bc_plus_root,

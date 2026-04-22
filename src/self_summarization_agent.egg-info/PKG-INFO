@@ -161,6 +161,7 @@ The practical workflow is:
 6. Inspect:
    - rollout JSONL under `artifacts/train/.../rollouts/`
    - `metrics.jsonl`
+   - `accuracy_history.jsonl`
    - checkpoints
 
 ## Minimal Runtime Integration Pattern
@@ -225,6 +226,7 @@ python -m self_summarization_agent.train_launcher --config configs/train/default
 Outputs:
 
 - `artifacts/train/<experiment_name>/metrics.jsonl`
+- `artifacts/train/<experiment_name>/accuracy_history.jsonl`
 - `artifacts/train/<experiment_name>/rollouts/step-xxxxx.jsonl`
 - `artifacts/train/<experiment_name>/checkpoints/...`
 - `artifacts/train/<experiment_name>/manifest.json`
@@ -232,12 +234,14 @@ Outputs:
 Typical overrides:
 
 ```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.steps=20
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.batch_size=4 --set training.group_size=4
+python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.epochs=20
+python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.group_size=4
+python scripts/plot_accuracy.py artifacts/train/qwen-bcplus-train/accuracy_history.jsonl
 ```
 
 Training notes:
 
+- the default training config uses queries 1-200 for training and 201-210 for evaluation
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - training currently expects `model.backend: transformers`

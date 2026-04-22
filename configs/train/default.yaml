@@ -35,6 +35,15 @@ model:
   trust_remote_code: false
   enable_thinking: true
 
+rollout:
+  backend: vllm_offline
+  gpu_ids: [0, 1, 2, 3]
+  tensor_parallel_size: 4
+  max_new_tokens: 8192
+  temperature: 0.7
+  top_p: 0.95
+  do_sample: true
+
 runtime:
   context_threshold_tokens: 24000
   max_context_tokens: 32768
@@ -48,9 +57,17 @@ judge:
   do_sample: false
 
 training:
+  backend: fsdp2_context_parallel
+  gpu_ids: [0, 1, 2, 3]
+  fsdp_version: 2
+  context_parallel_size: 4
+  tensor_parallel_size: 1
+  data_parallel_size: 1
+  activation_checkpointing: true
   epochs: 10
   steps: 10
   group_size: 4
+  gradient_accumulation_microbatch_size: 1
   learning_rate: 1.0e-6
   checkpoint_interval: 5
   eval_interval: 0

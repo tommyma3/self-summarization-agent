@@ -107,6 +107,7 @@ class VLLMGenerator:
     temperature: float
     top_p: float
     do_sample: bool
+    tensor_parallel_size: int = 1
     trust_remote_code: bool = False
     enable_thinking: bool = False
     tokenizer: Any = field(init=False)
@@ -123,7 +124,11 @@ class VLLMGenerator:
             self.model_path,
             trust_remote_code=self.trust_remote_code,
         )
-        self.llm = LLM(model=self.model_path, trust_remote_code=self.trust_remote_code)
+        self.llm = LLM(
+            model=self.model_path,
+            trust_remote_code=self.trust_remote_code,
+            tensor_parallel_size=self.tensor_parallel_size,
+        )
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
@@ -188,6 +193,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
+            tensor_parallel_size=model_config.tensor_parallel_size,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
         )

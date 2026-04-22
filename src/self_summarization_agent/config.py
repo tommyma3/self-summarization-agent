@@ -59,8 +59,20 @@ class ModelConfig:
     temperature: float = 0.0
     top_p: float = 1.0
     do_sample: bool = False
+    tensor_parallel_size: int = 1
     trust_remote_code: bool = False
     enable_thinking: bool = True
+
+
+@dataclass(slots=True)
+class RolloutConfig:
+    backend: str = "transformers"
+    gpu_ids: list[int] = field(default_factory=list)
+    tensor_parallel_size: int = 1
+    max_new_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    do_sample: bool | None = None
 
 
 @dataclass(slots=True)
@@ -81,10 +93,18 @@ class JudgeConfig:
 
 @dataclass(slots=True)
 class TrainingConfig:
+    backend: str = "transformers"
+    gpu_ids: list[int] = field(default_factory=list)
+    fsdp_version: int | None = None
+    context_parallel_size: int = 1
+    tensor_parallel_size: int = 1
+    data_parallel_size: int = 1
+    activation_checkpointing: bool = False
     epochs: int | None = None
     steps: int = 1
     batch_size: int = 1
     group_size: int = 2
+    gradient_accumulation_microbatch_size: int = 1
     learning_rate: float = 1e-6
     checkpoint_interval: int = 100
     eval_interval: int = 0
@@ -106,6 +126,7 @@ class TrainConfig:
     dataset: DatasetConfig
     retrieval: RetrievalConfig
     model: ModelConfig
+    rollout: RolloutConfig
     runtime: RuntimeConfig
     judge: JudgeConfig
     training: TrainingConfig
@@ -183,6 +204,7 @@ def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None)
         dataset=DatasetConfig(**_require_section(raw, "dataset")),
         retrieval=RetrievalConfig(**_require_section(raw, "retrieval")),
         model=ModelConfig(**_require_section(raw, "model")),
+        rollout=RolloutConfig(**_require_section(raw, "rollout")),
         runtime=RuntimeConfig(**_require_section(raw, "runtime")),
         judge=JudgeConfig(**_require_section(raw, "judge")),
         training=TrainingConfig(**_require_section(raw, "training")),

@@ -19,6 +19,10 @@ retrieval:
 model:
   backend: transformers
   model_path: model-dir
+rollout:
+  backend: vllm_offline
+  gpu_ids: [0, 1, 2, 3]
+  tensor_parallel_size: 4
 runtime:
   context_threshold_tokens: 32
   max_context_tokens: 64
@@ -60,6 +64,10 @@ runtime:
 judge:
   enabled: true
 training:
+  backend: fsdp2_context_parallel
+  gpu_ids: [0, 1, 2, 3]
+  fsdp_version: 2
+  context_parallel_size: 4
   steps: 3
   batch_size: 2
   group_size: 2
@@ -72,3 +80,8 @@ training:
     assert config.training.steps == 3
     assert config.training.batch_size == 2
     assert config.training.group_size == 2
+    assert config.rollout.backend == "vllm_offline"
+    assert config.rollout.gpu_ids == [0, 1, 2, 3]
+    assert config.rollout.tensor_parallel_size == 4
+    assert config.training.backend == "fsdp2_context_parallel"
+    assert config.training.context_parallel_size == 4
