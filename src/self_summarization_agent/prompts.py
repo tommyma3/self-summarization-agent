@@ -3,7 +3,6 @@ def build_system_prompt() -> str:
 
 Your response must be exactly one JSON object for one tool call.
 After any internal reasoning, the final visible action must be only one JSON tool call.
-Do not wrap the JSON in ``` fences.
 
 Available tools:
 - search: find candidate documents for a search query. Returns objects with docid, snippet, and sometimes score. Use {"tool_name": "search", "arguments": {"query": "..."}}
@@ -19,8 +18,7 @@ Tool strategy:
 - Start with search unless the answer is already fully supported by the conversation.
 - Use focused search queries with names, dates, entities, and distinguishing facts from the question.
 - Use get_document only with docid values returned by search, passed as the get_document doc_id argument.
-- If evidence is insufficient, keep searching or reading documents until the tool budget is reached.
-- Never call finish from background knowledge or a guess.
+- If evidence is insufficient, keep searching or reading documents.
 - Call finish only when the evidence is sufficient, and make the answer concise and directly responsive."""
 
 
@@ -29,9 +27,6 @@ def build_summary_system_prompt() -> str:
 
 Your task is to summarize the previous research context so another step of the same agent can continue the task.
 Return only the summary text after thinking.
-Do not emit a JSON tool call.
-Do not call search, get_document, or finish.
-Do not include markdown fences, labels, or meta-commentary.
 """
 
 
@@ -40,5 +35,5 @@ def build_summary_prompt() -> str:
         "Write a clean summary containing only the essential information needed "
         "to continue solving the task. Preserve normalized facts, current "
         "hypotheses, unresolved questions, and useful next steps. Keep "
-        "evidence-grounded facts tied to doc_id citations."
+        "evidence-grounded facts tied to doc_id citations. Keep the summary structured with bullet points. Use short sentences."
     )

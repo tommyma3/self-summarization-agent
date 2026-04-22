@@ -26,7 +26,7 @@ model:
   model_path: /124090467/Qwen/Qwen3.5-9B
   dtype: bfloat16
   device_map: auto
-  max_new_tokens: 4096
+  max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
   do_sample: true
@@ -40,7 +40,7 @@ runtime:
 
 judge:
   enabled: true
-  max_new_tokens: 2048
+  max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
   do_sample: false
