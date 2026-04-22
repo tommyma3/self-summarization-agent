@@ -94,7 +94,7 @@ Replace the current single-process `TransformersPolicyTrainer` with a distribute
 - Activation checkpointing to reduce residual activation memory.
 - Microbatch size of one trainable turn, with gradient accumulation across the full rollout set.
 
-vLLM should not be used for gradient computation. It only generates candidate trajectories. The training subprocess should load the checkpoint used by rollout collection, consume the rollout JSONL, compute the single update, and save the next checkpoint.
+vLLM should not be used for gradient computation. It only generates candidate trajectories. The training subprocess should load the checkpoint used by rollout collection, consume the rollout JSONL, compute the single update, and save the next checkpoint in a format that the next vLLM rollout subprocess can load.
 
 The trainer must not gather full-sequence logits onto one rank. Each rank should compute logprobs/loss for its local context-parallel sequence shard, then reduce scalar loss or numerator/denominator statistics across ranks.
 
@@ -113,6 +113,8 @@ for iteration:
 ```
 
 The checkpoint path is the synchronization contract between phases. The rollout artifact should record the checkpoint id or path used to generate it.
+
+After each successful training subprocess, the parent launcher should advance a `latest` checkpoint pointer to the newly saved checkpoint. The next rollout subprocess always loads that latest checkpoint.
 
 ### Config
 
@@ -194,17 +196,22 @@ The implementation should use a memory-conscious cross-entropy/logprob path that
 
 Because GRPO is on-policy, rollout weights must be current at the start of each full training pass that feeds one gradient step.
 
-### Phase 1: Process-Isolated Checkpoint Boundary
+### Phase 1: Latest-Checkpoint Handoff
 
-The first implementation should sync through process isolation and checkpoint files:
+The first implementation should sync through process isolation and checkpoint files. Training is the only phase that mutates weights. vLLM never receives in-memory weight updates; it always loads weights from the latest successful checkpoint.
 
-1. The parent launcher selects the current checkpoint.
+1. The parent launcher resolves `latest` to a concrete checkpoint path.
 2. The rollout subprocess loads that checkpoint into offline vLLM.
 3. The rollout subprocess writes JSONL artifacts tagged with that checkpoint id and exits.
-4. The training subprocess loads the same checkpoint with Transformers.
-5. The training subprocess consumes the rollout JSONL, applies one optimizer step, saves the next checkpoint, and exits.
+4. The training subprocess loads the same checkpoint with FSDP2/context parallelism.
+5. The training subprocess consumes the rollout JSONL, applies one optimizer step, writes the next checkpoint, and exits.
+6. The parent launcher verifies that the next checkpoint is complete and vLLM-loadable.
+7. The parent launcher atomically updates `latest` to the next checkpoint.
+8. The next rollout subprocess loads the updated `latest` checkpoint.
 
 This is simple and correct enough to validate the training loop. It pays model reload cost twice per iteration, but that cost is likely acceptable while rollout generation is the dominant bottleneck.
+
+The FSDP2 trainer may keep sharded training state internally, but each successful iteration must publish a consolidated model checkpoint or an equivalent Hugging Face/vLLM-compatible checkpoint directory for the next rollout phase. Optimizer and scheduler state can remain in a separate training-state checkpoint if needed.
 
 ### Phase 2: Batched Offline Collector
 
@@ -230,7 +237,7 @@ The target loop should be:
 
 ```text
 for iteration:
-    current_checkpoint = latest checkpoint
+    current_checkpoint = resolve latest checkpoint
 
     collect_rollouts_vllm subprocess:
         load current_checkpoint with offline vLLM on GPUs 0-3
@@ -252,7 +259,12 @@ for iteration:
         accumulate gradients across the full rollout set
         update Transformers policy once
         save next checkpoint
+        export consolidated vLLM-loadable checkpoint
         exit and release GPUs
+
+    parent launcher:
+        verify next checkpoint is complete
+        atomically update latest checkpoint pointer
 ```
 
 Evaluation can run less frequently than training. It does not need to be part of every gradient step, especially when a gradient step already covers the full configured training split.
@@ -261,7 +273,9 @@ Evaluation can run less frequently than training. It does not need to be part of
 
 - If vLLM returns an empty response, treat the rollout as malformed through the existing runtime path.
 - If the rollout subprocess fails, do not launch the training subprocess for that iteration.
-- If the training subprocess fails, do not mark the next checkpoint as current.
+- If the training subprocess fails, do not update the latest checkpoint pointer.
+- If the training subprocess writes only partial checkpoint files, do not update the latest checkpoint pointer.
+- If the consolidated model checkpoint is not vLLM-loadable, do not update the latest checkpoint pointer.
 - If the rollout artifact checkpoint id does not match the checkpoint loaded by the trainer, fail before mutating trainer state.
 - If all rollouts in a full training pass are malformed or produce no trainable samples, skip the optimizer update and log the skipped step.
 - If a query group has zero reward variance, its advantages should remain centered at zero and contribute no gradient signal.
@@ -281,6 +295,7 @@ Add tests around the orchestration boundaries rather than requiring vLLM in unit
 - rollout samples are discarded after the update
 - offline vLLM rollout subprocess writes checkpoint-tagged JSONL artifacts
 - parent launcher does not start training if rollout collection fails
+- parent launcher advances `latest` only after a complete vLLM-loadable checkpoint is written
 - trainer refuses rollout artifacts from a different checkpoint id
 
 Integration testing with real vLLM should be optional and gated by environment variables or a separate launcher.
@@ -291,5 +306,6 @@ Integration testing with real vLLM should be optional and gated by environment v
 - The existing `VLLMGenerator` can be used inside the rollout subprocess for the first version.
 - `eval_interval` should become effective so full train/eval accuracy is not recomputed after every optimizer step unless explicitly requested.
 - Rollout artifacts should keep the policy checkpoint or step id used to generate them, so stale rollout bugs are visible in logs.
+- Checkpoint writes should use a temporary directory plus atomic rename or a manifest-complete marker so vLLM never loads a partial checkpoint.
 - The current trainer accumulates `losses` as live tensors before one backward call; that must be replaced with streaming gradient accumulation before using 24k-26k token sequences.
 - The current trainer should not be extended with `device_map="balanced_low_0"` for this path; implement a separate distributed trainer entrypoint.
