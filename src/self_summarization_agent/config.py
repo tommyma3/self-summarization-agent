@@ -60,6 +60,7 @@ class ModelConfig:
     top_p: float = 1.0
     do_sample: bool = False
     tensor_parallel_size: int = 1
+    attention_backend: str | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = True
 
@@ -69,6 +70,7 @@ class RolloutConfig:
     backend: str = "transformers"
     gpu_ids: list[int] = field(default_factory=list)
     tensor_parallel_size: int = 1
+    attention_backend: str | None = "TORCH_SDPA"
     max_new_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None

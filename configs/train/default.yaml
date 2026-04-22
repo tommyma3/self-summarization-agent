@@ -39,6 +39,7 @@ rollout:
   backend: vllm_offline
   gpu_ids: [0, 1, 2, 3]
   tensor_parallel_size: 4
+  attention_backend: TORCH_SDPA
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95

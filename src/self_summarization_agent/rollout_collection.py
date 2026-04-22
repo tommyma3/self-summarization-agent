@@ -71,6 +71,7 @@ def collect_rollouts(
         if config.rollout.do_sample is not None
         else config.model.do_sample,
         tensor_parallel_size=config.rollout.tensor_parallel_size,
+        attention_backend=config.rollout.attention_backend,
     )
     generator = generator or build_generator(rollout_model_config)
     judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Any, Protocol
 
 import torch
@@ -108,6 +109,7 @@ class VLLMGenerator:
     top_p: float
     do_sample: bool
     tensor_parallel_size: int = 1
+    attention_backend: str | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = False
     tokenizer: Any = field(init=False)
@@ -115,6 +117,8 @@ class VLLMGenerator:
     _sampling_params_cls: Any = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.attention_backend:
+            os.environ["VLLM_ATTENTION_BACKEND"] = self.attention_backend
         try:
             from vllm import LLM, SamplingParams
         except ImportError as exc:
@@ -194,6 +198,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             top_p=top_p,
             do_sample=do_sample,
             tensor_parallel_size=model_config.tensor_parallel_size,
+            attention_backend=model_config.attention_backend,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
         )

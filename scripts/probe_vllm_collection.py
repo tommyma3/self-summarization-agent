@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 from dataclasses import replace
@@ -37,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", default=None, help="Override model.model_path.")
     parser.add_argument("--retrieval-backend", default=None, help="Override retrieval.backend.")
     parser.add_argument("--tensor-parallel-size", type=int, default=4, help="vLLM tensor parallel size.")
+    parser.add_argument(
+        "--attention-backend",
+        default="TORCH_SDPA",
+        help="vLLM attention backend. Defaults to TORCH_SDPA to avoid flash-attn.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override rollout max_new_tokens.")
     parser.add_argument("--temperature", type=float, default=None, help="Override rollout temperature.")
     parser.add_argument("--top-p", type=float, default=None, help="Override rollout top_p.")
@@ -94,6 +100,7 @@ def build_rollout_model_config(config: Any, args: argparse.Namespace):
         config.model,
         backend="vllm",
         tensor_parallel_size=args.tensor_parallel_size,
+        attention_backend=args.attention_backend,
         max_new_tokens=args.max_new_tokens
         if args.max_new_tokens is not None
         else (config.rollout.max_new_tokens if config.rollout.max_new_tokens is not None else config.model.max_new_tokens),
@@ -124,6 +131,8 @@ class DisabledJudge:
 
 def main() -> None:
     args = parse_args()
+    if args.attention_backend:
+        os.environ["VLLM_ATTENTION_BACKEND"] = args.attention_backend
     config = load_train_config(args.config, merge_overrides(args))
     seed = config.experiment.seed if args.seed is None else args.seed
     examples = load_query_examples(
