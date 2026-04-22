@@ -29,6 +29,8 @@ class DatasetConfig:
     offset: int = 0
     limit: int | None = None
     shuffle: bool = False
+    train_limit: int | None = None
+    eval_limit: int = 0
 
 
 @dataclass(slots=True)
@@ -79,6 +81,7 @@ class JudgeConfig:
 
 @dataclass(slots=True)
 class TrainingConfig:
+    epochs: int | None = None
     steps: int = 1
     batch_size: int = 1
     group_size: int = 2

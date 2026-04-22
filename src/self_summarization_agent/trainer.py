@@ -64,6 +64,52 @@ class TransformersPolicyTrainer:
             raise ValueError(f"Unsupported dtype: {self.model_config.dtype}")
         return mapping[self.model_config.dtype]
 
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def _format_prompt(self, prompt: str) -> str:
+        if not getattr(self.tokenizer, "chat_template", None):
+            return prompt
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=self.model_config.enable_thinking,
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+    def generate(self, prompt: str) -> str:
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            encoded = self.tokenizer(self._format_prompt(prompt), return_tensors="pt")
+            encoded = {name: tensor.to(self.model.device) for name, tensor in encoded.items()}
+            generation_kwargs = {
+                "max_new_tokens": self.model_config.max_new_tokens,
+                "do_sample": self.model_config.do_sample,
+                "pad_token_id": self.tokenizer.pad_token_id,
+            }
+            if self.model_config.do_sample:
+                generation_kwargs["temperature"] = self.model_config.temperature
+                generation_kwargs["top_p"] = self.model_config.top_p
+            with torch.no_grad():
+                output_ids = self.model.generate(
+                    **encoded,
+                    **generation_kwargs,
+                )
+        finally:
+            if was_training:
+                self.model.train()
+        generated_ids = output_ids[0, encoded["input_ids"].shape[1] :]
+        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+
     def _sequence_logprob(self, sample: RLSample) -> torch.Tensor:
         prompt_ids = self.tokenizer.encode(sample.prompt, add_special_tokens=False)
         full_ids = self.tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)

@@ -7,8 +7,10 @@ experiment:
 dataset:
   decrypted_path: /124090467/self-summarization-agent/bc-plus/data/browsecomp_plus_decrypted.jsonl
   offset: 0
-  limit: 128
-  shuffle: true
+  limit:
+  shuffle: false
+  train_limit: 200
+  eval_limit: 10
 
 retrieval:
   backend: faiss
@@ -46,8 +48,8 @@ judge:
   do_sample: false
 
 training:
+  epochs: 10
   steps: 10
-  batch_size: 2
   group_size: 2
   learning_rate: 1.0e-6
   checkpoint_interval: 5

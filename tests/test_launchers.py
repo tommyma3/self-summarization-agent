@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 from self_summarization_agent.backend import FakeBackend
@@ -15,7 +16,7 @@ from self_summarization_agent.config import (
 )
 from self_summarization_agent.dataset import QueryExample
 from self_summarization_agent.run_launcher import run_experiment
-from self_summarization_agent.train_launcher import train_experiment
+from self_summarization_agent.train_launcher import split_train_eval_examples, train_experiment
 
 
 class CyclingGenerator:
@@ -151,8 +152,46 @@ def test_train_launcher_writes_metrics_and_rollouts(tmp_path: Path) -> None:
     )
 
     assert (train_dir / "metrics.jsonl").exists()
+    assert (train_dir / "accuracy_history.jsonl").exists()
     assert (train_dir / "rollouts" / "step-00001.jsonl").exists()
     assert (train_dir / "manifest.json").exists()
     assert trainer.grouped_samples is not None
     assert "q1" in trainer.grouped_samples
     assert trainer.saved_checkpoints
+    accuracy_rows = [
+        json.loads(line)
+        for line in (train_dir / "accuracy_history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert accuracy_rows == [
+        {
+            "epoch": 1,
+            "timestamp_utc": accuracy_rows[0]["timestamp_utc"],
+            "train_accuracy": 1.0,
+            "train_correct": 1,
+            "train_total": 1,
+            "train_malformed": 0,
+            "train_parse_errors": 0,
+            "eval_accuracy": 0.0,
+            "eval_correct": 0,
+            "eval_total": 0,
+            "eval_malformed": 0,
+            "eval_parse_errors": 0,
+        }
+    ]
+
+
+def test_split_train_eval_examples_uses_contiguous_ranges() -> None:
+    examples = [
+        QueryExample(query_id=f"q{index}", query=f"question {index}")
+        for index in range(215)
+    ]
+
+    train_examples, eval_examples = split_train_eval_examples(
+        examples,
+        train_limit=200,
+        eval_limit=10,
+    )
+
+    assert [example.query_id for example in train_examples[:2]] == ["q0", "q1"]
+    assert [example.query_id for example in train_examples[-2:]] == ["q198", "q199"]
+    assert [example.query_id for example in eval_examples] == [f"q{index}" for index in range(200, 210)]
