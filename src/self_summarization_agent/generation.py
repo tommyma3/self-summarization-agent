@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 import os
 from typing import Any, Protocol
 
@@ -128,11 +129,13 @@ class VLLMGenerator:
             self.model_path,
             trust_remote_code=self.trust_remote_code,
         )
-        self.llm = LLM(
-            model=self.model_path,
-            trust_remote_code=self.trust_remote_code,
-            tensor_parallel_size=self.tensor_parallel_size,
-        )
+        llm_kwargs = {
+            "model": self.model_path,
+            "trust_remote_code": self.trust_remote_code,
+            "tensor_parallel_size": self.tensor_parallel_size,
+        }
+        supported_kwargs = set(inspect.signature(LLM).parameters)
+        self.llm = LLM(**{key: value for key, value in llm_kwargs.items() if key in supported_kwargs})
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
