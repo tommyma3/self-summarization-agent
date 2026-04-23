@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import random
 import sys
@@ -19,8 +18,8 @@ from self_summarization_agent.bcplus_backend import build_backend
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
-from self_summarization_agent.launcher_utils import build_runtime, ensure_dir, serialize_runtime_result, utc_timestamp, write_json
-from self_summarization_agent.rollout_collection import apply_judged_rewards
+from self_summarization_agent.launcher_utils import build_runtime, ensure_dir
+from simulate_collection import trace_collection
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-index", type=int, default=None, help="Use a fixed index after dataset slicing.")
     parser.add_argument("--query-id", default=None, help="Use a specific query_id after dataset slicing.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for random query sampling. Defaults to config seed.")
-    parser.add_argument("--output", default=None, help="Output JSON path. Defaults under experiment.output_root.")
+    parser.add_argument("--output", default=None, help="Output trace text path. Defaults under experiment.output_root.")
     parser.add_argument("--model-path", default=None, help="Override model.model_path.")
     parser.add_argument("--retrieval-backend", default=None, help="Override retrieval.backend.")
     parser.add_argument(
@@ -53,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=None, help="Override rollout top_p.")
     parser.add_argument("--do-sample", action="store_true", default=None, help="Force sampled rollout generation.")
     parser.add_argument("--no-sample", action="store_false", dest="do_sample", help="Force deterministic rollout generation.")
+    parser.add_argument("--include-formatted-prompt", action="store_true", help="Also write tokenizer chat-template prompts.")
     parser.add_argument(
         "--set",
         dest="overrides",
@@ -97,7 +97,7 @@ def choose_example(
 def default_output_path(config: Any, query_id: str) -> Path:
     output_dir = ensure_dir(Path(config.experiment.output_root) / "artifacts" / "vllm_collection_probe" / config.experiment.name)
     safe_query_id = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in query_id)
-    return output_dir / f"{safe_query_id}.json"
+    return output_dir / f"{safe_query_id}.txt"
 
 
 def build_rollout_model_config(config: Any, args: argparse.Namespace):
@@ -119,19 +119,6 @@ def build_rollout_model_config(config: Any, args: argparse.Namespace):
         if args.do_sample is not None
         else (config.rollout.do_sample if config.rollout.do_sample is not None else config.model.do_sample),
     )
-
-
-class DisabledJudge:
-    def evaluate(self, example: QueryExample, status: str, response: str):
-        del example, response
-
-        class Decision:
-            outcome = "correct_answer" if status == "completed" else "budget_exhausted"
-            judge_prompt = None
-            judge_response = None
-            parse_error = False
-
-        return Decision()
 
 
 def main() -> None:
@@ -159,37 +146,16 @@ def main() -> None:
     rollout_model_config = build_rollout_model_config(config, args)
     generator = build_generator(rollout_model_config)
     runtime = build_runtime(generator, backend, config.runtime)
-
-    result = runtime.run(query_id=example.query_id, user_prompt=example.query)
-    judge_payload = apply_judged_rewards(result, example, DisabledJudge())
     output_path = Path(args.output) if args.output else default_output_path(config, example.query_id)
-    payload = {
-        "timestamp_utc": utc_timestamp(),
-        "sample_index": sample_index,
-        "model_path": rollout_model_config.model_path,
-        "tensor_parallel_size": rollout_model_config.tensor_parallel_size,
-        "query": example.query,
-        "answer": example.answer,
-        "judge": judge_payload,
-        **serialize_runtime_result(result, query_text=example.query, judge=judge_payload),
-    }
-    ensure_dir(output_path.parent)
-    write_json(output_path, payload)
-
-    print(json.dumps(
-        {
-            "output_path": str(output_path),
-            "query_id": result.query_id,
-            "status": result.status,
-            "final_answer": result.final_answer,
-            "tool_call_counts": result.tool_call_counts,
-            "retrieved_docids": result.retrieved_docids,
-            "summary_turns": result.summary_turns,
-            "tensor_parallel_size": rollout_model_config.tensor_parallel_size,
-        },
-        indent=2,
-        ensure_ascii=False,
-    ))
+    trace_collection(
+        runtime=runtime,
+        generator=generator,
+        example=example,
+        sample_index=sample_index,
+        output_path=output_path,
+        include_formatted_prompt=args.include_formatted_prompt,
+    )
+    print(output_path)
 
 
 if __name__ == "__main__":
