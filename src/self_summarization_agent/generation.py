@@ -123,7 +123,9 @@ class VLLMGenerator:
         try:
             from vllm import LLM, SamplingParams
         except ImportError as exc:
-            raise ImportError("vLLM is not installed. Install it in the remote environment to use backend='vllm'.") from exc
+            raise ImportError(
+                "vLLM is not installed. Install it in the remote environment to use backend='vllm' or 'vllm_offline'."
+            ) from exc
         self._sampling_params_cls = SamplingParams
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path,
@@ -193,7 +195,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
         )
-    if backend_name == "vllm":
+    if backend_name in {"vllm", "vllm_offline"}:
         return VLLMGenerator(
             model_path=model_path,
             max_new_tokens=max_new_tokens,
