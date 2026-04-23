@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,8 @@ from transformers import AutoTokenizer
 
 from self_summarization_agent.backend import SearchResult
 from self_summarization_agent.config import RetrievalConfig
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _ensure_bc_plus_searcher_imports(bc_plus_root: str | Path) -> None:
@@ -36,11 +39,25 @@ class RealBrowseCompBackend:
     searcher: Any
     top_k: int = 5
     snippet_max_tokens: int | None = 512
+    snippet_tokenizer_path: str | None = None
     snippet_tokenizer: Any = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if self.snippet_max_tokens and self.snippet_max_tokens > 0:
-            self.snippet_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+            tokenizer_path = self.snippet_tokenizer_path or "Qwen/Qwen3-0.6B"
+            tokenizer_kwargs: dict[str, Any] = {}
+            if self.snippet_tokenizer_path:
+                tokenizer_kwargs["local_files_only"] = True
+            try:
+                self.snippet_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, **tokenizer_kwargs)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to load snippet tokenizer from %s; snippet truncation is disabled. %s: %s",
+                    tokenizer_path,
+                    type(exc).__name__,
+                    exc,
+                )
+                self.snippet_tokenizer = None
 
     def _build_snippet(self, candidate: dict[str, Any]) -> str:
         text = str(candidate.get("snippet") or candidate.get("text") or "")
@@ -91,4 +108,5 @@ def build_backend(bc_plus_root: str | Path, retrieval_config: RetrievalConfig) -
         searcher=searcher,
         top_k=retrieval_config.top_k,
         snippet_max_tokens=retrieval_config.snippet_max_tokens,
+        snippet_tokenizer_path=retrieval_config.snippet_tokenizer_path,
     )

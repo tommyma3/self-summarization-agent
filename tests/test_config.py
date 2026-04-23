@@ -15,6 +15,7 @@ experiment:
 dataset: {}
 retrieval:
   backend: faiss
+  snippet_tokenizer_path: /models/qwen-tokenizer
   index_path: indexes/corpus.pkl
 model:
   backend: transformers
@@ -38,6 +39,7 @@ runtime:
 
     assert config.dataset.limit == 3
     assert config.retrieval.backend == "bm25"
+    assert config.retrieval.snippet_tokenizer_path == "/models/qwen-tokenizer"
     assert config.runtime.tool_budget == 2
 
 
@@ -53,6 +55,7 @@ experiment:
 dataset: {}
 retrieval:
   backend: faiss
+  snippet_tokenizer_path: /models/qwen-tokenizer
   index_path: indexes/corpus.pkl
 model:
   backend: transformers
@@ -80,6 +83,7 @@ training:
     assert config.training.steps == 3
     assert config.training.batch_size == 2
     assert config.training.group_size == 2
+    assert config.retrieval.snippet_tokenizer_path == "/models/qwen-tokenizer"
     assert config.rollout.backend == "vllm_offline"
     assert config.rollout.gpu_ids == [0, 1, 2, 3]
     assert config.rollout.tensor_parallel_size == 4
