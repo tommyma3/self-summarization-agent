@@ -136,8 +136,6 @@ class DisabledJudge:
 
 def main() -> None:
     args = parse_args()
-    if args.vllm_gpus:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.vllm_gpus
     if args.attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = args.attention_backend
     config = load_train_config(args.config, merge_overrides(args))
@@ -155,9 +153,11 @@ def main() -> None:
         seed=seed,
     )
 
+    backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
+    if args.vllm_gpus:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.vllm_gpus
     rollout_model_config = build_rollout_model_config(config, args)
     generator = build_generator(rollout_model_config)
-    backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
     runtime = build_runtime(generator, backend, config.runtime)
 
     result = runtime.run(query_id=example.query_id, user_prompt=example.query)
