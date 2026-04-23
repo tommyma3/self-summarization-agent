@@ -37,7 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=None, help="Output JSON path. Defaults under experiment.output_root.")
     parser.add_argument("--model-path", default=None, help="Override model.model_path.")
     parser.add_argument("--retrieval-backend", default=None, help="Override retrieval.backend.")
-    parser.add_argument("--tensor-parallel-size", type=int, default=4, help="vLLM tensor parallel size.")
+    parser.add_argument(
+        "--vllm-gpus",
+        default="2,3",
+        help="Comma-separated physical GPU ids made visible to vLLM. Defaults to 2,3.",
+    )
+    parser.add_argument("--tensor-parallel-size", type=int, default=2, help="vLLM tensor parallel size.")
     parser.add_argument(
         "--attention-backend",
         default="TORCH_SDPA",
@@ -131,6 +136,8 @@ class DisabledJudge:
 
 def main() -> None:
     args = parse_args()
+    if args.vllm_gpus:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.vllm_gpus
     if args.attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = args.attention_backend
     config = load_train_config(args.config, merge_overrides(args))
