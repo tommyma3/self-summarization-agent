@@ -133,6 +133,63 @@ def build_context_manager(runtime: EpisodeRuntime) -> ContextManager:
     )
 
 
+def write_training_sequences(
+    handle: TextIO,
+    *,
+    runtime: EpisodeRuntime,
+    terminal_status: str,
+    trainable_turns: list[dict[str, str]],
+) -> None:
+    if not trainable_turns:
+        write_section(
+            handle,
+            "Training Sequences",
+            "No trainable sequences were produced. This rollout ended before any summary or final-answer turn was recorded.\n",
+        )
+        return
+
+    if terminal_status == "completed":
+        reward_note = (
+            "This probe does not run the judge model. These are the trainable prompt/completion pairs.\n"
+            "- If the final answer is judged correct, every listed turn gets reward +1.\n"
+            "- If the final answer is judged wrong, every listed turn gets reward -1.\n"
+        )
+    elif terminal_status == "budget_exhausted":
+        reward_note = "This rollout exhausted the tool budget. Every listed summary turn gets reward -1.\n"
+    else:
+        reward_note = "This rollout ended malformed. Tool turns are penalized, but they are not trainable.\n"
+
+    write_section(
+        handle,
+        "Training Sequences",
+        reward_note + f"trainable_turn_count: {len(trainable_turns)}\n",
+    )
+    for index, turn in enumerate(trainable_turns, start=1):
+        prompt = turn["prompt"]
+        completion = turn["completion"]
+        metadata = {
+            "index": index,
+            "turn_id": turn["turn_id"],
+            "kind": turn["kind"],
+            "query_id": turn["query_id"],
+            "prompt_token_count": runtime.token_counter(prompt),
+            "completion_token_count": runtime.token_counter(completion),
+            "prompt_character_count": len(prompt),
+            "completion_character_count": len(completion),
+        }
+        write_section(
+            handle,
+            f"Training Sequence {index} Metadata",
+            json.dumps(metadata, indent=2, ensure_ascii=False),
+        )
+        handle.write("\n--- Prompt ---\n")
+        handle.write(prompt)
+        handle.write("\n")
+        handle.write("\n--- Completion ---\n")
+        handle.write(completion)
+        handle.write("\n")
+
+
 def trace_collection(
     *,
     runtime: EpisodeRuntime,
@@ -150,6 +207,7 @@ def trace_collection(
     context_manager = build_context_manager(runtime)
     tool_call_counts = {"search": 0, "get_document": 0}
     retrieved_docids: list[str] = []
+    trainable_turns: list[dict[str, str]] = []
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
@@ -180,6 +238,12 @@ def trace_collection(
                     include_formatted_prompt=include_formatted_prompt,
                 )
                 write_section(handle, "Terminal Status", "status: budget_exhausted\n")
+                write_training_sequences(
+                    handle,
+                    runtime=runtime,
+                    terminal_status="budget_exhausted",
+                    trainable_turns=trainable_turns,
+                )
                 return
 
             round_number = len(state.rounds) + 1
@@ -214,14 +278,41 @@ def trace_collection(
                 answer = arguments.get("answer") if isinstance(arguments, dict) else None
                 if not isinstance(answer, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: finish.answer is not a string\n")
+                    write_training_sequences(
+                        handle,
+                        runtime=runtime,
+                        terminal_status="malformed_tool_call",
+                        trainable_turns=trainable_turns,
+                    )
                     return
+                trainable_turns.append(
+                    {
+                        "query_id": example.query_id,
+                        "turn_id": "final-answer",
+                        "kind": "final_answer",
+                        "prompt": acting_prompt,
+                        "completion": normalized_output,
+                    }
+                )
                 write_section(handle, "Terminal Status", f"status: completed\nfinal_answer: {answer}\n")
+                write_training_sequences(
+                    handle,
+                    runtime=runtime,
+                    terminal_status="completed",
+                    trainable_turns=trainable_turns,
+                )
                 return
 
             if tool_name == "search":
                 query = arguments.get("query") if isinstance(arguments, dict) else None
                 if not isinstance(query, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: search.query is not a string\n")
+                    write_training_sequences(
+                        handle,
+                        runtime=runtime,
+                        terminal_status="malformed_tool_call",
+                        trainable_turns=trainable_turns,
+                    )
                     return
                 search_results = runtime.backend.search(query)
                 tool_call_counts["search"] += 1
@@ -231,12 +322,24 @@ def trace_collection(
                 doc_id = arguments.get("doc_id") if isinstance(arguments, dict) else None
                 if not isinstance(doc_id, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: get_document.doc_id is not a string\n")
+                    write_training_sequences(
+                        handle,
+                        runtime=runtime,
+                        terminal_status="malformed_tool_call",
+                        trainable_turns=trainable_turns,
+                    )
                     return
                 runtime._record_retrieved_docids(retrieved_docids, [doc_id])
                 tool_result = runtime.backend.get_document(doc_id)
                 tool_call_counts["get_document"] += 1
             else:
                 write_section(handle, "Terminal Status", f"status: malformed_tool_call\nreason: unsupported tool {tool_name!r}\n")
+                write_training_sequences(
+                    handle,
+                    runtime=runtime,
+                    terminal_status="malformed_tool_call",
+                    trainable_turns=trainable_turns,
+                )
                 return
 
             write_section(
@@ -319,6 +422,15 @@ def trace_collection(
             state.latest_summary = summary_extraction.summary
             state.summarized_round_count += retired_count
             state.summary_count += 1
+            trainable_turns.append(
+                {
+                    "query_id": example.query_id,
+                    "turn_id": f"summary-{state.summary_count}",
+                    "kind": "summary",
+                    "prompt": summary_prompt,
+                    "completion": generated_summary,
+                }
+            )
             write_section(
                 handle,
                 f"Summary {state.summary_count} Extracted",
