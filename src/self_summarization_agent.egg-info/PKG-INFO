@@ -12,9 +12,9 @@ Requires-Dist: PyYAML>=6.0.2
 Requires-Dist: qwen-omni-utils>=0.0.9
 Requires-Dist: tevatron
 Requires-Dist: torch>=2.7.0
-Requires-Dist: torchvision>=0.26.0
 Requires-Dist: transformers>=4.57.0
-Requires-Dist: flash-attn
+Requires-Dist: vllm>=0.17.0
+Requires-Dist: accelerate>=1.13.0
 
 # Self-Summarization Agent
 
@@ -28,9 +28,10 @@ Current scope:
 - smoke and unit-test entrypoints
 
 Partially implemented / still minimal:
-- the training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
+- the legacy training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
 - retrieval and judge dependencies still come from the local `bc-plus` environment
-- rollout backend `vllm` is wired for generation, but training currently requires `transformers`
+- process-isolated rollout/training orchestration is wired for offline `vllm` rollout collection and checkpoint handoff
+- the FSDP2/context-parallel full-training backend is represented in config and launcher contracts, but must be run in the GPU training environment
 
 ## Setup
 
@@ -42,6 +43,8 @@ Install dependencies with `uv`:
 ```powershell
 uv sync --group dev
 ```
+
+The GPU training environment also needs vLLM and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
 
 If you prefer the project virtualenv directly:
 
@@ -67,14 +70,14 @@ These are the new primary entrypoints:
 
 ```powershell
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts
 ```
 
 Small CLI override layer:
 
 ```powershell
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml --limit 25 --retrieval-backend bm25
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.steps=100 --set runtime.tool_budget=12
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --set runtime.tool_budget=12
 ```
 
 Sample configs live at:
@@ -139,10 +142,12 @@ uv run --group dev pytest tests/test_export.py -q
 
 ## Current Experiment Workflow
 
-There are now two real launchers:
+There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `train_launcher` for rollout generation plus minimal in-repo policy updates
+- `iteration_launcher` for process-isolated offline vLLM rollout collection plus one training update
+
+The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
 The runtime modules are still reusable directly if you want a custom server-side driver.
 
@@ -157,7 +162,7 @@ The practical workflow is:
    - per-query BrowseComp run files
    - `trajectories.jsonl`
    - `manifest.json`
-5. Launch training with `python -m self_summarization_agent.train_launcher --config ...`.
+5. Launch one process-isolated training iteration with `python -m self_summarization_agent.iteration_launcher --config ...`.
 6. Inspect:
    - rollout JSONL under `artifacts/train/.../rollouts/`
    - `metrics.jsonl`
@@ -215,12 +220,12 @@ python -m self_summarization_agent.run_launcher --config configs/run/default.yam
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml --model-path /models/qwen
 ```
 
-### Train launcher
+### Legacy train launcher
 
 Example:
 
 ```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml
+python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers
 ```
 
 Outputs:
@@ -234,8 +239,8 @@ Outputs:
 Typical overrides:
 
 ```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.epochs=20
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.group_size=4
+python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers --set training.epochs=20
+python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers --set training.group_size=4
 python scripts/plot_accuracy.py artifacts/train/qwen-bcplus-train/accuracy_history.jsonl
 ```
 
@@ -244,8 +249,26 @@ Training notes:
 - the default training config uses queries 1-200 for training and 201-210 for evaluation
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
-- training currently expects `model.backend: transformers`
-- `model.backend: vllm` is intended for later rollout-serving swap, not the first training path
+- legacy `train_launcher` expects `training.backend: transformers`
+- the new process-isolated path uses `rollout.backend: vllm_offline` and `training.backend: fsdp2_context_parallel`
+- in the new path, each iteration collects rollout JSONL from the latest checkpoint, runs one training update, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+
+### Process-isolated vLLM rollout/training loop
+
+The new orchestration path uses checkpoint files as the weight-sync boundary:
+
+```powershell
+python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl
+python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts
+```
+
+For the intended GPU run:
+
+- rollout collection loads offline vLLM on GPUs 0-3 with tensor parallel size 4
+- training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
+- training applies one optimizer step after processing the full configured training split
+- the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 ## Notes
 
