@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import os
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,12 @@ def collect_rollouts(
     if not train_examples:
         raise ValueError("No training queries available for rollout collection")
 
+    # Build retrieval before narrowing CUDA visibility for vLLM. The FAISS backend can
+    # load its embedding model on the normal/default device, while vLLM is restricted
+    # to config.rollout.gpu_ids below.
     backend = backend or build_backend(config.experiment.bc_plus_root, config.retrieval)
+    if generator is None and config.rollout.gpu_ids:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in config.rollout.gpu_ids)
     rollout_model_config = replace(
         config.model,
         backend=config.rollout.backend,

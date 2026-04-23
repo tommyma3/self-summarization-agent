@@ -68,8 +68,8 @@ class ModelConfig:
 @dataclass(slots=True)
 class RolloutConfig:
     backend: str = "transformers"
-    gpu_ids: list[int] = field(default_factory=list)
-    tensor_parallel_size: int = 1
+    gpu_ids: list[int] = field(default_factory=lambda: [2, 3])
+    tensor_parallel_size: int = 2
     attention_backend: str | None = "TORCH_SDPA"
     max_new_tokens: int | None = None
     temperature: float | None = None
