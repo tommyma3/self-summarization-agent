@@ -6,7 +6,7 @@ import os
 from typing import Any, Protocol
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForMultimodalLM, AutoTokenizer
 
 from self_summarization_agent.config import JudgeConfig, ModelConfig
 
@@ -53,7 +53,7 @@ class TransformersGenerator:
         )
         if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.model = _load_transformers_model(
             self.model_path,
             torch_dtype=torch_dtype,
             device_map=self.device_map,
@@ -208,3 +208,18 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             enable_thinking=model_config.enable_thinking,
         )
     raise ValueError(f"Unsupported model backend: {model_config.backend}")
+
+
+def _load_transformers_model(
+    model_path: str,
+    *,
+    torch_dtype: Any,
+    device_map: str,
+    trust_remote_code: bool,
+) -> Any:
+    return AutoModelForMultimodalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch_dtype,
+        device_map=device_map,
+        trust_remote_code=trust_remote_code,
+    )
