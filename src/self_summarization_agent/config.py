@@ -38,6 +38,7 @@ class RetrievalConfig:
     backend: str = "faiss"
     top_k: int = 5
     snippet_max_tokens: int | None = 512
+    document_max_tokens: int | None = 8192
     snippet_tokenizer_path: str | None = None
     index_path: str = ""
     model_name: str | None = None
@@ -62,6 +63,7 @@ class ModelConfig:
     do_sample: bool = False
     tensor_parallel_size: int = 1
     attention_backend: str | None = None
+    max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = True
 
@@ -72,6 +74,7 @@ class RolloutConfig:
     gpu_ids: list[int] = field(default_factory=lambda: [2, 3])
     tensor_parallel_size: int = 2
     attention_backend: str | None = "TORCH_SDPA"
+    max_model_len: int | None = None
     max_concurrent_episodes: int = 32
     max_new_tokens: int | None = None
     temperature: float | None = None

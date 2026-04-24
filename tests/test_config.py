@@ -24,6 +24,7 @@ rollout:
   backend: vllm_offline
   gpu_ids: [0, 1, 2, 3]
   tensor_parallel_size: 4
+  max_model_len: 65536
 runtime:
   context_threshold_tokens: 32
   max_context_tokens: 64
@@ -87,5 +88,6 @@ training:
     assert config.rollout.backend == "vllm_offline"
     assert config.rollout.gpu_ids == [0, 1, 2, 3]
     assert config.rollout.tensor_parallel_size == 4
+    assert config.rollout.max_model_len == 65536
     assert config.training.backend == "fsdp2_context_parallel"
     assert config.training.context_parallel_size == 4

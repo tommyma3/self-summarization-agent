@@ -114,6 +114,7 @@ class VLLMGenerator:
     do_sample: bool
     tensor_parallel_size: int = 1
     attention_backend: str | None = None
+    max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = False
     tokenizer: Any = field(init=False)
@@ -138,9 +139,16 @@ class VLLMGenerator:
             "model": self.model_path,
             "trust_remote_code": self.trust_remote_code,
             "tensor_parallel_size": self.tensor_parallel_size,
+            "max_model_len": self.max_model_len,
         }
         supported_kwargs = set(inspect.signature(LLM).parameters)
-        self.llm = LLM(**{key: value for key, value in llm_kwargs.items() if key in supported_kwargs})
+        self.llm = LLM(
+            **{
+                key: value
+                for key, value in llm_kwargs.items()
+                if key in supported_kwargs and value is not None
+            }
+        )
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
@@ -215,6 +223,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             do_sample=do_sample,
             tensor_parallel_size=model_config.tensor_parallel_size,
             attention_backend=model_config.attention_backend,
+            max_model_len=model_config.max_model_len,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
         )

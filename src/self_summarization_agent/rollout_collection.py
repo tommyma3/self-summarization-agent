@@ -41,6 +41,45 @@ def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str,
     }
 
 
+def _load_completed_rollout_keys(
+    rollout_path: Path,
+    *,
+    checkpoint_id: str,
+    expected_keys: set[tuple[str, int]],
+) -> set[tuple[str, int]]:
+    if not rollout_path.exists():
+        return set()
+
+    completed_keys: set[tuple[str, int]] = set()
+    with rollout_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid rollout JSON on line {line_number}: {exc}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"Rollout row {line_number} must be a JSON object")
+            row_checkpoint_id = row.get("policy_checkpoint_id")
+            if row_checkpoint_id != checkpoint_id:
+                raise ValueError(
+                    f"Cannot resume {rollout_path}: line {line_number} has checkpoint "
+                    f"{row_checkpoint_id!r}, expected {checkpoint_id!r}"
+                )
+            query_id = row.get("query_id")
+            rollout_index = row.get("rollout_index")
+            if not isinstance(query_id, str) or not isinstance(rollout_index, int):
+                raise ValueError(f"Rollout row {line_number} is missing query_id or rollout_index")
+            key = (query_id, rollout_index)
+            if key not in expected_keys:
+                raise ValueError(
+                    f"Cannot resume {rollout_path}: line {line_number} contains unexpected rollout key {key!r}"
+                )
+            completed_keys.add(key)
+    return completed_keys
+
+
 def collect_rollouts(
     config,
     *,
@@ -50,6 +89,7 @@ def collect_rollouts(
     backend: Any | None = None,
     generator: Any | None = None,
     judge: Any | None = None,
+    resume: bool = False,
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
@@ -62,6 +102,31 @@ def collect_rollouts(
     train_examples = examples if config.dataset.train_limit is None else examples[: config.dataset.train_limit]
     if not train_examples:
         raise ValueError("No training queries available for rollout collection")
+
+    rollout_path = Path(output_path)
+    ensure_dir(rollout_path.parent)
+
+    rollout_requests = [
+        (example, rollout_index)
+        for example in train_examples
+        for rollout_index in range(config.training.group_size)
+    ]
+    expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
+    if resume:
+        completed_keys = _load_completed_rollout_keys(
+            rollout_path,
+            checkpoint_id=checkpoint_id,
+            expected_keys=expected_keys,
+        )
+        rollout_requests = [
+            (example, rollout_index)
+            for example, rollout_index in rollout_requests
+            if (example.query_id, rollout_index) not in completed_keys
+        ]
+        if not rollout_requests:
+            return rollout_path
+    elif rollout_path.exists():
+        rollout_path.unlink()
 
     # Build retrieval before narrowing CUDA visibility for vLLM. The FAISS backend can
     # load its embedding model on the normal/default device, while vLLM is restricted
@@ -84,21 +149,14 @@ def collect_rollouts(
         else config.model.do_sample,
         tensor_parallel_size=config.rollout.tensor_parallel_size,
         attention_backend=config.rollout.attention_backend,
+        max_model_len=config.rollout.max_model_len
+        if config.rollout.max_model_len is not None
+        else config.model.max_model_len,
     )
     generator = generator or build_generator(rollout_model_config)
     judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
     runtime = build_runtime(generator, backend, config.runtime)
 
-    rollout_path = Path(output_path)
-    ensure_dir(rollout_path.parent)
-    if rollout_path.exists():
-        rollout_path.unlink()
-
-    rollout_requests = [
-        (example, rollout_index)
-        for example in train_examples
-        for rollout_index in range(config.training.group_size)
-    ]
     for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
         results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
         for (example, rollout_index), result in zip(request_batch, results):
@@ -129,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default=None, help="Checkpoint path. Defaults to latest under train dir.")
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
     parser.add_argument("--output", required=True, help="Rollout JSONL output path.")
+    parser.add_argument("--resume", action="store_true", help="Append missing rollouts and skip rows already in output.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -141,7 +200,7 @@ def main() -> None:
     else:
         latest_root = args.latest_root or Path(config.experiment.output_root) / "artifacts" / "train" / config.experiment.name
         checkpoint = resolve_latest_checkpoint(latest_root).path
-    rollout_path = collect_rollouts(config, checkpoint_path=checkpoint, output_path=args.output)
+    rollout_path = collect_rollouts(config, checkpoint_path=checkpoint, output_path=args.output, resume=args.resume)
     print(rollout_path)
 
 

@@ -15,6 +15,8 @@ dataset:
 retrieval:
   backend: faiss
   top_k: 5
+  snippet_max_tokens: 512
+  document_max_tokens: 8192
   snippet_tokenizer_path: /124090467/Qwen/Qwen3.5-9B
   index_path: /124090467/self-summarization-agent/bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
   model_name: /124090467/Qwen/Qwen3-Embedding-8B
@@ -41,6 +43,7 @@ rollout:
   gpu_ids: [2, 3, 4, 5]
   tensor_parallel_size: 4
   attention_backend: TORCH_SDPA
+  max_model_len: 65536
   max_concurrent_episodes: 32
   max_new_tokens: 8192
   temperature: 0.7
@@ -48,8 +51,8 @@ rollout:
   do_sample: true
 
 runtime:
-  context_threshold_tokens: 24000
-  max_context_tokens: 32768
+  context_threshold_tokens: 48000
+  max_context_tokens: 65536
   tool_budget: 20
 
 judge:

@@ -65,6 +65,34 @@ def test_iteration_launcher_runs_rollout_then_train_and_advances_latest(tmp_path
     assert resolve_latest_checkpoint(latest_root).checkpoint_id == "iteration-00001"
 
 
+def test_iteration_launcher_can_pass_resume_to_rollout_collection(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    calls = []
+
+    def runner(command):
+        calls.append(list(command))
+        if "self_summarization_agent.train_step" in command:
+            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
+            write_fake_checkpoint(next_checkpoint)
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+        resume_rollouts=True,
+    )
+
+    assert "--resume" in calls[0]
+
+
 def test_iteration_launcher_does_not_advance_latest_when_training_fails(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     latest_root = tmp_path / "artifacts" / "train" / "demo"

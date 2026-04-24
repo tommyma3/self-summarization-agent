@@ -51,6 +51,7 @@ def run_training_iteration(
     latest_root: str | Path | None = None,
     command_runner: CommandRunner = default_command_runner,
     python_executable: str = sys.executable,
+    resume_rollouts: bool = False,
 ) -> Path:
     train_dir = ensure_dir(latest_root or _train_dir(config))
     current = resolve_latest_checkpoint(train_dir)
@@ -71,6 +72,8 @@ def run_training_iteration(
         "--output",
         str(rollout_path),
     ]
+    if resume_rollouts:
+        rollout_command.append("--resume")
     train_command = [
         *_train_step_command_prefix(config, python_executable),
         "--config",
@@ -99,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="Path to the train YAML config.")
     parser.add_argument("--iteration", type=int, required=True, help="Iteration number.")
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
+    parser.add_argument("--resume-rollouts", action="store_true", help="Resume the iteration rollout JSONL if it exists.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -111,6 +115,7 @@ def main() -> None:
         config_path=args.config,
         iteration=args.iteration,
         latest_root=args.latest_root,
+        resume_rollouts=args.resume_rollouts,
     )
     print(next_checkpoint)
 
