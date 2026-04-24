@@ -12,7 +12,13 @@ from self_summarization_agent.config import load_train_config, parse_cli_overrid
 from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
-from self_summarization_agent.launcher_utils import append_jsonl, build_runtime, ensure_dir, serialize_runtime_result
+from self_summarization_agent.launcher_utils import (
+    append_jsonl,
+    build_runtime,
+    ensure_dir,
+    iter_batches,
+    serialize_runtime_result,
+)
 from self_summarization_agent.rewards import apply_terminal_reward
 from self_summarization_agent.trajectory import extract_trainable_samples
 
@@ -88,9 +94,14 @@ def collect_rollouts(
     if rollout_path.exists():
         rollout_path.unlink()
 
-    for example in train_examples:
-        for rollout_index in range(config.training.group_size):
-            result = runtime.run(query_id=example.query_id, user_prompt=example.query)
+    rollout_requests = [
+        (example, rollout_index)
+        for example in train_examples
+        for rollout_index in range(config.training.group_size)
+    ]
+    for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
+        results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
+        for (example, rollout_index), result in zip(request_batch, results):
             judge_payload = apply_judged_rewards(result, example, judge)
             trainable_sample_count = 0
             if judge_payload["outcome"] != "malformed_tool_call":

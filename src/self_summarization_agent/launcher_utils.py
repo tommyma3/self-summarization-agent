@@ -25,6 +25,13 @@ def ensure_dir(path: str | Path) -> Path:
     return path_obj
 
 
+def iter_batches(items: list[Any], batch_size: int):
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be at least 1, got {batch_size}")
+    for start in range(0, len(items), batch_size):
+        yield items[start : start + batch_size]
+
+
 def write_json(path: str | Path, payload: Any) -> None:
     with Path(path).open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)

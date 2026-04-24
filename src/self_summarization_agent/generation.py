@@ -101,6 +101,9 @@ class TransformersGenerator:
         generated_ids = output_ids[0, encoded["input_ids"].shape[1] :]
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
+    def generate_batch(self, prompts: list[str]) -> list[str]:
+        return [self.generate(prompt) for prompt in prompts]
+
 
 @dataclass(slots=True)
 class VLLMGenerator:
@@ -161,6 +164,10 @@ class VLLMGenerator:
             )
 
     def generate(self, prompt: str) -> str:
+        outputs = self.generate_batch([prompt])
+        return outputs[0] if outputs else ""
+
+    def generate_batch(self, prompts: list[str]) -> list[str]:
         sampling_kwargs = {
             "max_tokens": self.max_new_tokens,
             "temperature": self.temperature if self.do_sample else 0.0,
@@ -168,12 +175,16 @@ class VLLMGenerator:
         if self.do_sample:
             sampling_kwargs["top_p"] = self.top_p
         outputs = self.llm.generate(
-            [self._format_prompt(prompt)],
+            [self._format_prompt(prompt) for prompt in prompts],
             self._sampling_params_cls(**sampling_kwargs),
         )
-        if not outputs or not outputs[0].outputs:
-            return ""
-        return outputs[0].outputs[0].text or ""
+        completions: list[str] = []
+        for output in outputs:
+            if not output.outputs:
+                completions.append("")
+                continue
+            completions.append(output.outputs[0].text or "")
+        return completions
 
 
 def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | None = None) -> TextGenerator:

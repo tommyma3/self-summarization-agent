@@ -248,6 +248,7 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 For the intended GPU run:
 
 - rollout collection builds the FAISS searcher before vLLM, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
+- rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training applies one optimizer step after processing the full configured training split
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable

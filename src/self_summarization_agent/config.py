@@ -72,6 +72,7 @@ class RolloutConfig:
     gpu_ids: list[int] = field(default_factory=lambda: [2, 3])
     tensor_parallel_size: int = 2
     attention_backend: str | None = "TORCH_SDPA"
+    max_concurrent_episodes: int = 32
     max_new_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None

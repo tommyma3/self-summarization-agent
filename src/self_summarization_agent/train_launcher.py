@@ -15,6 +15,7 @@ from self_summarization_agent.launcher_utils import (
     build_runtime,
     dataclass_to_jsonable,
     ensure_dir,
+    iter_batches,
     seed_everything,
     serialize_runtime_result,
     utc_timestamp,
@@ -111,19 +112,22 @@ def _evaluate_accuracy(
     runtime,
     examples: list[QueryExample],
     judge: RewardJudge,
+    *,
+    max_concurrent_episodes: int,
 ) -> AccuracyMetrics:
     correct = 0
     malformed = 0
     parse_errors = 0
-    for example in examples:
-        result = runtime.run(query_id=example.query_id, user_prompt=example.query)
-        judge_payload = _apply_judged_rewards(result, example, judge)
-        if judge_payload["outcome"] == "correct_answer":
-            correct += 1
-        if judge_payload["outcome"] == "malformed_tool_call":
-            malformed += 1
-        if judge_payload["parse_error"]:
-            parse_errors += 1
+    for example_batch in iter_batches(examples, max_concurrent_episodes):
+        results = runtime.run_many((example.query_id, example.query) for example in example_batch)
+        for example, result in zip(example_batch, results):
+            judge_payload = _apply_judged_rewards(result, example, judge)
+            if judge_payload["outcome"] == "correct_answer":
+                correct += 1
+            if judge_payload["outcome"] == "malformed_tool_call":
+                malformed += 1
+            if judge_payload["parse_error"]:
+                parse_errors += 1
     return AccuracyMetrics(
         correct=correct,
         total=len(examples),
@@ -190,9 +194,14 @@ def train_experiment(
         all_samples = []
         malformed_count = 0
         judged_count = 0
-        for example in train_examples:
-            for rollout_index in range(config.training.group_size):
-                result = runtime.run(query_id=example.query_id, user_prompt=example.query)
+        rollout_requests = [
+            (example, rollout_index)
+            for example in train_examples
+            for rollout_index in range(config.training.group_size)
+        ]
+        for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
+            results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
+            for (example, rollout_index), result in zip(request_batch, results):
                 judge_payload = _apply_judged_rewards(result, example, judge)
                 if judge_payload["outcome"] == "malformed_tool_call":
                     malformed_count += 1
@@ -209,8 +218,18 @@ def train_experiment(
                 )
         grouped_samples = group_samples_by_query(all_samples)
         metrics = trainer.step(grouped_samples)
-        train_accuracy = _evaluate_accuracy(runtime, train_examples, judge)
-        eval_accuracy = _evaluate_accuracy(runtime, eval_examples, judge)
+        train_accuracy = _evaluate_accuracy(
+            runtime,
+            train_examples,
+            judge,
+            max_concurrent_episodes=config.rollout.max_concurrent_episodes,
+        )
+        eval_accuracy = _evaluate_accuracy(
+            runtime,
+            eval_examples,
+            judge,
+            max_concurrent_episodes=config.rollout.max_concurrent_episodes,
+        )
         accuracy_record = {
             "epoch": epoch,
             "timestamp_utc": utc_timestamp(),

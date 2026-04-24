@@ -1,7 +1,7 @@
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterable, Protocol
 
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
@@ -25,6 +25,11 @@ class SummaryExtraction:
 class ThinkingExtraction:
     thinking: str
     remainder: str
+
+
+class RuntimeModel(Protocol):
+    def generate(self, prompt: str) -> str:
+        ...
 
 
 def _extract_completed_thinking(raw_output: str) -> ThinkingExtraction | None:
@@ -83,10 +88,24 @@ class ScriptedModel:
         self.cursor += 1
         return output
 
+    def generate_batch(self, prompts: list[str]) -> list[str]:
+        return [self.generate(prompt) for prompt in prompts]
+
+
+@dataclass(slots=True)
+class _ActiveEpisode:
+    state: EpisodeState
+    context_manager: ContextManager
+    summary_turns: list[str] = field(default_factory=list)
+    retrieved_docids: list[str] = field(default_factory=list)
+    tool_call_counts: dict[str, int] = field(default_factory=lambda: {"search": 0, "get_document": 0})
+    turn_records: list[dict[str, str]] = field(default_factory=list)
+    result: RuntimeResult | None = None
+
 
 @dataclass(slots=True)
 class EpisodeRuntime:
-    model: ScriptedModel
+    model: RuntimeModel
     backend: BrowseCompBackend
     context_threshold_tokens: int
     max_context_tokens: int
@@ -215,154 +234,221 @@ class EpisodeRuntime:
         doc_ids = [str(result["docid"]) for result in search_results if result.get("docid") is not None]
         self._record_retrieved_docids(retrieved_docids, doc_ids)
 
-    def run(self, query_id: str, user_prompt: str) -> RuntimeResult:
-        state = EpisodeState(
-            query_id=query_id,
-            user_prompt=user_prompt,
-            context_threshold_tokens=self.context_threshold_tokens,
+    def _generate_batch(self, prompts: list[str]) -> list[str]:
+        generate_batch = getattr(self.model, "generate_batch", None)
+        if generate_batch is None:
+            return [self.model.generate(prompt) for prompt in prompts]
+        outputs = generate_batch(prompts)
+        if len(outputs) != len(prompts):
+            raise ValueError(f"Batch generator returned {len(outputs)} outputs for {len(prompts)} prompts")
+        return outputs
+
+    def _new_active_episode(self, query_id: str, user_prompt: str) -> _ActiveEpisode:
+        return _ActiveEpisode(
+            state=EpisodeState(
+                query_id=query_id,
+                user_prompt=user_prompt,
+                context_threshold_tokens=self.context_threshold_tokens,
+            ),
+            context_manager=ContextManager(
+                token_counter=self.token_counter,
+                max_context_tokens=self.max_context_tokens,
+                safety_margin_tokens=0,
+            ),
         )
-        context_manager = ContextManager(
-            token_counter=self.token_counter,
-            max_context_tokens=self.max_context_tokens,
-            safety_margin_tokens=0,
+
+    def _completed_result(
+        self,
+        active: _ActiveEpisode,
+        answer: str,
+    ) -> RuntimeResult:
+        return RuntimeResult(
+            query_id=active.state.query_id,
+            status="completed",
+            final_answer=answer,
+            summary_turns=list(active.summary_turns),
+            turn_rewards=apply_terminal_reward(
+                outcome="correct_answer",
+                summary_turn_ids=active.summary_turns,
+                final_answer_turn_id="final-answer",
+            ),
+            retrieved_docids=list(active.retrieved_docids),
+            tool_call_counts=dict(active.tool_call_counts),
+            turn_records=list(active.turn_records),
         )
-        summary_turns: list[str] = []
-        retrieved_docids: list[str] = []
-        tool_call_counts = {"search": 0, "get_document": 0}
-        turn_records: list[dict[str, str]] = []
 
-        while True:
-            if self.max_tool_calls is not None and sum(tool_call_counts.values()) >= self.max_tool_calls:
-                return self._budget_exhausted_result(
-                    query_id,
-                    summary_turns,
-                    retrieved_docids,
-                    tool_call_counts,
-                    turn_records,
-                )
-            acting_prompt = self._build_runtime_prompt(state)
-            context_manager.assert_fits(acting_prompt)
-            raw_output = self.model.generate(acting_prompt)
-            parsed_tool_call = parse_model_tool_call(raw_output)
-            if parsed_tool_call is None:
-                return self._malformed_result(
-                    state,
-                    query_id,
-                    summary_turns,
-                    retrieved_docids,
-                    tool_call_counts,
-                    turn_records,
-                )
-            payload, normalized_output = parsed_tool_call
-            tool_name = payload["tool_name"]
-            arguments = payload["arguments"]
-
-            if tool_name == "finish":
-                answer = arguments.get("answer")
-                if not isinstance(answer, str):
-                    return self._malformed_result(
-                        state,
-                        query_id,
-                        summary_turns,
-                        retrieved_docids,
-                        tool_call_counts,
-                        turn_records,
-                    )
-                turn_records.append(
-                    {
-                        "query_id": query_id,
-                        "turn_id": "final-answer",
-                        "kind": "final_answer",
-                        "prompt": acting_prompt,
-                        "completion": normalized_output,
-                    }
-                )
-                return RuntimeResult(
-                    query_id=query_id,
-                    status="completed",
-                    final_answer=answer,
-                    summary_turns=list(summary_turns),
-                    turn_rewards=apply_terminal_reward(
-                        outcome="correct_answer",
-                        summary_turn_ids=summary_turns,
-                        final_answer_turn_id="final-answer",
-                    ),
-                    retrieved_docids=list(retrieved_docids),
-                    tool_call_counts=dict(tool_call_counts),
-                    turn_records=list(turn_records),
-                )
-
-            if tool_name == "search":
-                query = arguments.get("query")
-                if not isinstance(query, str):
-                    return self._malformed_result(
-                        state,
-                        query_id,
-                        summary_turns,
-                        retrieved_docids,
-                        tool_call_counts,
-                        turn_records,
-                )
-                search_results = self.backend.search(query)
-                tool_call_counts["search"] += 1
-                self._record_search_result_docids(retrieved_docids, search_results)
-                tool_result = json.dumps(search_results, ensure_ascii=False)
-            elif tool_name == "get_document":
-                doc_id = arguments.get("doc_id")
-                if not isinstance(doc_id, str):
-                    return self._malformed_result(
-                        state,
-                        query_id,
-                        summary_turns,
-                        retrieved_docids,
-                        tool_call_counts,
-                        turn_records,
-                    )
-                self._record_retrieved_docids(retrieved_docids, [doc_id])
-                tool_result = self.backend.get_document(doc_id)
-                tool_call_counts["get_document"] += 1
-            else:
-                return self._malformed_result(
-                    state,
-                    query_id,
-                    summary_turns,
-                    retrieved_docids,
-                    tool_call_counts,
-                    turn_records,
-                )
-
-            state.rounds.append(
-                ToolRound(
-                    assistant_message=Message(role="assistant", content=normalized_output),
-                    tool_call=ToolCallRecord(tool_name=tool_name, arguments=arguments, raw_output=normalized_output),
-                    tool_result=Message(role="tool", content=tool_result),
-                )
+    def _apply_action_output(self, active: _ActiveEpisode, raw_output: str) -> None:
+        state = active.state
+        query_id = state.query_id
+        parsed_tool_call = parse_model_tool_call(raw_output)
+        if parsed_tool_call is None:
+            active.result = self._malformed_result(
+                state,
+                query_id,
+                active.summary_turns,
+                active.retrieved_docids,
+                active.tool_call_counts,
+                active.turn_records,
             )
+            return
+        payload, normalized_output = parsed_tool_call
+        tool_name = payload["tool_name"]
+        arguments = payload["arguments"]
 
-            compacted_state = self._compacted_state(state)
-            if context_manager.should_summarize(compacted_state):
-                summary_state, retired_count = self._build_summary_state(state)
-                if retired_count == 0:
-                    continue
-                summary_generation_prompt = context_manager.build_summary_context(summary_state)
-                context_manager.assert_fits(summary_generation_prompt)
-                generated_summary = self.model.generate(summary_generation_prompt)
-                summary_extraction = extract_summary_output(generated_summary)
-                if not summary_extraction.summary:
-                    continue
-                state.latest_summary = summary_extraction.summary
-                state.summarized_round_count += retired_count
-                state.summary_count += 1
-                summary_turn_id = f"summary-{state.summary_count}"
-                summary_turns.append(summary_turn_id)
-                turn_records.append(
-                    {
-                        "query_id": query_id,
-                        "turn_id": summary_turn_id,
-                        "kind": "summary",
-                        "prompt": summary_generation_prompt,
-                        "completion": generated_summary,
-                        "thinking": summary_extraction.thinking,
-                        "summary": summary_extraction.summary,
-                    }
+        if tool_name == "finish":
+            answer = arguments.get("answer")
+            if not isinstance(answer, str):
+                active.result = self._malformed_result(
+                    state,
+                    query_id,
+                    active.summary_turns,
+                    active.retrieved_docids,
+                    active.tool_call_counts,
+                    active.turn_records,
                 )
+                return
+            active.turn_records.append(
+                {
+                    "query_id": query_id,
+                    "turn_id": "final-answer",
+                    "kind": "final_answer",
+                    "prompt": self._build_runtime_prompt(state),
+                    "completion": normalized_output,
+                }
+            )
+            active.result = self._completed_result(active, answer)
+            return
+
+        if tool_name == "search":
+            query = arguments.get("query")
+            if not isinstance(query, str):
+                active.result = self._malformed_result(
+                    state,
+                    query_id,
+                    active.summary_turns,
+                    active.retrieved_docids,
+                    active.tool_call_counts,
+                    active.turn_records,
+                )
+                return
+            search_results = self.backend.search(query)
+            active.tool_call_counts["search"] += 1
+            self._record_search_result_docids(active.retrieved_docids, search_results)
+            tool_result = json.dumps(search_results, ensure_ascii=False)
+        elif tool_name == "get_document":
+            doc_id = arguments.get("doc_id")
+            if not isinstance(doc_id, str):
+                active.result = self._malformed_result(
+                    state,
+                    query_id,
+                    active.summary_turns,
+                    active.retrieved_docids,
+                    active.tool_call_counts,
+                    active.turn_records,
+                )
+                return
+            self._record_retrieved_docids(active.retrieved_docids, [doc_id])
+            tool_result = self.backend.get_document(doc_id)
+            active.tool_call_counts["get_document"] += 1
+        else:
+            active.result = self._malformed_result(
+                state,
+                query_id,
+                active.summary_turns,
+                active.retrieved_docids,
+                active.tool_call_counts,
+                active.turn_records,
+            )
+            return
+
+        state.rounds.append(
+            ToolRound(
+                assistant_message=Message(role="assistant", content=normalized_output),
+                tool_call=ToolCallRecord(tool_name=tool_name, arguments=arguments, raw_output=normalized_output),
+                tool_result=Message(role="tool", content=tool_result),
+            )
+        )
+
+    def _build_summary_prompt_for_active(self, active: _ActiveEpisode) -> tuple[str, int] | None:
+        compacted_state = self._compacted_state(active.state)
+        if not active.context_manager.should_summarize(compacted_state):
+            return None
+        summary_state, retired_count = self._build_summary_state(active.state)
+        if retired_count == 0:
+            return None
+        prompt = active.context_manager.build_summary_context(summary_state)
+        active.context_manager.assert_fits(prompt)
+        return prompt, retired_count
+
+    def _apply_summary_output(
+        self,
+        active: _ActiveEpisode,
+        prompt: str,
+        retired_count: int,
+        generated_summary: str,
+    ) -> None:
+        summary_extraction = extract_summary_output(generated_summary)
+        if not summary_extraction.summary:
+            return
+        state = active.state
+        state.latest_summary = summary_extraction.summary
+        state.summarized_round_count += retired_count
+        state.summary_count += 1
+        summary_turn_id = f"summary-{state.summary_count}"
+        active.summary_turns.append(summary_turn_id)
+        active.turn_records.append(
+            {
+                "query_id": state.query_id,
+                "turn_id": summary_turn_id,
+                "kind": "summary",
+                "prompt": prompt,
+                "completion": generated_summary,
+                "thinking": summary_extraction.thinking,
+                "summary": summary_extraction.summary,
+            }
+        )
+
+    def run_many(self, episodes: Iterable[tuple[str, str]]) -> list[RuntimeResult]:
+        active_episodes = [self._new_active_episode(query_id, user_prompt) for query_id, user_prompt in episodes]
+        while any(active.result is None for active in active_episodes):
+            action_items: list[tuple[_ActiveEpisode, str]] = []
+            for active in active_episodes:
+                if active.result is not None:
+                    continue
+                if self.max_tool_calls is not None and sum(active.tool_call_counts.values()) >= self.max_tool_calls:
+                    active.result = self._budget_exhausted_result(
+                        active.state.query_id,
+                        active.summary_turns,
+                        active.retrieved_docids,
+                        active.tool_call_counts,
+                        active.turn_records,
+                    )
+                    continue
+                acting_prompt = self._build_runtime_prompt(active.state)
+                active.context_manager.assert_fits(acting_prompt)
+                action_items.append((active, acting_prompt))
+
+            if action_items:
+                action_outputs = self._generate_batch([prompt for _, prompt in action_items])
+                for (active, _), raw_output in zip(action_items, action_outputs):
+                    self._apply_action_output(active, raw_output)
+
+            summary_items: list[tuple[_ActiveEpisode, str, int]] = []
+            for active in active_episodes:
+                if active.result is not None:
+                    continue
+                summary_request = self._build_summary_prompt_for_active(active)
+                if summary_request is None:
+                    continue
+                summary_prompt, retired_count = summary_request
+                summary_items.append((active, summary_prompt, retired_count))
+
+            if summary_items:
+                summary_outputs = self._generate_batch([prompt for _, prompt, _ in summary_items])
+                for (active, prompt, retired_count), generated_summary in zip(summary_items, summary_outputs):
+                    self._apply_summary_output(active, prompt, retired_count, generated_summary)
+
+        return [active.result for active in active_episodes if active.result is not None]
+
+    def run(self, query_id: str, user_prompt: str) -> RuntimeResult:
+        return self.run_many([(query_id, user_prompt)])[0]
