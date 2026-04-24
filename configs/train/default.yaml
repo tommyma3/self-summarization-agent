@@ -38,8 +38,8 @@ model:
 
 rollout:
   backend: vllm_offline
-  gpu_ids: [2, 3]
-  tensor_parallel_size: 2
+  gpu_ids: [2, 3, 4, 5]
+  tensor_parallel_size: 4
   attention_backend: TORCH_SDPA
   max_concurrent_episodes: 32
   max_new_tokens: 8192
@@ -61,9 +61,9 @@ judge:
 
 training:
   backend: fsdp2_context_parallel
-  gpu_ids: [0, 1, 2, 3]
+  gpu_ids: [0, 1, 2, 3, 4, 5]
   fsdp_version: 2
-  context_parallel_size: 4
+  context_parallel_size: 6
   tensor_parallel_size: 1
   data_parallel_size: 1
   activation_checkpointing: true
