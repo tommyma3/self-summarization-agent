@@ -309,11 +309,11 @@ class FSDP2ContextParallelPolicyTrainer:
             local_logprob_sum = -(token_losses * completion_mask.to(token_losses.dtype)).sum()
             local_token_count = completion_mask.sum().to(token_losses.dtype)
 
-        logprob_sum = self.accelerator.reduce(local_logprob_sum, reduction="sum")
-        token_count = self.accelerator.reduce(local_token_count, reduction="sum")
-        if token_count.item() == 0:
+        with torch.no_grad():
+            global_token_count = self.accelerator.reduce(local_token_count.detach(), reduction="sum")
+        if global_token_count.item() == 0:
             return torch.zeros((), device=self.accelerator.device)
-        return logprob_sum / token_count.clamp_min(1)
+        return local_logprob_sum / global_token_count.clamp_min(1)
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
         flat_samples: list[RLSample] = []
