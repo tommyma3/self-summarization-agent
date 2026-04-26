@@ -294,10 +294,11 @@ class FSDP2ContextParallelPolicyTrainer:
             return torch.zeros((), device=self.accelerator.device)
 
         buffers = [input_ids, labels, completion_mask]
+        no_restore_buffers = None if self.training_config.activation_checkpointing else set(buffers)
         with self.accelerator.maybe_context_parallel(
             buffers=buffers,
             buffer_seq_dims=[1, 1, 1],
-            no_restore_buffers=set(buffers),
+            no_restore_buffers=no_restore_buffers,
         ):
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits
