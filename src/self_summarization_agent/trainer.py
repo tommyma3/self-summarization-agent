@@ -243,7 +243,50 @@ class FSDP2ContextParallelPolicyTrainer:
         completion_mask = torch.zeros_like(labels, dtype=torch.bool)
         completion_start = max(len(prompt_ids) - 1, 0)
         completion_mask[:, completion_start:] = True
+        input_ids, labels, completion_mask = self._pad_for_context_parallel(input_ids, labels, completion_mask)
         return input_ids, labels, completion_mask
+
+    def _pad_for_context_parallel(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor,
+        completion_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        multiple = self.training_config.context_parallel_size * 2
+        if multiple <= 1:
+            return input_ids, labels, completion_mask
+        pad_length = (-input_ids.shape[1]) % multiple
+        if pad_length == 0:
+            return input_ids, labels, completion_mask
+
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        input_pad = torch.full(
+            (input_ids.shape[0], pad_length),
+            int(pad_token_id),
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        label_pad = torch.full(
+            (labels.shape[0], pad_length),
+            int(pad_token_id),
+            dtype=labels.dtype,
+            device=labels.device,
+        )
+        mask_pad = torch.zeros(
+            (completion_mask.shape[0], pad_length),
+            dtype=completion_mask.dtype,
+            device=completion_mask.device,
+        )
+        return (
+            torch.cat([input_ids, input_pad], dim=1),
+            torch.cat([labels, label_pad], dim=1),
+            torch.cat([completion_mask, mask_pad], dim=1),
+        )
 
     def _sequence_logprob(self, sample: RLSample) -> torch.Tensor:
         input_ids, labels, completion_mask = self._encode_shifted_sample(sample)
