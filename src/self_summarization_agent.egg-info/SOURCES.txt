@@ -29,10 +29,13 @@ src/self_summarization_agent.egg-info/SOURCES.txt
 src/self_summarization_agent.egg-info/dependency_links.txt
 src/self_summarization_agent.egg-info/requires.txt
 src/self_summarization_agent.egg-info/top_level.txt
+tests/test_bcplus_backend.py
 tests/test_checkpoints.py
 tests/test_config.py
 tests/test_context.py
 tests/test_export.py
+tests/test_generation.py
+tests/test_generation_transformers.py
 tests/test_iteration_launcher.py
 tests/test_launchers.py
 tests/test_prompts.py
