@@ -125,6 +125,7 @@ class RunConfig:
     retrieval: RetrievalConfig
     model: ModelConfig
     runtime: RuntimeConfig
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
 
 
 @dataclass(slots=True)
@@ -133,10 +134,10 @@ class TrainConfig:
     dataset: DatasetConfig
     retrieval: RetrievalConfig
     model: ModelConfig
-    rollout: RolloutConfig
     runtime: RuntimeConfig
     judge: JudgeConfig
     training: TrainingConfig
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
 
 
 def _parse_override_value(raw_value: str) -> Any:
@@ -199,22 +200,38 @@ def load_run_config(path: str | Path, overrides: dict[str, Any] | None = None) -
         retrieval=RetrievalConfig(**_require_section(raw, "retrieval")),
         model=ModelConfig(**_require_section(raw, "model")),
         runtime=RuntimeConfig(**_require_section(raw, "runtime")),
+        rollout=RolloutConfig(**_require_section(raw, "rollout")),
     )
+
+
+def _derive_rollout_config(raw: dict[str, Any], training: TrainingConfig) -> RolloutConfig:
+    rollout_section = _require_section(raw, "rollout")
+    if rollout_section:
+        return RolloutConfig(**rollout_section)
+    if training.backend == "fsdp2_context_parallel":
+        return RolloutConfig(
+            backend="vllm_offline",
+            gpu_ids=list(training.gpu_ids),
+            tensor_parallel_size=training.context_parallel_size,
+            max_model_len=65536,
+        )
+    return RolloutConfig()
 
 
 def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None) -> TrainConfig:
     raw = _load_yaml(path)
     if overrides:
         raw = apply_overrides(raw, overrides)
+    training = TrainingConfig(**_require_section(raw, "training"))
     return TrainConfig(
         experiment=ExperimentConfig(**_require_section(raw, "experiment")),
         dataset=DatasetConfig(**_require_section(raw, "dataset")),
         retrieval=RetrievalConfig(**_require_section(raw, "retrieval")),
         model=ModelConfig(**_require_section(raw, "model")),
-        rollout=RolloutConfig(**_require_section(raw, "rollout")),
         runtime=RuntimeConfig(**_require_section(raw, "runtime")),
         judge=JudgeConfig(**_require_section(raw, "judge")),
-        training=TrainingConfig(**_require_section(raw, "training")),
+        training=training,
+        rollout=_derive_rollout_config(raw, training),
     )
 
 
