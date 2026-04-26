@@ -42,6 +42,8 @@ def samples_from_rollout_rows(rows: list[dict[str, Any]], *, expected_checkpoint
         turn_rewards = row.get("turn_rewards")
         if not isinstance(turn_records, list) or not isinstance(turn_rewards, dict):
             raise ValueError(f"Rollout row {index} is missing turn_records or turn_rewards")
+        if row.get("trainable_sample_count") == 0:
+            continue
         samples.extend(extract_trainable_samples(turn_records, turn_rewards))
     return samples
 

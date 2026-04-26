@@ -63,6 +63,7 @@ def train_config(tmp_path: Path) -> TrainConfig:
 def write_rollout(path: Path, checkpoint_id: str) -> None:
     row = {
         "policy_checkpoint_id": checkpoint_id,
+        "trainable_sample_count": 1,
         "turn_records": [
             {
                 "query_id": "q1",
@@ -73,6 +74,26 @@ def write_rollout(path: Path, checkpoint_id: str) -> None:
             }
         ],
         "turn_rewards": {"final-answer": 1.0},
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
+    row = {
+        "policy_checkpoint_id": checkpoint_id,
+        "trainable_sample_count": 0,
+        "status": "malformed_tool_call",
+        "turn_records": [
+            {
+                "query_id": "q1",
+                "turn_id": "summary-1",
+                "kind": "summary",
+                "prompt": "prompt",
+                "completion": "summary",
+            },
+            {"kind": "tool", "turn_id": "tool-2"},
+        ],
+        "turn_rewards": {"tool-2": -1.0},
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -121,3 +142,23 @@ def test_run_train_step_rejects_checkpoint_mismatch_before_trainer_mutation(tmp_
 
     assert trainer.grouped_samples is None
     assert trainer.saved_checkpoints == []
+
+
+def test_run_train_step_skips_rows_marked_without_trainable_samples(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    write_malformed_rollout(rollout_path, "step-00001")
+    output_checkpoint = tmp_path / "checkpoints" / "step-00002"
+    trainer = FakeTrainer()
+
+    run_train_step(
+        train_config(tmp_path),
+        checkpoint_path=checkpoint,
+        rollout_path=rollout_path,
+        output_checkpoint_path=output_checkpoint,
+        trainer=trainer,
+    )
+
+    assert trainer.grouped_samples == {}
+    assert trainer.saved_checkpoints == [str(output_checkpoint)]
