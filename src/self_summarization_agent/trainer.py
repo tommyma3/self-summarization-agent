@@ -184,13 +184,22 @@ class FSDP2ContextParallelPolicyTrainer:
     def __post_init__(self) -> None:
         try:
             from accelerate import Accelerator
+            try:
+                from accelerate.utils import ParallelismConfig
+            except ImportError:
+                from accelerate.parallelism_config import ParallelismConfig
         except ImportError as exc:
             raise ImportError(
                 "training.backend='fsdp2_context_parallel' requires Accelerate in the GPU training environment. "
                 "Install a version with FSDP2/context-parallel support and launch with accelerate."
             ) from exc
 
-        self.accelerator = Accelerator()
+        parallelism_config = ParallelismConfig(
+            dp_shard_size=self.training_config.data_parallel_size,
+            tp_size=self.training_config.tensor_parallel_size,
+            cp_size=self.training_config.context_parallel_size,
+        )
+        self.accelerator = Accelerator(parallelism_config=parallelism_config)
         if self.training_config.context_parallel_size <= 1:
             raise ValueError("FSDP2 context-parallel training requires context_parallel_size > 1")
 
