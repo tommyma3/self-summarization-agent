@@ -69,7 +69,7 @@ training:
   context_parallel_size: 6
   tensor_parallel_size: 1
   data_parallel_size: 1
-  activation_checkpointing: true
+  activation_checkpointing: false
   epochs: 10
   steps: 10
   group_size: 4

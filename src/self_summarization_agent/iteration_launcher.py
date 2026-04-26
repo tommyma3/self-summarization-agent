@@ -36,7 +36,7 @@ def _train_step_command_prefix(config, python_executable: str) -> list[str]:
             "--parallelism-config-cp-size",
             str(config.training.context_parallel_size),
         ]
-        if config.training.activation_checkpointing:
+        if config.training.activation_checkpointing and config.training.context_parallel_size <= 1:
             command.append("--fsdp_activation_checkpointing=true")
         command.extend(["-m", "self_summarization_agent.train_step"])
         return command
