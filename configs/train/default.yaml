@@ -66,9 +66,9 @@ training:
   backend: fsdp2_context_parallel
   gpu_ids: [0, 1, 2, 3, 4, 5]
   fsdp_version: 2
-  context_parallel_size: 6
+  context_parallel_size: 2
   tensor_parallel_size: 1
-  data_parallel_size: 1
+  data_parallel_size: 3
   activation_checkpointing: false
   epochs: 10
   steps: 10
