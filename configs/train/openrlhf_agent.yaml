@@ -1,0 +1,20 @@
+# OpenRLHF agent training uses the normal train config for data/runtime/retrieval
+# and this file as the launcher-facing default. The agent reads the same config
+# from SELF_SUMMARIZATION_OPENRLHF_CONFIG.
+base_config: configs/train/default.yaml
+
+openrlhf:
+  prompt_data: /124090467/self-summarization-agent/artifacts/openrlhf/train_prompts.jsonl
+  input_key: prompt
+  label_key: label
+  agent_func_path: /124090467/self-summarization-agent/src/self_summarization_agent/openrlhf_agent.py
+  advantage_estimator: group_norm
+  n_samples_per_prompt: 4
+  max_len: 32768
+  max_new_tokens: 8192
+  zero_stage: 3
+  gradient_checkpointing: true
+  packing_samples: true
+  dynamic_batch: true
+  ring_attn_size: 2
+  train_micro_batch_size: 1
