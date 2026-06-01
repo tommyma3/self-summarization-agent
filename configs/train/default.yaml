@@ -23,7 +23,7 @@ retrieval:
   normalize: true
   pooling: eos
   torch_dtype: bfloat16
-  dataset_name: Tevatron/browsecomp-plus-corpus
+  dataset_name: /124090467/hf_datasets/Tevatron/browsecomp-plus-corpus
   max_length: 8192
 
 model:
@@ -43,7 +43,7 @@ rollout:
   gpu_ids: [2, 3, 4, 5]
   tensor_parallel_size: 4
   attention_backend: TORCH_SDPA
-  max_model_len: 65536
+  max_model_len: 20000
   max_concurrent_episodes: 32
   max_new_tokens: 8192
   temperature: 0.7
@@ -51,8 +51,8 @@ rollout:
   do_sample: true
 
 runtime:
-  context_threshold_tokens: 24000
-  max_context_tokens: 65536
+  context_threshold_tokens: 16000
+  max_context_tokens: 20000
   tool_budget: 20
 
 judge:
@@ -64,11 +64,11 @@ judge:
 
 training:
   backend: fsdp2_context_parallel
-  gpu_ids: [0, 1, 2, 3, 4, 5]
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
   fsdp_version: 2
-  context_parallel_size: 2
+  context_parallel_size: 4
   tensor_parallel_size: 1
-  data_parallel_size: 3
+  data_parallel_size: 2
   activation_checkpointing: false
   epochs: 10
   steps: 10
