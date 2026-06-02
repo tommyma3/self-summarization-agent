@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -62,10 +64,19 @@ def run_train_step(
     rows = _load_rollout_rows(rollout_path)
     samples = samples_from_rollout_rows(rows, expected_checkpoint_id=checkpoint_id)
     grouped_samples = group_samples_by_query(samples)
+    print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.")
 
     if trainer is None:
         if config.training.backend == "fsdp2_context_parallel":
-            trainer = FSDP2ContextParallelPolicyTrainer(config.model, config.training)
+            if os.environ.get("RANK") is None:
+                warnings.warn(
+                    "training.backend='fsdp2_context_parallel' requires accelerate launch. "
+                    "Falling back to 'transformers' backend for single-process execution.",
+                    stacklevel=2,
+                )
+                trainer = TransformersPolicyTrainer(config.model, config.training)
+            else:
+                trainer = FSDP2ContextParallelPolicyTrainer(config.model, config.training)
         elif config.training.backend == "transformers":
             trainer = TransformersPolicyTrainer(config.model, config.training)
         else:
@@ -75,12 +86,18 @@ def run_train_step(
             )
 
     metrics = trainer.step(grouped_samples)
+    print(
+        f"[train_step] Done: sample_count={metrics.sample_count}, mean_reward={metrics.mean_reward:.4f}, "
+        f"mean_advantage={metrics.mean_advantage:.4f}, loss={metrics.loss:.4f}"
+    )
     output_checkpoint = Path(output_checkpoint_path)
     ensure_dir(output_checkpoint)
     trainer.save_checkpoint(str(output_checkpoint))
-    mark_checkpoint_complete(output_checkpoint)
+    is_main = int(os.environ.get("RANK", "0")) == 0
+    if is_main:
+        mark_checkpoint_complete(output_checkpoint)
 
-    if metrics_path is not None:
+    if metrics_path is not None and is_main:
         append_jsonl(
             metrics_path,
             {

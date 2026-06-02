@@ -30,13 +30,21 @@ def _train_step_command_prefix(config, python_executable: str) -> list[str]:
             "launch",
             "--num_processes",
             str(len(config.training.gpu_ids) or config.training.context_parallel_size),
+            "--num_machines",
+            "1",
+            "--machine_rank",
+            "0",
+            "--main_process_port",
+            "0",
             "--use-fsdp",
             "--fsdp_version",
             str(config.training.fsdp_version or 2),
+            "--fsdp_auto_wrap_policy",
+            "transformer_based_wrap",
             "--parallelism-config-cp-size",
             str(config.training.context_parallel_size),
         ]
-        if config.training.activation_checkpointing and config.training.context_parallel_size <= 1:
+        if config.training.activation_checkpointing:
             command.append("--fsdp_activation_checkpointing=true")
         command.extend(["-m", "self_summarization_agent.train_step"])
         return command

@@ -64,12 +64,12 @@ judge:
 
 training:
   backend: fsdp2_context_parallel
-  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  gpu_ids: [0, 1, 2, 3, 4, 5]
   fsdp_version: 2
-  context_parallel_size: 4
+  context_parallel_size: 1
   tensor_parallel_size: 1
-  data_parallel_size: 2
-  activation_checkpointing: false
+  data_parallel_size: 6
+  activation_checkpointing: true
   epochs: 10
   steps: 10
   group_size: 4

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import functools
+import os
 from typing import Any
 import warnings
 
@@ -114,6 +116,11 @@ class TransformersPolicyTrainer:
     def _sequence_logprob(self, sample: RLSample) -> torch.Tensor:
         prompt_ids = self.tokenizer.encode(sample.prompt, add_special_tokens=False)
         full_ids = self.tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
+        max_len = getattr(self.training_config, "max_sequence_length", None)
+        if max_len is not None and len(full_ids) > max_len:
+            drop = len(full_ids) - max_len
+            full_ids = full_ids[drop:]
+            prompt_ids = prompt_ids[drop:] if len(prompt_ids) > drop else []
         if len(full_ids) <= len(prompt_ids):
             return torch.zeros((), device=self.model.device)
         input_ids = torch.tensor([full_ids], device=self.model.device)
@@ -151,14 +158,21 @@ class TransformersPolicyTrainer:
                 loss=0.0,
             )
 
+        is_main = int(os.environ.get("RANK", "0")) == 0
+        if is_main:
+            print(f"[TransformersPolicyTrainer] Starting step: {len(flat_samples)} samples, {len(contributing)} contributing")
         self.optimizer.zero_grad(set_to_none=True)
         detached_losses: list[float] = []
         scale = 1.0 / len(contributing)
-        for sample, advantage in contributing:
+        for i, (sample, advantage) in enumerate(contributing):
             logprob = self._sequence_logprob(sample)
             loss = -torch.tensor(advantage, device=self.model.device) * logprob
             detached_losses.append(float(loss.detach().cpu()))
             (loss * scale).backward()
+            if is_main and (i + 1) % max(1, len(contributing) // 10) == 0:
+                print(f"[TransformersPolicyTrainer]  Processed {i + 1}/{len(contributing)} samples")
+        if is_main:
+            print(f"[TransformersPolicyTrainer]  All {len(contributing)} samples processed, updating weights")
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
         self.optimizer.step()
         return UpdateMetrics(
@@ -201,8 +215,6 @@ class FSDP2ContextParallelPolicyTrainer:
             cp_size=self.training_config.context_parallel_size,
         )
         self.accelerator = Accelerator(parallelism_config=parallelism_config)
-        if self.training_config.context_parallel_size <= 1:
-            raise ValueError("FSDP2 context-parallel training requires context_parallel_size > 1")
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_config.model_path,
@@ -215,15 +227,13 @@ class FSDP2ContextParallelPolicyTrainer:
             torch_dtype=self._torch_dtype(),
             trust_remote_code=self.model_config.trust_remote_code,
         )
-        if self.training_config.activation_checkpointing and self.training_config.context_parallel_size > 1:
-            warnings.warn(
-                "Disabling model activation checkpointing because it is currently unsafe with "
-                "context-parallel buffer sharding in this trainer.",
-                RuntimeWarning,
-                stacklevel=2,
+        if self.training_config.activation_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model._set_gradient_checkpointing(
+                enable=True,
+                gradient_checkpointing_func=functools.partial(
+                    torch.utils.checkpoint.checkpoint, use_reentrant=False
+                ),
             )
-        elif self.training_config.activation_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable()
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.training_config.learning_rate)
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
         self.model.train()
@@ -301,16 +311,33 @@ class FSDP2ContextParallelPolicyTrainer:
         if input_ids.numel() == 0:
             return torch.zeros((), device=self.accelerator.device)
 
-        buffers = [input_ids, labels, completion_mask]
-        with self.accelerator.maybe_context_parallel(
-            buffers=buffers,
-            buffer_seq_dims=[1, 1, 1],
-            no_restore_buffers=set(buffers),
-        ):
+        max_len = getattr(self.training_config, "max_sequence_length", None)
+        if max_len is not None and input_ids.shape[1] > max_len:
+            input_ids = input_ids[:, -max_len:]
+            labels = labels[:, -max_len:]
+            completion_mask = completion_mask[:, -max_len:]
+
+        if self.training_config.context_parallel_size > 1:
+            buffers = [input_ids, labels, completion_mask]
+            with self.accelerator.maybe_context_parallel(
+                buffers=buffers,
+                buffer_seq_dims=[1, 1, 1],
+                no_restore_buffers=set(buffers),
+            ):
+                outputs = self.model(input_ids=input_ids)
+                logits = outputs.logits
+                token_losses = torch.nn.functional.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]),
+                    labels.reshape(-1),
+                    reduction="none",
+                ).reshape_as(labels)
+                local_logprob_sum = -(token_losses * completion_mask.to(token_losses.dtype)).sum()
+                local_token_count = completion_mask.sum().to(token_losses.dtype)
+        else:
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits
             token_losses = torch.nn.functional.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]).float(),
+                logits.reshape(-1, logits.shape[-1]),
                 labels.reshape(-1),
                 reduction="none",
             ).reshape_as(labels)
@@ -348,14 +375,21 @@ class FSDP2ContextParallelPolicyTrainer:
                 loss=0.0,
             )
 
+        is_main = getattr(self.accelerator, "is_main_process", True)
+        if is_main:
+            print(f"[FSDP2CPTrainer] Starting step: {len(flat_samples)} samples, {len(contributing)} contributing")
         self.optimizer.zero_grad(set_to_none=True)
         detached_losses: list[float] = []
         scale = 1.0 / len(contributing)
-        for sample, advantage in contributing:
+        for i, (sample, advantage) in enumerate(contributing):
             logprob = self._sequence_logprob(sample)
             loss = -torch.tensor(advantage, device=self.accelerator.device) * logprob
             detached_losses.append(float(loss.detach().cpu()))
             self.accelerator.backward(loss * scale)
+            if is_main and (i + 1) % max(1, len(contributing) // 10) == 0:
+                print(f"[FSDP2CPTrainer]  Processed {i + 1}/{len(contributing)} samples")
+        if is_main:
+            print(f"[FSDP2CPTrainer]  All {len(contributing)} samples processed, updating weights")
         self.accelerator.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
         self.optimizer.step()
         return UpdateMetrics(
@@ -367,8 +401,11 @@ class FSDP2ContextParallelPolicyTrainer:
 
     def save_checkpoint(self, path: str) -> None:
         self.accelerator.wait_for_everyone()
+        self.accelerator.save_model(self.model, path, safe_serialization=True)
         if self.accelerator.is_main_process:
             unwrapped_model = self.accelerator.unwrap_model(self.model)
-            unwrapped_model.save_pretrained(path, safe_serialization=True)
+            unwrapped_model.config.save_pretrained(path)
+            if hasattr(unwrapped_model, "generation_config") and unwrapped_model.generation_config is not None:
+                unwrapped_model.generation_config.save_pretrained(path)
             self.tokenizer.save_pretrained(path)
         self.accelerator.wait_for_everyone()

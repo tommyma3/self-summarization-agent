@@ -107,6 +107,7 @@ class TrainingConfig:
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
     activation_checkpointing: bool = False
+    max_sequence_length: int | None = None
     epochs: int | None = None
     steps: int = 1
     batch_size: int = 1
