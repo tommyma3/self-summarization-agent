@@ -98,6 +98,23 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
 
+def write_raw_rollout(path: Path, checkpoint_id: str) -> None:
+    row = {
+        "policy_checkpoint_id": checkpoint_id,
+        "trainable_sample_count": None,
+        "turn_records": [
+            {
+                "query_id": "q1",
+                "turn_id": "final-answer",
+                "kind": "final_answer",
+                "prompt": "prompt",
+                "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            }
+        ],
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
 def test_run_train_step_consumes_matching_rollouts_and_saves_checkpoint(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
@@ -162,3 +179,26 @@ def test_run_train_step_skips_rows_marked_without_trainable_samples(tmp_path: Pa
 
     assert trainer.grouped_samples == {}
     assert trainer.saved_checkpoints == [str(output_checkpoint)]
+
+
+def test_run_train_step_rejects_raw_unjudged_rollouts(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    write_raw_rollout(rollout_path, "step-00001")
+    trainer = FakeTrainer()
+
+    try:
+        run_train_step(
+            train_config(tmp_path),
+            checkpoint_path=checkpoint,
+            rollout_path=rollout_path,
+            output_checkpoint_path=tmp_path / "step-00002",
+            trainer=trainer,
+        )
+    except ValueError as exc:
+        assert "turn_records or turn_rewards" in str(exc)
+    else:
+        raise AssertionError("Expected raw rollout rows to be rejected")
+
+    assert trainer.grouped_samples is None

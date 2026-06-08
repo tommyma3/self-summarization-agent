@@ -127,7 +127,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated offline vLLM rollout collection plus one training update
+- `iteration_launcher` for process-isolated offline vLLM rollout collection, judging, and one training update
 
 The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
@@ -233,7 +233,7 @@ Training notes:
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
 - the new process-isolated path uses `rollout.backend: vllm_offline` and `training.backend: fsdp2_context_parallel`
-- in the new path, each iteration collects rollout JSONL from the latest checkpoint, runs one training update, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+- in the new path, each iteration collects raw rollout JSONL from the latest checkpoint, judges those rollouts into trainable JSONL, runs one training update, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
 ### Process-isolated vLLM rollout/training loop
 
@@ -242,7 +242,8 @@ The new orchestration path uses checkpoint files as the weight-sync boundary:
 ```powershell
 python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl
 python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl --resume
-python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
+python -m self_summarization_agent.judge_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/raw-rollouts.jsonl --output /path/to/judged-rollouts.jsonl
+python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/judged-rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
 python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --resume-rollouts
 ```
 
@@ -250,9 +251,11 @@ For the intended GPU run:
 
 - rollout collection builds the FAISS searcher before vLLM, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
+- rollout collection writes raw, unjudged trajectories by default; `--judge-inline` is only a compatibility path
+- `judge_step` loads the judge model after collection, can use a different judge model from `judge.model_path`, and writes judged rollouts with `turn_rewards`
 - interrupted rollout collection can be resumed with `--resume`; existing rows are validated against the current checkpoint and skipped by `(query_id, rollout_index)`
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
-- training applies one optimizer step after processing the full configured training split
+- training consumes judged rollout JSONL and applies one optimizer step after processing the full configured training split
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 ## Notes

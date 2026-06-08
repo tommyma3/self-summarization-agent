@@ -66,7 +66,8 @@ def run_training_iteration(
     rollouts_dir = ensure_dir(train_dir / "rollouts")
     checkpoints_dir = ensure_dir(train_dir / "checkpoints")
     metrics_path = train_dir / "step_metrics.jsonl"
-    rollout_path = rollouts_dir / f"iteration-{iteration:05d}.jsonl"
+    raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.raw.jsonl"
+    judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.jsonl"
     next_checkpoint = checkpoints_dir / f"iteration-{iteration:05d}"
 
     rollout_command = [
@@ -78,10 +79,23 @@ def run_training_iteration(
         "--checkpoint",
         str(current.path),
         "--output",
-        str(rollout_path),
+        str(raw_rollout_path),
     ]
     if resume_rollouts:
         rollout_command.append("--resume")
+    judge_command = [
+        python_executable,
+        "-m",
+        "self_summarization_agent.judge_step",
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(current.path),
+        "--rollouts",
+        str(raw_rollout_path),
+        "--output",
+        str(judged_rollout_path),
+    ]
     train_command = [
         *_train_step_command_prefix(config, python_executable),
         "--config",
@@ -89,7 +103,7 @@ def run_training_iteration(
         "--checkpoint",
         str(current.path),
         "--rollouts",
-        str(rollout_path),
+        str(judged_rollout_path),
         "--output-checkpoint",
         str(next_checkpoint),
         "--metrics",
@@ -98,6 +112,9 @@ def run_training_iteration(
     rollout_status = command_runner(rollout_command)
     if rollout_status != 0:
         raise RuntimeError(f"Rollout subprocess failed with exit code {rollout_status}")
+    judge_status = command_runner(judge_command)
+    if judge_status != 0:
+        raise RuntimeError(f"Judge subprocess failed with exit code {judge_status}")
     train_status = command_runner(train_command)
     if train_status != 0:
         raise RuntimeError(f"Training subprocess failed with exit code {train_status}")

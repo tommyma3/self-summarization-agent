@@ -92,6 +92,12 @@ class RuntimeConfig:
 @dataclass(slots=True)
 class JudgeConfig:
     enabled: bool = True
+    backend: str | None = None
+    model_path: str | None = None
+    gpu_ids: list[int] = field(default_factory=list)
+    tensor_parallel_size: int | None = None
+    attention_backend: str | None = None
+    max_model_len: int | None = None
     max_new_tokens: int = 256
     temperature: float = 0.0
     top_p: float = 1.0

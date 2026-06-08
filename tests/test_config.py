@@ -67,6 +67,11 @@ runtime:
   tool_budget: 4
 judge:
   enabled: true
+  backend: vllm_offline
+  model_path: judge-dir
+  gpu_ids: [4, 5]
+  tensor_parallel_size: 2
+  max_model_len: 8192
 training:
   backend: fsdp2_context_parallel
   gpu_ids: [0, 1, 2, 3]
@@ -89,5 +94,10 @@ training:
     assert config.rollout.gpu_ids == [0, 1, 2, 3]
     assert config.rollout.tensor_parallel_size == 4
     assert config.rollout.max_model_len == 65536
+    assert config.judge.backend == "vllm_offline"
+    assert config.judge.model_path == "judge-dir"
+    assert config.judge.gpu_ids == [4, 5]
+    assert config.judge.tensor_parallel_size == 2
+    assert config.judge.max_model_len == 8192
     assert config.training.backend == "fsdp2_context_parallel"
     assert config.training.context_parallel_size == 4

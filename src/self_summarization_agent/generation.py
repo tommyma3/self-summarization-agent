@@ -200,8 +200,29 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
     temperature = judge_config.temperature if judge_config else model_config.temperature
     top_p = judge_config.top_p if judge_config else model_config.top_p
     do_sample = judge_config.do_sample if judge_config else model_config.do_sample
-    model_path = model_config.judge_model_path if judge_config and model_config.judge_model_path else model_config.model_path
-    backend_name = model_config.backend.lower()
+    model_path = (
+        judge_config.model_path
+        if judge_config and judge_config.model_path
+        else model_config.judge_model_path
+        if judge_config and model_config.judge_model_path
+        else model_config.model_path
+    )
+    backend_name = (judge_config.backend if judge_config and judge_config.backend else model_config.backend).lower()
+    tensor_parallel_size = (
+        judge_config.tensor_parallel_size
+        if judge_config and judge_config.tensor_parallel_size is not None
+        else model_config.tensor_parallel_size
+    )
+    attention_backend = (
+        judge_config.attention_backend
+        if judge_config and judge_config.attention_backend is not None
+        else model_config.attention_backend
+    )
+    max_model_len = (
+        judge_config.max_model_len
+        if judge_config and judge_config.max_model_len is not None
+        else model_config.max_model_len
+    )
     if backend_name == "transformers":
         return TransformersGenerator(
             model_path=model_path,
@@ -221,9 +242,9 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
-            tensor_parallel_size=model_config.tensor_parallel_size,
-            attention_backend=model_config.attention_backend,
-            max_model_len=model_config.max_model_len,
+            tensor_parallel_size=tensor_parallel_size,
+            attention_backend=attention_backend,
+            max_model_len=max_model_len,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
         )

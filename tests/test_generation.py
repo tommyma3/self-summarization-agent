@@ -1,4 +1,4 @@
-from self_summarization_agent.config import ModelConfig
+from self_summarization_agent.config import JudgeConfig, ModelConfig
 from self_summarization_agent.generation import VLLMGenerator, build_generator
 
 
@@ -52,6 +52,36 @@ def test_build_generator_accepts_vllm_offline_backend(monkeypatch) -> None:
     assert isinstance(generator, VLLMGenerator)
     assert generator.model_path == "/models/demo"
     assert generator.tensor_parallel_size == 2
+
+
+def test_build_generator_uses_judge_backend_overrides(monkeypatch) -> None:
+    def fake_init(self) -> None:
+        self.tokenizer = object()
+        self.llm = object()
+        self._sampling_params_cls = object()
+
+    monkeypatch.setattr(VLLMGenerator, "__post_init__", fake_init)
+
+    generator = build_generator(
+        ModelConfig(
+            backend="transformers",
+            model_path="/models/policy",
+            judge_model_path="/models/legacy-judge",
+        ),
+        judge_config=JudgeConfig(
+            backend="vllm_offline",
+            model_path="/models/judge",
+            tensor_parallel_size=2,
+            attention_backend="TORCH_SDPA",
+            max_model_len=8192,
+        ),
+    )
+
+    assert isinstance(generator, VLLMGenerator)
+    assert generator.model_path == "/models/judge"
+    assert generator.tensor_parallel_size == 2
+    assert generator.attention_backend == "TORCH_SDPA"
+    assert generator.max_model_len == 8192
 
 
 def test_vllm_generator_batches_prompts(monkeypatch) -> None:

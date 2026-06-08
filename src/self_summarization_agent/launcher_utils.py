@@ -43,19 +43,27 @@ def append_jsonl(path: str | Path, payload: Any) -> None:
         handle.write("\n")
 
 
-def serialize_runtime_result(result: RuntimeResult, *, query_text: str, judge: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
+def serialize_runtime_result(
+    result: RuntimeResult,
+    *,
+    query_text: str,
+    judge: dict[str, Any] | None = None,
+    include_rewards: bool = True,
+) -> dict[str, Any]:
+    payload = {
         "query_id": result.query_id,
         "query": query_text,
         "status": result.status,
         "final_answer": result.final_answer,
         "summary_turns": list(result.summary_turns),
         "turn_records": list(result.turn_records),
-        "turn_rewards": dict(result.turn_rewards),
         "retrieved_docids": list(result.retrieved_docids),
         "tool_call_counts": dict(result.tool_call_counts),
         "judge": judge,
     }
+    if include_rewards:
+        payload["turn_rewards"] = dict(result.turn_rewards)
+    return payload
 
 
 def build_runtime(generator: Any, backend: Any, runtime_config: Any) -> EpisodeRuntime:

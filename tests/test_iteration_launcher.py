@@ -61,7 +61,12 @@ def test_iteration_launcher_runs_rollout_then_train_and_advances_latest(tmp_path
 
     assert next_checkpoint == (latest_root / "checkpoints" / "iteration-00001").resolve()
     assert "self_summarization_agent.rollout_collection" in calls[0]
-    assert "self_summarization_agent.train_step" in calls[1]
+    assert "self_summarization_agent.judge_step" in calls[1]
+    assert "self_summarization_agent.train_step" in calls[2]
+    assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[0]
+    assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[1]
+    assert str(latest_root / "rollouts" / "iteration-00001.jsonl") in calls[1]
+    assert str(latest_root / "rollouts" / "iteration-00001.jsonl") in calls[2]
     assert resolve_latest_checkpoint(latest_root).checkpoint_id == "iteration-00001"
 
 

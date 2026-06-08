@@ -94,7 +94,41 @@ def train_config(tmp_path: Path) -> TrainConfig:
     )
 
 
-def test_collect_rollouts_writes_checkpoint_tagged_rows(tmp_path: Path) -> None:
+def test_collect_rollouts_writes_raw_checkpoint_tagged_rows_by_default(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    backend = FakeBackend(search_index={"question": ["doc-1"]}, documents={"doc-1": "fact"})
+    generator = CyclingGenerator(
+        [
+            tool_output('{"tool_name": "search", "arguments": {"query": "question"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
+        ]
+    )
+    examples = [QueryExample(query_id="q1", query="question", answer="done")]
+    output_path = tmp_path / "rollouts.jsonl"
+
+    collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=output_path,
+        examples=examples,
+        backend=backend,
+        generator=generator,
+    )
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert {row["policy_checkpoint_id"] for row in rows} == {"step-00001"}
+    assert all(row["policy_checkpoint_path"] == str(checkpoint.resolve()) for row in rows)
+    assert all(row["query_id"] == "q1" for row in rows)
+    assert all(row["status"] == "completed" for row in rows)
+    assert all(row["trainable_sample_count"] is None for row in rows)
+    assert all(row["judge"] is None for row in rows)
+    assert all("turn_rewards" not in row for row in rows)
+
+
+def test_collect_rollouts_can_still_judge_inline(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
@@ -116,15 +150,12 @@ def test_collect_rollouts_writes_checkpoint_tagged_rows(tmp_path: Path) -> None:
         backend=backend,
         generator=generator,
         judge=FakeJudge(),
+        judge_inline=True,
     )
 
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 2
-    assert {row["policy_checkpoint_id"] for row in rows} == {"step-00001"}
-    assert all(row["policy_checkpoint_path"] == str(checkpoint.resolve()) for row in rows)
-    assert all(row["query_id"] == "q1" for row in rows)
-    assert all(row["status"] == "completed" for row in rows)
     assert all(row["trainable_sample_count"] == 1 for row in rows)
+    assert all(row["turn_rewards"] == {"final-answer": 1.0} for row in rows)
 
 
 def test_collect_rollouts_batches_active_queries(tmp_path: Path) -> None:
@@ -164,7 +195,7 @@ def test_collect_rollouts_batches_active_queries(tmp_path: Path) -> None:
     assert generator.batch_sizes == [2, 2]
     assert [row["query_id"] for row in rows] == ["q1", "q2"]
     assert all(row["status"] == "completed" for row in rows)
-    assert all(row["trainable_sample_count"] == 1 for row in rows)
+    assert all(row["trainable_sample_count"] is None for row in rows)
 
 
 def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:

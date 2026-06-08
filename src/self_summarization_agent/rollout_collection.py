@@ -91,6 +91,7 @@ def collect_rollouts(
     generator: Any | None = None,
     judge: Any | None = None,
     resume: bool = False,
+    judge_inline: bool = False,
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
@@ -155,16 +156,22 @@ def collect_rollouts(
         else config.model.max_model_len,
     )
     generator = generator or build_generator(rollout_model_config)
-    judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
+    if judge_inline:
+        judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
     runtime = build_runtime(generator, backend, config.runtime)
 
     for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
         results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
         for (example, rollout_index), result in zip(request_batch, results):
-            judge_payload = apply_judged_rewards(result, example, judge)
-            trainable_sample_count = 0
-            if judge_payload["outcome"] != "malformed_tool_call":
-                trainable_sample_count = len(extract_trainable_samples(result.turn_records, result.turn_rewards))
+            judge_payload = None
+            trainable_sample_count = None
+            include_rewards = False
+            if judge_inline:
+                judge_payload = apply_judged_rewards(result, example, judge)
+                trainable_sample_count = 0
+                include_rewards = True
+                if judge_payload["outcome"] != "malformed_tool_call":
+                    trainable_sample_count = len(extract_trainable_samples(result.turn_records, result.turn_rewards))
             append_jsonl(
                 rollout_path,
                 {
@@ -175,7 +182,8 @@ def collect_rollouts(
                     **serialize_runtime_result(
                         result,
                         query_text=example.query,
-                        judge={**judge_payload, "rollout_index": rollout_index},
+                        judge={**judge_payload, "rollout_index": rollout_index} if judge_payload else None,
+                        include_rewards=include_rewards,
                     ),
                 },
             )
@@ -189,6 +197,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
     parser.add_argument("--output", required=True, help="Rollout JSONL output path.")
     parser.add_argument("--resume", action="store_true", help="Append missing rollouts and skip rows already in output.")
+    parser.add_argument("--judge-inline", action="store_true", help="Judge rollouts during collection instead of writing raw rows.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -201,7 +210,13 @@ def main() -> None:
     else:
         latest_root = args.latest_root or Path(config.experiment.output_root) / "artifacts" / "train" / config.experiment.name
         checkpoint = resolve_latest_checkpoint(latest_root).path
-    rollout_path = collect_rollouts(config, checkpoint_path=checkpoint, output_path=args.output, resume=args.resume)
+    rollout_path = collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=args.output,
+        resume=args.resume,
+        judge_inline=args.judge_inline,
+    )
     print(rollout_path)
 
 

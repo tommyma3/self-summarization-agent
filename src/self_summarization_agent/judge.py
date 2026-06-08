@@ -60,6 +60,23 @@ def parse_judge_response(judge_response: str) -> dict[str, object]:
 class RewardJudge:
     generator: TextGenerator
 
+    def _decision_from_judge_response(self, judge_prompt: str, judge_response: str) -> JudgeDecision:
+        parsed = parse_judge_response(judge_response)
+        if parsed["parse_error"]:
+            return JudgeDecision(
+                outcome="wrong_answer",
+                judge_prompt=judge_prompt,
+                judge_response=judge_response,
+                parse_error=True,
+            )
+        outcome = "correct_answer" if parsed["correct"] else "wrong_answer"
+        return JudgeDecision(
+            outcome=outcome,
+            judge_prompt=judge_prompt,
+            judge_response=judge_response,
+            parse_error=False,
+        )
+
     def evaluate(self, example: QueryExample, status: str, response: str) -> JudgeDecision:
         if status != "completed":
             return JudgeDecision(
@@ -79,18 +96,42 @@ class RewardJudge:
             raise ValueError(f"Query {example.query_id} is missing an answer for judging")
         judge_prompt = create_judge_prompt(example.query, response, example.answer)
         judge_response = self.generator.generate(judge_prompt)
-        parsed = parse_judge_response(judge_response)
-        if parsed["parse_error"]:
-            return JudgeDecision(
-                outcome="wrong_answer",
-                judge_prompt=judge_prompt,
-                judge_response=judge_response,
-                parse_error=True,
-            )
-        outcome = "correct_answer" if parsed["correct"] else "wrong_answer"
-        return JudgeDecision(
-            outcome=outcome,
-            judge_prompt=judge_prompt,
-            judge_response=judge_response,
-            parse_error=False,
-        )
+        return self._decision_from_judge_response(judge_prompt, judge_response)
+
+    def evaluate_batch(
+        self,
+        items: list[tuple[QueryExample, str, str]],
+    ) -> list[JudgeDecision]:
+        decisions: list[JudgeDecision | None] = [None] * len(items)
+        prompt_items: list[tuple[int, str]] = []
+        for index, (example, status, response) in enumerate(items):
+            if status != "completed":
+                decisions[index] = JudgeDecision(
+                    outcome="budget_exhausted",
+                    judge_prompt=None,
+                    judge_response=None,
+                    parse_error=False,
+                )
+                continue
+            if not response.strip():
+                decisions[index] = JudgeDecision(
+                    outcome="wrong_answer",
+                    judge_prompt=None,
+                    judge_response=None,
+                    parse_error=False,
+                )
+                continue
+            if example.answer is None:
+                raise ValueError(f"Query {example.query_id} is missing an answer for judging")
+            prompt_items.append((index, create_judge_prompt(example.query, response, example.answer)))
+
+        if prompt_items:
+            generate_batch = getattr(self.generator, "generate_batch", None)
+            prompts = [prompt for _, prompt in prompt_items]
+            responses = generate_batch(prompts) if generate_batch is not None else [self.generator.generate(prompt) for prompt in prompts]
+            if len(responses) != len(prompt_items):
+                raise ValueError(f"Batch judge returned {len(responses)} outputs for {len(prompt_items)} prompts")
+            for (index, prompt), response in zip(prompt_items, responses):
+                decisions[index] = self._decision_from_judge_response(prompt, response)
+
+        return [decision for decision in decisions if decision is not None]

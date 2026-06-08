@@ -57,6 +57,12 @@ runtime:
 
 judge:
   enabled: true
+  backend: vllm_offline
+  model_path:
+  gpu_ids: [0, 1]
+  tensor_parallel_size: 2
+  attention_backend: TORCH_SDPA
+  max_model_len: 8192
   max_new_tokens: 4096
   temperature: 0.0
   top_p: 1.0
