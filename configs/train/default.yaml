@@ -40,8 +40,8 @@ model:
 
 rollout:
   backend: vllm_offline
-  gpu_ids: [2, 3, 4, 5]
-  tensor_parallel_size: 4
+  gpu_ids: [2, 3]
+  tensor_parallel_size: 2
   attention_backend: TORCH_SDPA
   max_model_len: 20000
   max_concurrent_episodes: 32
@@ -58,8 +58,8 @@ runtime:
 judge:
   enabled: true
   backend: vllm_offline
-  model_path:
-  gpu_ids: [0, 1]
+  model_path: /124090467/Qwen/Qwen3.5-9B
+  gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend: TORCH_SDPA
   max_model_len: 8192
@@ -70,11 +70,11 @@ judge:
 
 training:
   backend: fsdp2_context_parallel
-  gpu_ids: [0, 1, 2, 3, 4, 5]
+  gpu_ids: [0, 1, 2, 3]
   fsdp_version: 2
   context_parallel_size: 1
   tensor_parallel_size: 1
-  data_parallel_size: 6
+  data_parallel_size: 4
   activation_checkpointing: true
   epochs: 10
   steps: 10
