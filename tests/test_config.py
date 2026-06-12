@@ -80,6 +80,11 @@ training:
   steps: 3
   batch_size: 2
   group_size: 2
+  rollout_query_count: 100
+  update_epochs: 4
+  minibatch_size: 16
+  clip_range: 0.3
+  target_kl: 0.05
 """.strip(),
         encoding="utf-8",
     )
@@ -89,6 +94,11 @@ training:
     assert config.training.steps == 3
     assert config.training.batch_size == 2
     assert config.training.group_size == 2
+    assert config.training.rollout_query_count == 100
+    assert config.training.update_epochs == 4
+    assert config.training.minibatch_size == 16
+    assert config.training.clip_range == 0.3
+    assert config.training.target_kl == 0.05
     assert config.retrieval.snippet_tokenizer_path == "/models/qwen-tokenizer"
     assert config.rollout.backend == "vllm_offline"
     assert config.rollout.gpu_ids == [0, 1, 2, 3]

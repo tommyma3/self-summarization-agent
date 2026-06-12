@@ -1,7 +1,7 @@
 import torch
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
-from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer
+from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
 from self_summarization_agent.trajectory import RLSample
 
 
@@ -44,6 +44,17 @@ def make_sample() -> RLSample:
     )
 
 
+def make_rewarded_sample(query_id: str, turn_id: str, reward: float) -> RLSample:
+    return RLSample(
+        query_id=query_id,
+        turn_id=turn_id,
+        prompt="prompt",
+        completion=f" completion {turn_id}",
+        reward=reward,
+        trainable_kind="final_answer",
+    )
+
+
 def test_fsdp_context_parallel_encoding_pads_to_required_multiple() -> None:
     trainer = make_fsdp_trainer(
         FakeTokenizer(prompt_ids=[1, 2, 3, 4, 5], full_ids=list(range(17))),
@@ -71,3 +82,39 @@ def test_fsdp_context_parallel_encoding_leaves_aligned_sequence_unpadded() -> No
     assert input_ids.shape == labels.shape == completion_mask.shape == (1, 12)
     assert input_ids[0, -1].item() == 11
     assert labels[0, -1].item() == 12
+
+
+def test_transformers_trainer_reuses_batch_for_clipped_grpo_updates() -> None:
+    trainer = TransformersPolicyTrainer.__new__(TransformersPolicyTrainer)
+    trainer.training_config = TrainingConfig(update_epochs=3, minibatch_size=2, clip_range=0.2)
+    trainer.model = torch.nn.Linear(1, 1, bias=False)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.01)
+    feature_by_turn = {
+        "q1-good": 1.0,
+        "q1-bad": 2.0,
+        "q2-good": 3.0,
+        "q2-bad": 4.0,
+    }
+
+    def sequence_logprob(sample: RLSample) -> torch.Tensor:
+        feature = torch.tensor([[feature_by_turn[sample.turn_id]]], dtype=torch.float32)
+        return trainer.model(feature).mean()
+
+    trainer._sequence_logprob = sequence_logprob
+    grouped_samples = {
+        "q1": [
+            make_rewarded_sample("q1", "q1-good", 1.0),
+            make_rewarded_sample("q1", "q1-bad", 0.0),
+        ],
+        "q2": [
+            make_rewarded_sample("q2", "q2-good", 1.0),
+            make_rewarded_sample("q2", "q2-bad", 0.0),
+        ],
+    }
+
+    metrics = trainer.step(grouped_samples)
+
+    assert metrics.sample_count == 4
+    assert metrics.optimizer_step_count == 6
+    assert metrics.loss != 0.0
+    assert 0.0 <= metrics.clip_fraction <= 1.0

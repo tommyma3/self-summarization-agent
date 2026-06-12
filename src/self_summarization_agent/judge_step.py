@@ -9,7 +9,7 @@ from typing import Any
 
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
-from self_summarization_agent.dataset import QueryExample, load_query_examples
+from self_summarization_agent.dataset import QueryExample, load_query_examples, split_train_eval_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import JudgeDecision, RewardJudge
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
@@ -38,15 +38,25 @@ def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_examples_by_query_id(config) -> dict[str, QueryExample]:
+def _load_examples_by_query_id(config, *, split: str) -> dict[str, QueryExample]:
     examples = load_query_examples(
         config.experiment.bc_plus_root,
         config.dataset,
         require_answers=True,
         seed=config.experiment.seed,
     )
-    train_examples = examples if config.dataset.train_limit is None else examples[: config.dataset.train_limit]
-    return {example.query_id: example for example in train_examples}
+    train_examples, eval_examples = split_train_eval_examples(
+        examples,
+        train_limit=config.dataset.train_limit,
+        eval_limit=config.dataset.eval_limit,
+    )
+    if split == "train":
+        selected_examples = train_examples
+    elif split == "eval":
+        selected_examples = eval_examples
+    else:
+        raise ValueError(f"Unsupported judge split: {split}")
+    return {example.query_id: example for example in selected_examples}
 
 
 def build_judge(config) -> RewardJudge:
@@ -129,10 +139,11 @@ def judge_rollouts(
     checkpoint_path: str | Path | None = None,
     judge: RewardJudge | None = None,
     examples_by_query_id: dict[str, QueryExample] | None = None,
+    split: str = "train",
 ) -> Path:
     expected_checkpoint_id = checkpoint_id_from_path(checkpoint_path) if checkpoint_path is not None else None
     rows = _load_rollout_rows(rollout_path)
-    examples = examples_by_query_id or _load_examples_by_query_id(config)
+    examples = examples_by_query_id or _load_examples_by_query_id(config, split=split)
     for index, row in enumerate(rows, start=1):
         _validate_raw_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
 
@@ -177,6 +188,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rollouts", required=True, help="Raw rollout JSONL path.")
     parser.add_argument("--output", required=True, help="Judged rollout JSONL output path.")
     parser.add_argument("--checkpoint", default=None, help="Optional policy checkpoint path for row validation.")
+    parser.add_argument("--split", choices=["train", "eval"], default="train", help="Dataset split used by the rollouts.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -189,6 +201,7 @@ def main() -> None:
         rollout_path=args.rollouts,
         output_path=args.output,
         checkpoint_path=args.checkpoint,
+        split=args.split,
     )
     print(output)
 

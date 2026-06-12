@@ -127,7 +127,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated offline vLLM rollout collection, judging, and one training update
+- `iteration_launcher` for process-isolated offline vLLM rollout collection, judging, and clipped GRPO training updates
 
 The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
@@ -148,6 +148,7 @@ The practical workflow is:
 6. Inspect:
    - rollout JSONL under `artifacts/train/.../rollouts/`
    - `metrics.jsonl`
+   - `eval_metrics.jsonl`
    - `accuracy_history.jsonl`
    - checkpoints
 
@@ -228,12 +229,12 @@ python scripts/plot_accuracy.py artifacts/train/qwen-bcplus-train/accuracy_histo
 
 Training notes:
 
-- the default training config uses queries 1-200 for training and 201-210 for evaluation
+- the default training config uses queries 1-780 for training and 781-830 for evaluation
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
 - the new process-isolated path uses `rollout.backend: vllm_offline` and `training.backend: fsdp2_context_parallel`
-- in the new path, each iteration collects raw rollout JSONL from the latest checkpoint, judges those rollouts into trainable JSONL, runs one training update, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+- in the new path, each iteration samples 100 training questions, collects raw rollout JSONL from the latest checkpoint, judges those rollouts into trainable JSONL, runs clipped GRPO updates over the judged batch, evaluates the new checkpoint on the 50 held-out questions, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
 ### Process-isolated vLLM rollout/training loop
 
@@ -255,7 +256,8 @@ For the intended GPU run:
 - `judge_step` loads the judge model after collection, can use a different judge model from `judge.model_path`, and writes judged rollouts with `turn_rewards`
 - interrupted rollout collection can be resumed with `--resume`; existing rows are validated against the current checkpoint and skipped by `(query_id, rollout_index)`
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
-- training consumes judged rollout JSONL and applies one optimizer step after processing the full configured training split
+- training consumes judged rollout JSONL and applies `training.update_epochs` clipped GRPO passes over the collected batch
+- evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and appends accuracy to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 ## Notes

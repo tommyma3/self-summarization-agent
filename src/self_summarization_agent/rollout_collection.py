@@ -5,12 +5,13 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import random
 from typing import Any
 
 from self_summarization_agent.bcplus_backend import build_backend
 from self_summarization_agent.checkpoints import checkpoint_id_from_path, resolve_latest_checkpoint
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
-from self_summarization_agent.dataset import QueryExample, load_query_examples
+from self_summarization_agent.dataset import QueryExample, load_query_examples, split_train_eval_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import (
@@ -96,6 +97,8 @@ def collect_rollouts(
     judge: Any | None = None,
     resume: bool = False,
     judge_inline: bool = False,
+    sample_seed: int | None = None,
+    split: str = "train",
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
@@ -105,16 +108,38 @@ def collect_rollouts(
         require_answers=True,
         seed=config.experiment.seed,
     )
-    train_examples = examples if config.dataset.train_limit is None else examples[: config.dataset.train_limit]
-    if not train_examples:
-        raise ValueError("No training queries available for rollout collection")
+    train_examples, eval_examples = split_train_eval_examples(
+        examples,
+        train_limit=config.dataset.train_limit,
+        eval_limit=config.dataset.eval_limit,
+    )
+    if split == "train":
+        selected_examples = train_examples
+    elif split == "eval":
+        selected_examples = eval_examples
+    else:
+        raise ValueError(f"Unsupported rollout split: {split}")
+
+    rollout_query_count = config.training.rollout_query_count if split == "train" else None
+    if rollout_query_count is not None:
+        if rollout_query_count < 1:
+            raise ValueError(f"training.rollout_query_count must be at least 1, got {rollout_query_count}")
+        if rollout_query_count > len(selected_examples):
+            raise ValueError(
+                "training.rollout_query_count cannot exceed available training queries: "
+                f"{rollout_query_count} > {len(selected_examples)}"
+            )
+        seed = config.experiment.seed if sample_seed is None else sample_seed
+        selected_examples = random.Random(seed).sample(selected_examples, rollout_query_count)
+    if not selected_examples:
+        raise ValueError(f"No {split} queries available for rollout collection")
 
     rollout_path = Path(output_path)
     ensure_dir(rollout_path.parent)
 
     rollout_requests = [
         (example, rollout_index)
-        for example in train_examples
+        for example in selected_examples
         for rollout_index in range(config.training.group_size)
     ]
     expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
@@ -143,6 +168,7 @@ def collect_rollouts(
     rollout_model_config = replace(
         config.model,
         backend=config.rollout.backend,
+        model_path=str(checkpoint),
         max_new_tokens=config.rollout.max_new_tokens
         if config.rollout.max_new_tokens is not None
         else config.model.max_new_tokens,
@@ -200,6 +226,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Rollout JSONL output path.")
     parser.add_argument("--resume", action="store_true", help="Append missing rollouts and skip rows already in output.")
     parser.add_argument("--judge-inline", action="store_true", help="Judge rollouts during collection instead of writing raw rows.")
+    parser.add_argument("--sample-seed", type=int, default=None, help="Seed for per-iteration training-query sampling.")
+    parser.add_argument("--split", choices=["train", "eval"], default="train", help="Dataset split to collect.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -218,6 +246,8 @@ def main() -> None:
         output_path=args.output,
         resume=args.resume,
         judge_inline=args.judge_inline,
+        sample_seed=args.sample_seed,
+        split=args.split,
     )
     print(rollout_path)
 

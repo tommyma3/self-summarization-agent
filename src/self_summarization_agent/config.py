@@ -118,6 +118,11 @@ class TrainingConfig:
     steps: int = 1
     batch_size: int = 1
     group_size: int = 2
+    rollout_query_count: int | None = None
+    update_epochs: int = 1
+    minibatch_size: int | None = None
+    clip_range: float = 0.2
+    target_kl: float | None = None
     gradient_accumulation_microbatch_size: int = 1
     learning_rate: float = 1e-6
     checkpoint_interval: int = 100

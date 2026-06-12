@@ -1,4 +1,5 @@
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +54,15 @@ class BatchRecordingGenerator:
             else:
                 outputs.append("malformed")
         return outputs
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
+
+
+class FinishingGenerator:
+    def generate(self, prompt: str) -> str:
+        del prompt
+        return tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
@@ -196,6 +206,34 @@ def test_collect_rollouts_batches_active_queries(tmp_path: Path) -> None:
     assert [row["query_id"] for row in rows] == ["q1", "q2"]
     assert all(row["status"] == "completed" for row in rows)
     assert all(row["trainable_sample_count"] is None for row in rows)
+
+
+def test_collect_rollouts_samples_configured_training_query_count(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.train_limit = 5
+    config.training.group_size = 1
+    config.training.rollout_query_count = 2
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    examples = [
+        QueryExample(query_id=f"q{index}", query=f"question {index}", answer="done")
+        for index in range(5)
+    ]
+    output_path = tmp_path / "rollouts.jsonl"
+
+    collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=output_path,
+        examples=examples,
+        backend=FakeBackend(search_index={}, documents={}),
+        generator=FinishingGenerator(),
+        sample_seed=123,
+    )
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    expected_examples = random.Random(123).sample(examples, 2)
+    assert [row["query_id"] for row in rows] == [example.query_id for example in expected_examples]
 
 
 def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:

@@ -102,3 +102,16 @@ def slice_examples(
     if limit is not None:
         sliced = sliced[:limit]
     return sliced
+
+
+def split_train_eval_examples(
+    examples: list[QueryExample],
+    *,
+    train_limit: int | None,
+    eval_limit: int,
+) -> tuple[list[QueryExample], list[QueryExample]]:
+    if train_limit is None:
+        return list(examples), []
+    train_examples = list(examples[:train_limit])
+    eval_examples = list(examples[train_limit : train_limit + eval_limit])
+    return train_examples, eval_examples

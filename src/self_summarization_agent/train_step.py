@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import os
 import warnings
@@ -67,6 +68,7 @@ def run_train_step(
     print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.")
 
     if trainer is None:
+        model_config = replace(config.model, model_path=str(checkpoint))
         if config.training.backend == "fsdp2_context_parallel":
             if os.environ.get("RANK") is None:
                 warnings.warn(
@@ -74,11 +76,11 @@ def run_train_step(
                     "Falling back to 'transformers' backend for single-process execution.",
                     stacklevel=2,
                 )
-                trainer = TransformersPolicyTrainer(config.model, config.training)
+                trainer = TransformersPolicyTrainer(model_config, config.training)
             else:
-                trainer = FSDP2ContextParallelPolicyTrainer(config.model, config.training)
+                trainer = FSDP2ContextParallelPolicyTrainer(model_config, config.training)
         elif config.training.backend == "transformers":
-            trainer = TransformersPolicyTrainer(config.model, config.training)
+            trainer = TransformersPolicyTrainer(model_config, config.training)
         else:
             raise NotImplementedError(
                 "The local environment cannot execute backend="
@@ -88,7 +90,10 @@ def run_train_step(
     metrics = trainer.step(grouped_samples)
     print(
         f"[train_step] Done: sample_count={metrics.sample_count}, mean_reward={metrics.mean_reward:.4f}, "
-        f"mean_advantage={metrics.mean_advantage:.4f}, loss={metrics.loss:.4f}"
+        f"mean_advantage={metrics.mean_advantage:.4f}, loss={metrics.loss:.4f}, "
+        f"optimizer_steps={getattr(metrics, 'optimizer_step_count', 0)}, "
+        f"mean_policy_kl={getattr(metrics, 'mean_policy_kl', 0.0):.4f}, "
+        f"clip_fraction={getattr(metrics, 'clip_fraction', 0.0):.4f}"
     )
     output_checkpoint = Path(output_checkpoint_path)
     ensure_dir(output_checkpoint)
@@ -107,6 +112,9 @@ def run_train_step(
                 "mean_reward": metrics.mean_reward,
                 "mean_advantage": metrics.mean_advantage,
                 "loss": metrics.loss,
+                "optimizer_step_count": getattr(metrics, "optimizer_step_count", 0),
+                "mean_policy_kl": getattr(metrics, "mean_policy_kl", 0.0),
+                "clip_fraction": getattr(metrics, "clip_fraction", 0.0),
             },
         )
     return output_checkpoint

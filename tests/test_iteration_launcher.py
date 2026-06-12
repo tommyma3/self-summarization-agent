@@ -64,6 +64,8 @@ def test_iteration_launcher_runs_rollout_then_train_and_advances_latest(tmp_path
     assert "self_summarization_agent.judge_step" in calls[1]
     assert "self_summarization_agent.train_step" in calls[2]
     assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[0]
+    assert "--sample-seed" in calls[0]
+    assert str(config.experiment.seed + 1) in calls[0]
     assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[1]
     assert str(latest_root / "rollouts" / "iteration-00001.jsonl") in calls[1]
     assert str(latest_root / "rollouts" / "iteration-00001.jsonl") in calls[2]
@@ -96,6 +98,71 @@ def test_iteration_launcher_can_pass_resume_to_rollout_collection(tmp_path: Path
     )
 
     assert "--resume" in calls[0]
+
+
+def test_iteration_launcher_forwards_cli_overrides_to_subprocesses(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    calls = []
+
+    def runner(command):
+        calls.append(list(command))
+        if "self_summarization_agent.train_step" in command:
+            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
+            write_fake_checkpoint(next_checkpoint)
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+        overrides=["training.update_epochs=2"],
+    )
+
+    assert all("training.update_epochs=2" in command for command in calls[:3])
+
+
+def test_iteration_launcher_runs_eval_after_training_when_eval_split_configured(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.train_limit = 1
+    config.dataset.eval_limit = 1
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    calls = []
+
+    def runner(command):
+        calls.append(list(command))
+        if "self_summarization_agent.train_step" in command:
+            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
+            write_fake_checkpoint(next_checkpoint)
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+    )
+
+    assert "self_summarization_agent.rollout_collection" in calls[3]
+    assert "--split" in calls[3]
+    assert "eval" in calls[3]
+    assert "training.group_size=1" in calls[3]
+    assert "self_summarization_agent.judge_step" in calls[4]
+    assert "--split" in calls[4]
+    assert "eval" in calls[4]
+    assert "self_summarization_agent.eval_metrics" in calls[5]
+    assert str(latest_root / "eval_metrics.jsonl") in calls[5]
 
 
 def test_iteration_launcher_does_not_advance_latest_when_training_fails(tmp_path: Path) -> None:
