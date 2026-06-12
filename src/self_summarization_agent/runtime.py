@@ -161,7 +161,7 @@ class EpisodeRuntime:
 
     def _build_runtime_prompt(self, state: EpisodeState, remaining_tool_calls: int | None = None) -> str:
         pieces = [
-            self._build_transcript_block("SYSTEM", build_system_prompt(remaining_tool_calls)),
+            self._build_transcript_block("SYSTEM", build_system_prompt(remaining_tool_calls, self.max_tool_calls)),
             self._build_transcript_block("USER", state.user_prompt),
         ]
         if state.latest_summary:
@@ -185,7 +185,7 @@ class EpisodeRuntime:
     def _build_forced_answer_prompt(self, active: _ActiveEpisode) -> str:
         state = active.state
         pieces = [
-            self._build_transcript_block("SYSTEM", build_forced_answer_system_prompt()),
+            self._build_transcript_block("SYSTEM", build_forced_answer_system_prompt(self.max_tool_calls)),
             self._build_transcript_block("USER", state.user_prompt),
         ]
         if state.latest_summary:

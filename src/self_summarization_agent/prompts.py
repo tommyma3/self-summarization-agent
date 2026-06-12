@@ -1,16 +1,11 @@
-def build_tool_budget_section(remaining_tool_calls: int | None) -> str:
+def build_tool_budget_section(remaining_tool_calls: int | None, max_tool_calls: int | None = None) -> str:
     if remaining_tool_calls is None:
-        remaining_text = "unlimited"
-    else:
-        remaining_text = str(max(0, remaining_tool_calls))
-    return f"""Tool budget:
-- Remaining search/get_document tool calls: {remaining_text}
-- search and get_document each consume one tool call.
-- finish does not consume the tool-call budget.
-- When the remaining search/get_document tool calls is 0, do not call search or get_document; call finish with the best answer supported by the current evidence."""
+        return "Tool Budget Remaining: unlimited"
+    total_text = "unlimited" if max_tool_calls is None else str(max(0, max_tool_calls))
+    return f"Tool Budget Remaining: {max(0, remaining_tool_calls)}/{total_text}"
 
 
-def build_system_prompt(remaining_tool_calls: int | None = None) -> str:
+def build_system_prompt(remaining_tool_calls: int | None = None, max_tool_calls: int | None = None) -> str:
     return (
         """You are a deep research AI agent.
 
@@ -24,7 +19,7 @@ Available tools:
 - finish: submit the final answer. Use {"tool_name": "finish", "arguments": {"answer": "..."}}
 """
         + "\n"
-        + build_tool_budget_section(remaining_tool_calls)
+        + build_tool_budget_section(remaining_tool_calls, max_tool_calls)
         + """
 
 Valid response examples:
@@ -42,7 +37,7 @@ Tool strategy:
     )
 
 
-def build_forced_answer_system_prompt() -> str:
+def build_forced_answer_system_prompt(max_tool_calls: int | None = None) -> str:
     return (
         """You are a deep research AI agent at the final-answer boundary.
 
@@ -56,7 +51,7 @@ Available tool:
 - finish: submit the final answer. Use {"tool_name": "finish", "arguments": {"answer": "..."}}
 """
         + "\n"
-        + build_tool_budget_section(0)
+        + build_tool_budget_section(0, max_tool_calls)
         + """
 
 Valid response example:
