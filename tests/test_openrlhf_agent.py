@@ -213,9 +213,9 @@ def test_openrlhf_executor_forces_final_answer_after_tool_limit() -> None:
     )
 
     assert len(llm.prompts) == 2
-    assert "Tool Budget Remaining: 1/1" in llm.prompts[0]
+    assert "Tool Budget Remaining" not in llm.prompts[0]
     assert "final-answer boundary" in llm.prompts[1]
-    assert "Tool Budget Remaining: 0/1" in llm.prompts[1]
+    assert "Tool Budget Remaining" not in llm.prompts[1]
     assert result["reward"] == 1.0
     assert result["extra_logs"]["status"] == "completed"
     assert result["extra_logs"]["tool_calls"] == {"search": 1, "get_document": 0}

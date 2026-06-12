@@ -211,7 +211,7 @@ class AgentExecutor(AgentExecutorBase):
                 runtime._apply_forced_answer_output(active, raw_action, acting_prompt)
                 break
 
-            acting_prompt = runtime._build_runtime_prompt(active.state, remaining_tool_calls)
+            acting_prompt = runtime._build_runtime_prompt(active.state)
             active.context_manager.assert_fits(acting_prompt)
             raw_action, action_token_ids, action_logprobs = await generate_for_prompt(acting_prompt)
             parsed_action = parse_model_tool_call(raw_action)

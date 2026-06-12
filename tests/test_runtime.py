@@ -182,8 +182,8 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert result.status == "completed"
     assert result.final_answer == "done"
     assert len(model.prompts) == 2
-    assert "Tool Budget Remaining: 2/2" in model.prompts[0]
-    assert "Tool Budget Remaining: 1/2" in model.prompts[1]
+    assert "Tool Budget Remaining" not in model.prompts[0]
+    assert "Tool Budget Remaining" not in model.prompts[1]
     assert "### SYSTEM" in model.prompts[1]
     assert "exactly one JSON object" in model.prompts[1]
     assert "Available tools:" in model.prompts[1]
@@ -545,7 +545,7 @@ def test_runtime_forces_final_answer_after_tool_limit() -> None:
     assert result.tool_call_counts == {"search": 1, "get_document": 0}
     assert result.turn_records[-1]["kind"] == "final_answer"
     assert "final-answer boundary" in model.prompts[1]
-    assert "Tool Budget Remaining: 0/1" in model.prompts[1]
+    assert "Tool Budget Remaining" not in model.prompts[1]
     assert "Do not call search or get_document" in model.prompts[1]
 
 

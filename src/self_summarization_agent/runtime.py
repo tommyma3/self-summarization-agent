@@ -159,9 +159,9 @@ class EpisodeRuntime:
             return None
         return max(0, self.max_tool_calls - self._tool_calls_used(active))
 
-    def _build_runtime_prompt(self, state: EpisodeState, remaining_tool_calls: int | None = None) -> str:
+    def _build_runtime_prompt(self, state: EpisodeState) -> str:
         pieces = [
-            self._build_transcript_block("SYSTEM", build_system_prompt(remaining_tool_calls, self.max_tool_calls)),
+            self._build_transcript_block("SYSTEM", build_system_prompt()),
             self._build_transcript_block("USER", state.user_prompt),
         ]
         if state.latest_summary:
@@ -185,7 +185,7 @@ class EpisodeRuntime:
     def _build_forced_answer_prompt(self, active: _ActiveEpisode) -> str:
         state = active.state
         pieces = [
-            self._build_transcript_block("SYSTEM", build_forced_answer_system_prompt(self.max_tool_calls)),
+            self._build_transcript_block("SYSTEM", build_forced_answer_system_prompt()),
             self._build_transcript_block("USER", state.user_prompt),
         ]
         if state.latest_summary:
@@ -324,7 +324,7 @@ class EpisodeRuntime:
     def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
         state = active.state
         query_id = state.query_id
-        prompt = prompt if prompt is not None else self._build_runtime_prompt(state, self._remaining_tool_calls(active))
+        prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
         parsed_tool_call = parse_model_tool_call(raw_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
@@ -544,7 +544,7 @@ class EpisodeRuntime:
                     active.context_manager.assert_fits(acting_prompt)
                     action_items.append((active, acting_prompt, True))
                     continue
-                acting_prompt = self._build_runtime_prompt(active.state, remaining_tool_calls)
+                acting_prompt = self._build_runtime_prompt(active.state)
                 active.context_manager.assert_fits(acting_prompt)
                 action_items.append((active, acting_prompt, False))
 
