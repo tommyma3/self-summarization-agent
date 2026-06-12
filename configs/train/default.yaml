@@ -81,9 +81,9 @@ training:
   group_size: 4
   rollout_query_count: 100
   update_epochs: 4
-  minibatch_size:
+  minibatch_size: 128
   clip_range: 0.2
-  target_kl:
+  target_kl: 0.03
   gradient_accumulation_microbatch_size: 1
   learning_rate: 1.0e-6
   checkpoint_interval: 5
