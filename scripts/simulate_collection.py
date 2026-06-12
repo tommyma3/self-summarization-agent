@@ -144,7 +144,7 @@ def write_training_sequences(
         write_section(
             handle,
             "Training Sequences",
-            "No trainable sequences were produced. This rollout ended before any summary or final-answer turn was recorded.\n",
+            "No trainable sequences were produced. This rollout ended before any model-generated turn was recorded.\n",
         )
         return
 
@@ -155,9 +155,9 @@ def write_training_sequences(
             "- If the final answer is judged wrong, every listed turn gets reward -1.\n"
         )
     elif terminal_status == "budget_exhausted":
-        reward_note = "This rollout exhausted the tool budget. Every listed summary turn gets reward -1.\n"
+        reward_note = "This rollout exhausted the tool budget. Every listed turn gets reward -1.\n"
     else:
-        reward_note = "This rollout ended malformed. Tool turns are penalized, but they are not trainable.\n"
+        reward_note = "This rollout ended malformed. Every listed turn gets reward -1.\n"
 
     write_section(
         handle,
@@ -208,6 +208,26 @@ def trace_collection(
     tool_call_counts = {"search": 0, "get_document": 0}
     retrieved_docids: list[str] = []
     trainable_turns: list[dict[str, str]] = []
+
+    def append_trainable_turn(
+        *,
+        turn_id: str,
+        kind: str,
+        prompt: str,
+        completion: str,
+    ) -> None:
+        trainable_turns.append(
+            {
+                "query_id": example.query_id,
+                "turn_id": turn_id,
+                "kind": kind,
+                "prompt": prompt,
+                "completion": completion,
+            }
+        )
+
+    def next_tool_turn_id() -> str:
+        return runtime._next_tool_turn_id(state)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
@@ -263,6 +283,18 @@ def trace_collection(
             parsed_tool_call = parse_model_tool_call(raw_output)
             if parsed_tool_call is None:
                 write_section(handle, "Terminal Status", "status: malformed_tool_call\n")
+                append_trainable_turn(
+                    turn_id=next_tool_turn_id(),
+                    kind="tool",
+                    prompt=acting_prompt,
+                    completion=raw_output,
+                )
+                write_training_sequences(
+                    handle,
+                    runtime=runtime,
+                    terminal_status="malformed_tool_call",
+                    trainable_turns=trainable_turns,
+                )
                 return
 
             payload, normalized_output = parsed_tool_call
@@ -278,6 +310,12 @@ def trace_collection(
                 answer = arguments.get("answer") if isinstance(arguments, dict) else None
                 if not isinstance(answer, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: finish.answer is not a string\n")
+                    append_trainable_turn(
+                        turn_id=next_tool_turn_id(),
+                        kind="tool",
+                        prompt=acting_prompt,
+                        completion=normalized_output,
+                    )
                     write_training_sequences(
                         handle,
                         runtime=runtime,
@@ -285,14 +323,11 @@ def trace_collection(
                         trainable_turns=trainable_turns,
                     )
                     return
-                trainable_turns.append(
-                    {
-                        "query_id": example.query_id,
-                        "turn_id": "final-answer",
-                        "kind": "final_answer",
-                        "prompt": acting_prompt,
-                        "completion": normalized_output,
-                    }
+                append_trainable_turn(
+                    turn_id="final-answer",
+                    kind="final_answer",
+                    prompt=acting_prompt,
+                    completion=normalized_output,
                 )
                 write_section(handle, "Terminal Status", f"status: completed\nfinal_answer: {answer}\n")
                 write_training_sequences(
@@ -307,6 +342,12 @@ def trace_collection(
                 query = arguments.get("query") if isinstance(arguments, dict) else None
                 if not isinstance(query, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: search.query is not a string\n")
+                    append_trainable_turn(
+                        turn_id=next_tool_turn_id(),
+                        kind="tool",
+                        prompt=acting_prompt,
+                        completion=normalized_output,
+                    )
                     write_training_sequences(
                         handle,
                         runtime=runtime,
@@ -315,6 +356,12 @@ def trace_collection(
                     )
                     return
                 search_results = runtime.backend.search(query)
+                append_trainable_turn(
+                    turn_id=next_tool_turn_id(),
+                    kind="tool",
+                    prompt=acting_prompt,
+                    completion=normalized_output,
+                )
                 tool_call_counts["search"] += 1
                 runtime._record_search_result_docids(retrieved_docids, search_results)
                 tool_result = json.dumps(search_results, ensure_ascii=False)
@@ -322,6 +369,12 @@ def trace_collection(
                 doc_id = arguments.get("doc_id") if isinstance(arguments, dict) else None
                 if not isinstance(doc_id, str):
                     write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: get_document.doc_id is not a string\n")
+                    append_trainable_turn(
+                        turn_id=next_tool_turn_id(),
+                        kind="tool",
+                        prompt=acting_prompt,
+                        completion=normalized_output,
+                    )
                     write_training_sequences(
                         handle,
                         runtime=runtime,
@@ -331,9 +384,21 @@ def trace_collection(
                     return
                 runtime._record_retrieved_docids(retrieved_docids, [doc_id])
                 tool_result = runtime.backend.get_document(doc_id)
+                append_trainable_turn(
+                    turn_id=next_tool_turn_id(),
+                    kind="tool",
+                    prompt=acting_prompt,
+                    completion=normalized_output,
+                )
                 tool_call_counts["get_document"] += 1
             else:
                 write_section(handle, "Terminal Status", f"status: malformed_tool_call\nreason: unsupported tool {tool_name!r}\n")
+                append_trainable_turn(
+                    turn_id=next_tool_turn_id(),
+                    kind="tool",
+                    prompt=acting_prompt,
+                    completion=normalized_output,
+                )
                 write_training_sequences(
                     handle,
                     runtime=runtime,
@@ -415,22 +480,20 @@ def trace_collection(
             generated_summary = runtime.model.generate(summary_prompt)
             write_section(handle, f"Summary {state.summary_count + 1} Model Output", generated_summary)
             summary_extraction = extract_summary_output(generated_summary)
+            state.summary_count += 1
+            summary_turn_id = f"summary-{state.summary_count}"
+            append_trainable_turn(
+                turn_id=summary_turn_id,
+                kind="summary",
+                prompt=summary_prompt,
+                completion=generated_summary,
+            )
             if not summary_extraction.summary:
-                write_section(handle, f"Summary {state.summary_count + 1} Skipped", "reason: model returned an empty summary body\n")
+                write_section(handle, f"Summary {state.summary_count} Skipped", "reason: model returned an empty summary body\n")
                 continue
 
             state.latest_summary = summary_extraction.summary
             state.summarized_round_count += retired_count
-            state.summary_count += 1
-            trainable_turns.append(
-                {
-                    "query_id": example.query_id,
-                    "turn_id": f"summary-{state.summary_count}",
-                    "kind": "summary",
-                    "prompt": summary_prompt,
-                    "completion": generated_summary,
-                }
-            )
             write_section(
                 handle,
                 f"Summary {state.summary_count} Extracted",
