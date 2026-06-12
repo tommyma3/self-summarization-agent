@@ -103,9 +103,11 @@ def test_openrlhf_executor_keeps_tool_cot_out_of_next_prompt() -> None:
     assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in llm.prompts[1]
     assert '### TOOL_RESULT\n[{"docid": "doc-1", "snippet": "fact"}]' in llm.prompts[1]
     assert result["reward"] == 1.0
-    assert len(result["action_ranges"]) == 1
+    assert len(result["action_ranges"]) == 2
     trained_text = tokenizer.decode(result["observation_tokens"])
+    assert "secret search thought" not in trained_text
     assert "secret final thought" not in trained_text
+    assert '{"tool_name": "search", "arguments": {"query": "q"}}' in trained_text
     assert '{"tool_name": "finish", "arguments": {"answer": "done"}}' in trained_text
 
 
@@ -147,12 +149,12 @@ def test_openrlhf_executor_trains_summary_but_context_uses_post_think_summary() 
     final_prompt = llm.prompts[3]
     assert "### SUMMARY\nsummary body" in final_prompt
     assert "summary reasoning" not in final_prompt
-    assert len(result["action_ranges"]) == 2
+    assert len(result["action_ranges"]) == 4
     trained_text = tokenizer.decode(result["observation_tokens"])
     assert "<think>summary reasoning</think>\nsummary body" in trained_text
 
 
-def test_openrlhf_executor_discards_trainable_ranges_on_malformed_tool_call() -> None:
+def test_openrlhf_executor_trains_malformed_tool_call_as_negative_example() -> None:
     tokenizer = CharTokenizer()
     llm = RecordingLLMEngine(tokenizer, ['{"tool_name": "search"}'])
     runtime = EpisodeRuntime(
@@ -175,5 +177,6 @@ def test_openrlhf_executor_discards_trainable_ranges_on_malformed_tool_call() ->
     )
 
     assert result["reward"] == -1.0
-    assert result["action_ranges"] == []
+    assert len(result["action_ranges"]) == 1
+    assert '{"tool_name": "search"}' in tokenizer.decode(result["observation_tokens"])
     assert result["extra_logs"]["status"] == "malformed_tool_call"

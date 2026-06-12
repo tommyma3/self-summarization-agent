@@ -7,7 +7,11 @@ from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCallRecord, ToolRound
 from self_summarization_agent.prompts import build_system_prompt
-from self_summarization_agent.rewards import apply_malformed_tool_penalty, apply_terminal_reward
+from self_summarization_agent.rewards import (
+    apply_malformed_tool_penalty,
+    apply_terminal_reward,
+    trainable_turn_ids_from_records,
+)
 
 
 _JSON_DECODER = json.JSONDecoder()
@@ -177,6 +181,8 @@ class EpisodeRuntime:
         self,
         state: EpisodeState,
         query_id: str,
+        prompt: str,
+        completion: str,
         summary_turns: list[str],
         retrieved_docids: list[str],
         tool_call_counts: dict[str, int],
@@ -184,13 +190,21 @@ class EpisodeRuntime:
     ) -> RuntimeResult:
         malformed_turn_id = self._next_tool_turn_id(state)
         recorded_turns = list(turn_records)
-        recorded_turns.append({"turn_id": malformed_turn_id, "kind": "tool"})
+        recorded_turns.append(
+            {
+                "query_id": query_id,
+                "turn_id": malformed_turn_id,
+                "kind": "tool",
+                "prompt": prompt,
+                "completion": completion,
+            }
+        )
         return RuntimeResult(
             query_id=query_id,
             status="malformed_tool_call",
             final_answer=None,
             summary_turns=list(summary_turns),
-            turn_rewards=apply_malformed_tool_penalty(malformed_turn_id),
+            turn_rewards=apply_malformed_tool_penalty(trainable_turn_ids_from_records(recorded_turns)),
             retrieved_docids=list(retrieved_docids),
             tool_call_counts=dict(tool_call_counts),
             turn_records=recorded_turns,
@@ -211,8 +225,7 @@ class EpisodeRuntime:
             summary_turns=list(summary_turns),
             turn_rewards=apply_terminal_reward(
                 outcome="budget_exhausted",
-                summary_turn_ids=summary_turns,
-                final_answer_turn_id=None,
+                trainable_turn_ids=trainable_turn_ids_from_records(turn_records),
             ),
             retrieved_docids=list(retrieved_docids),
             tool_call_counts=dict(tool_call_counts),
@@ -269,22 +282,24 @@ class EpisodeRuntime:
             summary_turns=list(active.summary_turns),
             turn_rewards=apply_terminal_reward(
                 outcome="correct_answer",
-                summary_turn_ids=active.summary_turns,
-                final_answer_turn_id="final-answer",
+                trainable_turn_ids=trainable_turn_ids_from_records(active.turn_records),
             ),
             retrieved_docids=list(active.retrieved_docids),
             tool_call_counts=dict(active.tool_call_counts),
             turn_records=list(active.turn_records),
         )
 
-    def _apply_action_output(self, active: _ActiveEpisode, raw_output: str) -> None:
+    def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
         state = active.state
         query_id = state.query_id
+        prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
         parsed_tool_call = parse_model_tool_call(raw_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
                 state,
                 query_id,
+                prompt,
+                raw_output,
                 active.summary_turns,
                 active.retrieved_docids,
                 active.tool_call_counts,
@@ -301,6 +316,8 @@ class EpisodeRuntime:
                 active.result = self._malformed_result(
                     state,
                     query_id,
+                    prompt,
+                    normalized_output,
                     active.summary_turns,
                     active.retrieved_docids,
                     active.tool_call_counts,
@@ -312,7 +329,7 @@ class EpisodeRuntime:
                     "query_id": query_id,
                     "turn_id": "final-answer",
                     "kind": "final_answer",
-                    "prompt": self._build_runtime_prompt(state),
+                    "prompt": prompt,
                     "completion": normalized_output,
                 }
             )
@@ -325,6 +342,8 @@ class EpisodeRuntime:
                 active.result = self._malformed_result(
                     state,
                     query_id,
+                    prompt,
+                    normalized_output,
                     active.summary_turns,
                     active.retrieved_docids,
                     active.tool_call_counts,
@@ -341,6 +360,8 @@ class EpisodeRuntime:
                 active.result = self._malformed_result(
                     state,
                     query_id,
+                    prompt,
+                    normalized_output,
                     active.summary_turns,
                     active.retrieved_docids,
                     active.tool_call_counts,
@@ -354,6 +375,8 @@ class EpisodeRuntime:
             active.result = self._malformed_result(
                 state,
                 query_id,
+                prompt,
+                normalized_output,
                 active.summary_turns,
                 active.retrieved_docids,
                 active.tool_call_counts,
@@ -361,6 +384,16 @@ class EpisodeRuntime:
             )
             return
 
+        tool_turn_id = self._next_tool_turn_id(state)
+        active.turn_records.append(
+            {
+                "query_id": query_id,
+                "turn_id": tool_turn_id,
+                "kind": "tool",
+                "prompt": prompt,
+                "completion": normalized_output,
+            }
+        )
         state.rounds.append(
             ToolRound(
                 assistant_message=Message(role="assistant", content=normalized_output),
@@ -388,14 +421,9 @@ class EpisodeRuntime:
         generated_summary: str,
     ) -> None:
         summary_extraction = extract_summary_output(generated_summary)
-        if not summary_extraction.summary:
-            return
         state = active.state
-        state.latest_summary = summary_extraction.summary
-        state.summarized_round_count += retired_count
         state.summary_count += 1
         summary_turn_id = f"summary-{state.summary_count}"
-        active.summary_turns.append(summary_turn_id)
         active.turn_records.append(
             {
                 "query_id": state.query_id,
@@ -407,6 +435,11 @@ class EpisodeRuntime:
                 "summary": summary_extraction.summary,
             }
         )
+        if not summary_extraction.summary:
+            return
+        state.latest_summary = summary_extraction.summary
+        state.summarized_round_count += retired_count
+        active.summary_turns.append(summary_turn_id)
 
     def run_many(self, episodes: Iterable[tuple[str, str]]) -> list[RuntimeResult]:
         active_episodes = [self._new_active_episode(query_id, user_prompt) for query_id, user_prompt in episodes]
@@ -430,8 +463,8 @@ class EpisodeRuntime:
 
             if action_items:
                 action_outputs = self._generate_batch([prompt for _, prompt in action_items])
-                for (active, _), raw_output in zip(action_items, action_outputs):
-                    self._apply_action_output(active, raw_output)
+                for (active, prompt), raw_output in zip(action_items, action_outputs):
+                    self._apply_action_output(active, raw_output, prompt)
 
             summary_items: list[tuple[_ActiveEpisode, str, int]] = []
             for active in active_episodes:

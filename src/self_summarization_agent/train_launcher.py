@@ -21,7 +21,11 @@ from self_summarization_agent.launcher_utils import (
     utc_timestamp,
     write_json,
 )
-from self_summarization_agent.rewards import apply_terminal_reward
+from self_summarization_agent.rewards import (
+    apply_malformed_tool_penalty,
+    apply_terminal_reward,
+    trainable_turn_ids_from_records,
+)
 from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import TransformersPolicyTrainer
 from self_summarization_agent.trajectory import extract_trainable_samples
@@ -72,14 +76,14 @@ def _merge_launcher_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _apply_judged_rewards(result, example: QueryExample, judge: RewardJudge) -> dict[str, Any]:
+    trainable_turn_ids = trainable_turn_ids_from_records(result.turn_records)
     if result.status == "malformed_tool_call":
+        result.turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
         return {"outcome": "malformed_tool_call", "judge_prompt": None, "judge_response": None, "parse_error": False}
     decision = judge.evaluate(example, result.status, result.final_answer or "")
-    final_answer_turn_id = "final-answer" if result.final_answer is not None else None
     result.turn_rewards = apply_terminal_reward(
         outcome=decision.outcome,
-        summary_turn_ids=result.summary_turns,
-        final_answer_turn_id=final_answer_turn_id,
+        trainable_turn_ids=trainable_turn_ids,
     )
     return {
         "outcome": decision.outcome,

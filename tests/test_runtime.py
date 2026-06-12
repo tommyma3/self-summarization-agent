@@ -156,7 +156,9 @@ def test_runtime_records_clean_tool_call_when_model_outputs_thinking() -> None:
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "completed"
-    assert result.turn_records[0]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
+    assert result.turn_records[0]["kind"] == "tool"
+    assert result.turn_records[0]["completion"] == '{"tool_name": "search", "arguments": {"query": "focused query"}}'
+    assert result.turn_records[1]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
 
 
 def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
@@ -196,7 +198,7 @@ def test_runtime_attributes_malformed_penalty_to_second_tool_turn() -> None:
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "malformed_tool_call"
-    assert result.turn_rewards == {"tool-2": -1.0}
+    assert result.turn_rewards == {"tool-1": -1.0, "tool-2": -1.0}
 
 
 def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> None:
@@ -267,9 +269,10 @@ def test_runtime_puts_only_post_think_summary_into_context() -> None:
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "completed"
-    assert result.turn_records[0]["completion"] == "<think>reason about old-doc</think>\nsummary body for context"
-    assert result.turn_records[0]["thinking"] == "reason about old-doc"
-    assert result.turn_records[0]["summary"] == "summary body for context"
+    summary_record = result.turn_records[2]
+    assert summary_record["completion"] == "<think>reason about old-doc</think>\nsummary body for context"
+    assert summary_record["thinking"] == "reason about old-doc"
+    assert summary_record["summary"] == "summary body for context"
     acting_prompt_after_summary = model.prompts[3]
     assert "### SUMMARY\nsummary body for context" in acting_prompt_after_summary
     assert "reason about old-doc" not in acting_prompt_after_summary
@@ -417,7 +420,7 @@ def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
     assert '### TOOL_RESULT\n[{"docid": "trigger-doc", "snippet": ""}]' in acting_prompt_after_empty_summary
 
 
-def test_runtime_records_trainable_summary_and_final_answer_turns() -> None:
+def test_runtime_records_trainable_tool_summary_and_final_answer_turns() -> None:
     backend = FakeBackend(
         search_index={
             "first": ["old-doc"],
@@ -443,13 +446,17 @@ def test_runtime_records_trainable_summary_and_final_answer_turns() -> None:
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
-    assert [record["kind"] for record in result.turn_records] == ["summary", "final_answer"]
-    assert [record["query_id"] for record in result.turn_records] == ["q1", "q1"]
-    assert result.turn_records[0]["turn_id"] == "summary-1"
-    assert result.turn_records[0]["completion"] == "summary of old-doc only"
-    assert result.turn_records[1]["turn_id"] == "final-answer"
-    assert result.turn_records[1]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
-    assert result.turn_rewards == {"summary-1": 1.0, "final-answer": 1.0}
+    assert [record["kind"] for record in result.turn_records] == ["tool", "tool", "summary", "final_answer"]
+    assert [record["query_id"] for record in result.turn_records] == ["q1", "q1", "q1", "q1"]
+    assert result.turn_records[0]["turn_id"] == "tool-1"
+    assert result.turn_records[0]["completion"] == '{"tool_name": "search", "arguments": {"query": "first"}}'
+    assert result.turn_records[1]["turn_id"] == "tool-2"
+    assert result.turn_records[1]["completion"] == '{"tool_name": "search", "arguments": {"query": "second"}}'
+    assert result.turn_records[2]["turn_id"] == "summary-1"
+    assert result.turn_records[2]["completion"] == "summary of old-doc only"
+    assert result.turn_records[3]["turn_id"] == "final-answer"
+    assert result.turn_records[3]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
+    assert result.turn_rewards == {"tool-1": 1.0, "tool-2": 1.0, "summary-1": 1.0, "final-answer": 1.0}
 
 
 def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
@@ -480,8 +487,8 @@ def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
 
     samples = extract_trainable_samples(result.turn_records, result.turn_rewards)
 
-    assert [sample.turn_id for sample in samples] == ["summary-1", "final-answer"]
-    assert [sample.reward for sample in samples] == [1.0, 1.0]
+    assert [sample.turn_id for sample in samples] == ["tool-1", "tool-2", "summary-1", "final-answer"]
+    assert [sample.reward for sample in samples] == [1.0, 1.0, 1.0, 1.0]
 
 
 def test_runtime_malformed_result_feeds_trajectory_extraction() -> None:
@@ -493,9 +500,18 @@ def test_runtime_malformed_result_feeds_trajectory_extraction() -> None:
 
     samples = extract_trainable_samples(result.turn_records, result.turn_rewards)
 
-    assert result.turn_records == [{"turn_id": "tool-1", "kind": "tool"}]
+    assert result.turn_records == [
+        {
+            "query_id": "q1",
+            "turn_id": "tool-1",
+            "kind": "tool",
+            "prompt": result.turn_records[0]["prompt"],
+            "completion": '{"tool_name": "search"}',
+        }
+    ]
     assert result.turn_rewards == {"tool-1": -1.0}
-    assert samples == []
+    assert [sample.turn_id for sample in samples] == ["tool-1"]
+    assert [sample.reward for sample in samples] == [-1.0]
 
 
 def test_runtime_stops_with_budget_exhausted_after_tool_limit() -> None:
@@ -513,7 +529,7 @@ def test_runtime_stops_with_budget_exhausted_after_tool_limit() -> None:
 
     assert result.status == "budget_exhausted"
     assert result.final_answer is None
-    assert result.turn_rewards == {}
+    assert result.turn_rewards == {"tool-1": -1.0}
 
 
 def test_runtime_applies_fit_check_to_full_summary_generation_prompt() -> None:

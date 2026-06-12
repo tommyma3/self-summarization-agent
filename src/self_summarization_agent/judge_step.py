@@ -13,7 +13,11 @@ from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import JudgeDecision, RewardJudge
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
-from self_summarization_agent.rewards import apply_terminal_reward
+from self_summarization_agent.rewards import (
+    apply_malformed_tool_penalty,
+    apply_terminal_reward,
+    trainable_turn_ids_from_records,
+)
 from self_summarization_agent.trajectory import extract_trainable_samples
 
 
@@ -87,9 +91,11 @@ def _validate_raw_row(row: dict[str, Any], *, index: int, expected_checkpoint_id
 def _apply_decision_to_row(row: dict[str, Any], decision: JudgeDecision) -> dict[str, Any]:
     status = row.get("status")
     judged_row = dict(row)
+    trainable_turn_ids = trainable_turn_ids_from_records(row["turn_records"])
     if status == "malformed_tool_call":
-        judged_row["turn_rewards"] = {}
-        judged_row["trainable_sample_count"] = 0
+        turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
+        judged_row["turn_rewards"] = turn_rewards
+        judged_row["trainable_sample_count"] = len(extract_trainable_samples(row["turn_records"], turn_rewards))
         judged_row["judge"] = {
             "outcome": "malformed_tool_call",
             "judge_prompt": None,
@@ -99,12 +105,9 @@ def _apply_decision_to_row(row: dict[str, Any], decision: JudgeDecision) -> dict
         }
         return judged_row
 
-    final_answer_turn_id = "final-answer" if row.get("final_answer") is not None else None
-    summary_turn_ids = [turn_id for turn_id in row["summary_turns"] if isinstance(turn_id, str)]
     turn_rewards = apply_terminal_reward(
         outcome=decision.outcome,
-        summary_turn_ids=summary_turn_ids,
-        final_answer_turn_id=final_answer_turn_id,
+        trainable_turn_ids=trainable_turn_ids,
     )
     judged_row["turn_rewards"] = turn_rewards
     judged_row["trainable_sample_count"] = len(extract_trainable_samples(row["turn_records"], turn_rewards))

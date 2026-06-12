@@ -10,6 +10,11 @@ def test_terminal_correct_reward_trains_summary_and_answer_turns() -> None:
     assert rewards == {"s1": 1.0, "s2": 1.0, "a1": 1.0}
 
 
+def test_terminal_correct_reward_can_train_all_recorded_turns() -> None:
+    rewards = apply_terminal_reward(outcome="correct_answer", trainable_turn_ids=["tool-1", "s1", "a1"])
+    assert rewards == {"tool-1": 1.0, "s1": 1.0, "a1": 1.0}
+
+
 def test_malformed_tool_penalty_only_marks_offending_turn() -> None:
     rewards = apply_malformed_tool_penalty(turn_id="tool-3")
     assert rewards == {"tool-3": -1.0}
@@ -20,20 +25,26 @@ def test_apply_terminal_reward_raises_on_invalid_outcome() -> None:
         apply_terminal_reward(outcome="invalid", summary_turn_ids=["s1"], final_answer_turn_id="a1")  # type: ignore[arg-type]
 
 
-def test_extract_trainable_samples_returns_summary_and_final_answer_turns() -> None:
+def test_extract_trainable_samples_returns_tool_summary_and_final_answer_turns() -> None:
     turns = [
+        {
+            "query_id": "q1",
+            "kind": "tool",
+            "turn_id": "t1",
+            "prompt": "p0",
+            "completion": '{"tool_name": "search", "arguments": {"query": "q"}}',
+        },
         {"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"},
         {"query_id": "q1", "kind": "final_answer", "turn_id": "a1", "prompt": "p2", "completion": "c2"},
-        {"kind": "tool", "turn_id": "t1"},
     ]
-    rewards = {"s1": 1.0, "a1": -1.0}
+    rewards = {"t1": 1.0, "s1": 1.0, "a1": -1.0}
 
     samples = extract_trainable_samples(turns, rewards)
 
-    assert [sample.turn_id for sample in samples] == ["s1", "a1"]
-    assert [sample.query_id for sample in samples] == ["q1", "q1"]
-    assert [sample.reward for sample in samples] == [1.0, -1.0]
-    assert [sample.trainable_kind for sample in samples] == ["summary", "final_answer"]
+    assert [sample.turn_id for sample in samples] == ["t1", "s1", "a1"]
+    assert [sample.query_id for sample in samples] == ["q1", "q1", "q1"]
+    assert [sample.reward for sample in samples] == [1.0, 1.0, -1.0]
+    assert [sample.trainable_kind for sample in samples] == ["tool", "summary", "final_answer"]
 
 
 def test_extract_trainable_samples_preserves_query_id_for_grouping() -> None:
@@ -117,31 +128,36 @@ def test_extract_trainable_samples_raises_on_non_finite_reward_value() -> None:
         extract_trainable_samples(turns, rewards)
 
 
-def test_extract_trainable_samples_ignores_non_trainable_tool_turn_without_payload() -> None:
+def test_extract_trainable_samples_raises_on_tool_turn_without_payload() -> None:
     turns = [
         {"kind": "tool", "turn_id": "tool-1"},
         {"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"},
     ]
     rewards = {"tool-1": -1.0, "s1": 1.0}
 
-    samples = extract_trainable_samples(turns, rewards)
-
-    assert [sample.turn_id for sample in samples] == ["s1"]
-    assert [sample.reward for sample in samples] == [1.0]
+    with pytest.raises(ValueError, match="Trainable turn record is missing required key: query_id"):
+        extract_trainable_samples(turns, rewards)
 
 
-def test_extract_trainable_samples_keeps_known_non_trainable_reward_from_failing() -> None:
+def test_extract_trainable_samples_requires_tool_turn_payload() -> None:
     turns = [{"kind": "tool", "turn_id": "tool-1"}]
     rewards = {"tool-1": -1.0}
 
-    samples = extract_trainable_samples(turns, rewards)
-
-    assert samples == []
+    with pytest.raises(ValueError, match="Trainable turn record is missing required key: query_id"):
+        extract_trainable_samples(turns, rewards)
 
 
 def test_extract_trainable_samples_raises_when_reward_matches_no_turn() -> None:
-    turns = [{"kind": "tool", "turn_id": "tool-1"}]
-    rewards = {"missing": -1.0}
+    turns = [
+        {
+            "query_id": "q1",
+            "kind": "tool",
+            "turn_id": "tool-1",
+            "prompt": "p1",
+            "completion": '{"tool_name": "search", "arguments": {"query": "q"}}',
+        }
+    ]
+    rewards = {"tool-1": -1.0, "missing": -1.0}
 
     with pytest.raises(ValueError, match="Reward ids do not match any turn: missing"):
         extract_trainable_samples(turns, rewards)
@@ -176,7 +192,13 @@ def test_extract_trainable_samples_raises_on_duplicate_trainable_turn_id() -> No
 
 def test_extract_trainable_samples_raises_on_tool_trainable_turn_id_collision() -> None:
     turns = [
-        {"kind": "tool", "turn_id": "dup"},
+        {
+            "query_id": "q1",
+            "kind": "tool",
+            "turn_id": "dup",
+            "prompt": "p0",
+            "completion": '{"tool_name": "search", "arguments": {"query": "q"}}',
+        },
         {"query_id": "q1", "kind": "summary", "turn_id": "dup", "prompt": "p1", "completion": "c1"},
     ]
     rewards = {"dup": 1.0}

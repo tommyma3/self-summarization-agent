@@ -154,8 +154,8 @@ def test_collect_rollouts_can_still_judge_inline(tmp_path: Path) -> None:
     )
 
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert all(row["trainable_sample_count"] == 1 for row in rows)
-    assert all(row["turn_rewards"] == {"final-answer": 1.0} for row in rows)
+    assert all(row["trainable_sample_count"] == 2 for row in rows)
+    assert all(row["turn_rewards"] == {"tool-1": 1.0, "final-answer": 1.0} for row in rows)
 
 
 def test_collect_rollouts_batches_active_queries(tmp_path: Path) -> None:

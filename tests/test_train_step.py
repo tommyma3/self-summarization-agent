@@ -63,8 +63,15 @@ def train_config(tmp_path: Path) -> TrainConfig:
 def write_rollout(path: Path, checkpoint_id: str) -> None:
     row = {
         "policy_checkpoint_id": checkpoint_id,
-        "trainable_sample_count": 1,
+        "trainable_sample_count": 2,
         "turn_records": [
+            {
+                "query_id": "q1",
+                "turn_id": "tool-1",
+                "kind": "tool",
+                "prompt": "tool prompt",
+                "completion": '{"tool_name": "search", "arguments": {"query": "question"}}',
+            },
             {
                 "query_id": "q1",
                 "turn_id": "final-answer",
@@ -73,7 +80,7 @@ def write_rollout(path: Path, checkpoint_id: str) -> None:
                 "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
             }
         ],
-        "turn_rewards": {"final-answer": 1.0},
+        "turn_rewards": {"tool-1": 1.0, "final-answer": 1.0},
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -81,7 +88,7 @@ def write_rollout(path: Path, checkpoint_id: str) -> None:
 def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
     row = {
         "policy_checkpoint_id": checkpoint_id,
-        "trainable_sample_count": 0,
+        "trainable_sample_count": 2,
         "status": "malformed_tool_call",
         "turn_records": [
             {
@@ -91,9 +98,15 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
                 "prompt": "prompt",
                 "completion": "summary",
             },
-            {"kind": "tool", "turn_id": "tool-2"},
+            {
+                "query_id": "q1",
+                "kind": "tool",
+                "turn_id": "tool-2",
+                "prompt": "tool prompt",
+                "completion": '{"tool_name": "search"}',
+            },
         ],
-        "turn_rewards": {"tool-2": -1.0},
+        "turn_rewards": {"summary-1": -1.0, "tool-2": -1.0},
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -161,7 +174,7 @@ def test_run_train_step_rejects_checkpoint_mismatch_before_trainer_mutation(tmp_
     assert trainer.saved_checkpoints == []
 
 
-def test_run_train_step_skips_rows_marked_without_trainable_samples(tmp_path: Path) -> None:
+def test_run_train_step_consumes_malformed_negative_samples(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     rollout_path = tmp_path / "rollouts.jsonl"
@@ -177,7 +190,9 @@ def test_run_train_step_skips_rows_marked_without_trainable_samples(tmp_path: Pa
         trainer=trainer,
     )
 
-    assert trainer.grouped_samples == {}
+    assert trainer.grouped_samples is not None
+    assert [sample.turn_id for sample in trainer.grouped_samples["q1"]] == ["summary-1", "tool-2"]
+    assert [sample.reward for sample in trainer.grouped_samples["q1"]] == [-1.0, -1.0]
     assert trainer.saved_checkpoints == [str(output_checkpoint)]
 
 

@@ -60,6 +60,13 @@ def write_raw_rollouts(path: Path) -> None:
             "turn_records": [
                 {
                     "query_id": "q1",
+                    "turn_id": "tool-1",
+                    "kind": "tool",
+                    "prompt": "tool prompt",
+                    "completion": '{"tool_name": "search", "arguments": {"query": "question"}}',
+                },
+                {
+                    "query_id": "q1",
                     "turn_id": "final-answer",
                     "kind": "final_answer",
                     "prompt": "prompt",
@@ -93,8 +100,8 @@ def test_judge_rollouts_assigns_rewards_and_sample_counts(tmp_path: Path) -> Non
 
     rows = [json.loads(line) for line in judged_path.read_text(encoding="utf-8").splitlines()]
     assert generator.batch_sizes == [1]
-    assert rows[0]["turn_rewards"] == {"final-answer": 1.0}
-    assert rows[0]["trainable_sample_count"] == 1
+    assert rows[0]["turn_rewards"] == {"tool-1": 1.0, "final-answer": 1.0}
+    assert rows[0]["trainable_sample_count"] == 2
     assert rows[0]["judge"]["outcome"] == "correct_answer"
 
 

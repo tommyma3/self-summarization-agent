@@ -16,8 +16,8 @@ class RLSample:
 def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[str, float]) -> list[RLSample]:
     samples: list[RLSample] = []
     seen_turn_ids: set[str] = set()
-    allowed_trainable_kinds = {"summary", "final_answer"}
-    allowed_non_trainable_kinds = {"tool"}
+    allowed_trainable_kinds = {"tool", "summary", "final_answer"}
+    allowed_non_trainable_kinds: set[str] = set()
     for turn in turns:
         if not isinstance(turn, Mapping):
             raise ValueError(f"Turn record must be a mapping, got {type(turn).__name__}")

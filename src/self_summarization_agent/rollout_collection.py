@@ -20,19 +20,23 @@ from self_summarization_agent.launcher_utils import (
     iter_batches,
     serialize_runtime_result,
 )
-from self_summarization_agent.rewards import apply_terminal_reward
+from self_summarization_agent.rewards import (
+    apply_malformed_tool_penalty,
+    apply_terminal_reward,
+    trainable_turn_ids_from_records,
+)
 from self_summarization_agent.trajectory import extract_trainable_samples
 
 
 def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str, Any]:
+    trainable_turn_ids = trainable_turn_ids_from_records(result.turn_records)
     if result.status == "malformed_tool_call":
+        result.turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
         return {"outcome": "malformed_tool_call", "judge_prompt": None, "judge_response": None, "parse_error": False}
     decision = judge.evaluate(example, result.status, result.final_answer or "")
-    final_answer_turn_id = "final-answer" if result.final_answer is not None else None
     result.turn_rewards = apply_terminal_reward(
         outcome=decision.outcome,
-        summary_turn_ids=result.summary_turns,
-        final_answer_turn_id=final_answer_turn_id,
+        trainable_turn_ids=trainable_turn_ids,
     )
     return {
         "outcome": decision.outcome,
@@ -168,10 +172,8 @@ def collect_rollouts(
             include_rewards = False
             if judge_inline:
                 judge_payload = apply_judged_rewards(result, example, judge)
-                trainable_sample_count = 0
                 include_rewards = True
-                if judge_payload["outcome"] != "malformed_tool_call":
-                    trainable_sample_count = len(extract_trainable_samples(result.turn_records, result.turn_rewards))
+                trainable_sample_count = len(extract_trainable_samples(result.turn_records, result.turn_rewards))
             append_jsonl(
                 rollout_path,
                 {
