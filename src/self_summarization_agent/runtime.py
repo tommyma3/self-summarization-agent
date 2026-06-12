@@ -6,7 +6,7 @@ from typing import Callable, Iterable, Protocol
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCallRecord, ToolRound
-from self_summarization_agent.prompts import build_system_prompt
+from self_summarization_agent.prompts import build_forced_answer_system_prompt, build_system_prompt
 from self_summarization_agent.rewards import (
     apply_malformed_tool_penalty,
     apply_terminal_reward,
@@ -151,9 +151,17 @@ class EpisodeRuntime:
             rounds=list(self._raw_tail_rounds(state)),
         )
 
-    def _build_runtime_prompt(self, state: EpisodeState) -> str:
+    def _tool_calls_used(self, active: _ActiveEpisode) -> int:
+        return active.tool_call_counts.get("search", 0) + active.tool_call_counts.get("get_document", 0)
+
+    def _remaining_tool_calls(self, active: _ActiveEpisode) -> int | None:
+        if self.max_tool_calls is None:
+            return None
+        return max(0, self.max_tool_calls - self._tool_calls_used(active))
+
+    def _build_runtime_prompt(self, state: EpisodeState, remaining_tool_calls: int | None = None) -> str:
         pieces = [
-            self._build_transcript_block("SYSTEM", build_system_prompt()),
+            self._build_transcript_block("SYSTEM", build_system_prompt(remaining_tool_calls)),
             self._build_transcript_block("USER", state.user_prompt),
         ]
         if state.latest_summary:
@@ -171,6 +179,30 @@ class EpisodeRuntime:
             "After any thinking, the final visible action must be only the JSON object. "
             "Do not include labels, markdown, code fences, explanations, or any text before or after the final JSON object. "
             "Return one action only."
+        )
+        return "\n".join(pieces)
+
+    def _build_forced_answer_prompt(self, active: _ActiveEpisode) -> str:
+        state = active.state
+        pieces = [
+            self._build_transcript_block("SYSTEM", build_forced_answer_system_prompt()),
+            self._build_transcript_block("USER", state.user_prompt),
+        ]
+        if state.latest_summary:
+            pieces.append(self._build_transcript_block("SUMMARY", state.latest_summary))
+        for round_record in self._raw_tail_rounds(state):
+            pieces.extend(
+                [
+                    self._build_transcript_block("ASSISTANT_TOOL_CALL", round_record.assistant_message.content),
+                    self._build_transcript_block("TOOL_RESULT", round_record.tool_result.content),
+                ]
+            )
+        pieces.append(
+            "### NEXT_ACTION\n"
+            "The search/get_document budget is exhausted. "
+            "Return exactly one JSON object using finish only. "
+            "After any thinking, the final visible action must be only the JSON object. "
+            "Do not include labels, markdown, code fences, explanations, or any text before or after the final JSON object."
         )
         return "\n".join(pieces)
 
@@ -292,7 +324,7 @@ class EpisodeRuntime:
     def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
         state = active.state
         query_id = state.query_id
-        prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
+        prompt = prompt if prompt is not None else self._build_runtime_prompt(state, self._remaining_tool_calls(active))
         parsed_tool_call = parse_model_tool_call(raw_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
@@ -402,6 +434,64 @@ class EpisodeRuntime:
             )
         )
 
+    def _apply_forced_answer_output(self, active: _ActiveEpisode, raw_output: str, prompt: str) -> None:
+        state = active.state
+        query_id = state.query_id
+        parsed_tool_call = parse_model_tool_call(raw_output)
+        if parsed_tool_call is None:
+            active.result = self._malformed_result(
+                state,
+                query_id,
+                prompt,
+                raw_output,
+                active.summary_turns,
+                active.retrieved_docids,
+                active.tool_call_counts,
+                active.turn_records,
+            )
+            return
+
+        payload, normalized_output = parsed_tool_call
+        tool_name = payload["tool_name"]
+        arguments = payload["arguments"]
+        if tool_name != "finish":
+            active.result = self._malformed_result(
+                state,
+                query_id,
+                prompt,
+                normalized_output,
+                active.summary_turns,
+                active.retrieved_docids,
+                active.tool_call_counts,
+                active.turn_records,
+            )
+            return
+
+        answer = arguments.get("answer")
+        if not isinstance(answer, str):
+            active.result = self._malformed_result(
+                state,
+                query_id,
+                prompt,
+                normalized_output,
+                active.summary_turns,
+                active.retrieved_docids,
+                active.tool_call_counts,
+                active.turn_records,
+            )
+            return
+
+        active.turn_records.append(
+            {
+                "query_id": query_id,
+                "turn_id": "final-answer",
+                "kind": "final_answer",
+                "prompt": prompt,
+                "completion": normalized_output,
+            }
+        )
+        active.result = self._completed_result(active, answer)
+
     def _build_summary_prompt_for_active(self, active: _ActiveEpisode) -> tuple[str, int] | None:
         compacted_state = self._compacted_state(active.state)
         if not active.context_manager.should_summarize(compacted_state):
@@ -444,27 +534,27 @@ class EpisodeRuntime:
     def run_many(self, episodes: Iterable[tuple[str, str]]) -> list[RuntimeResult]:
         active_episodes = [self._new_active_episode(query_id, user_prompt) for query_id, user_prompt in episodes]
         while any(active.result is None for active in active_episodes):
-            action_items: list[tuple[_ActiveEpisode, str]] = []
+            action_items: list[tuple[_ActiveEpisode, str, bool]] = []
             for active in active_episodes:
                 if active.result is not None:
                     continue
-                if self.max_tool_calls is not None and sum(active.tool_call_counts.values()) >= self.max_tool_calls:
-                    active.result = self._budget_exhausted_result(
-                        active.state.query_id,
-                        active.summary_turns,
-                        active.retrieved_docids,
-                        active.tool_call_counts,
-                        active.turn_records,
-                    )
+                remaining_tool_calls = self._remaining_tool_calls(active)
+                if remaining_tool_calls == 0:
+                    acting_prompt = self._build_forced_answer_prompt(active)
+                    active.context_manager.assert_fits(acting_prompt)
+                    action_items.append((active, acting_prompt, True))
                     continue
-                acting_prompt = self._build_runtime_prompt(active.state)
+                acting_prompt = self._build_runtime_prompt(active.state, remaining_tool_calls)
                 active.context_manager.assert_fits(acting_prompt)
-                action_items.append((active, acting_prompt))
+                action_items.append((active, acting_prompt, False))
 
             if action_items:
-                action_outputs = self._generate_batch([prompt for _, prompt in action_items])
-                for (active, prompt), raw_output in zip(action_items, action_outputs):
-                    self._apply_action_output(active, raw_output, prompt)
+                action_outputs = self._generate_batch([prompt for _, prompt, _ in action_items])
+                for (active, prompt, forced_answer), raw_output in zip(action_items, action_outputs):
+                    if forced_answer:
+                        self._apply_forced_answer_output(active, raw_output, prompt)
+                    else:
+                        self._apply_action_output(active, raw_output, prompt)
 
             summary_items: list[tuple[_ActiveEpisode, str, int]] = []
             for active in active_episodes:

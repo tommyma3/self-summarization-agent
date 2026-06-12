@@ -180,3 +180,43 @@ def test_openrlhf_executor_trains_malformed_tool_call_as_negative_example() -> N
     assert len(result["action_ranges"]) == 1
     assert '{"tool_name": "search"}' in tokenizer.decode(result["observation_tokens"])
     assert result["extra_logs"]["status"] == "malformed_tool_call"
+
+
+def test_openrlhf_executor_forces_final_answer_after_tool_limit() -> None:
+    tokenizer = CharTokenizer()
+    llm = RecordingLLMEngine(
+        tokenizer,
+        [
+            tool_output('{"tool_name": "search", "arguments": {"query": "q"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}'),
+        ],
+    )
+    runtime = EpisodeRuntime(
+        model=SimpleNamespace(),
+        backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact"}),
+        context_threshold_tokens=1000,
+        max_context_tokens=4096,
+        max_tool_calls=1,
+        token_counter=lambda text: len(text),
+    )
+    install_resources(runtime)
+
+    result = asyncio.run(
+        AgentExecutor().execute(
+            "question",
+            '{"query_id": "q1", "answer": "best available"}',
+            SimpleNamespace(logprobs=None, max_tokens=None),
+            4096,
+            tokenizer,
+            llm,
+        )
+    )
+
+    assert len(llm.prompts) == 2
+    assert "Remaining search/get_document tool calls: 1" in llm.prompts[0]
+    assert "final-answer boundary" in llm.prompts[1]
+    assert "Remaining search/get_document tool calls: 0" in llm.prompts[1]
+    assert result["reward"] == 1.0
+    assert result["extra_logs"]["status"] == "completed"
+    assert result["extra_logs"]["tool_calls"] == {"search": 1, "get_document": 0}
+    assert len(result["action_ranges"]) == 2

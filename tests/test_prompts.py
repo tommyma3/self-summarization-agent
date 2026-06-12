@@ -1,18 +1,34 @@
 from self_summarization_agent.models import EpisodeState
-from self_summarization_agent.prompts import build_summary_prompt, build_summary_system_prompt, build_system_prompt
+from self_summarization_agent.prompts import (
+    build_forced_answer_system_prompt,
+    build_summary_prompt,
+    build_summary_system_prompt,
+    build_system_prompt,
+)
 
 
 def test_build_system_prompt_mentions_tools() -> None:
-    prompt = build_system_prompt()
+    prompt = build_system_prompt(remaining_tool_calls=3)
     assert "search" in prompt
     assert "get_document" in prompt
     assert "finish" in prompt
     assert "exactly one JSON object" in prompt
+    assert "Remaining search/get_document tool calls: 3" in prompt
+    assert "finish does not consume the tool-call budget" in prompt
     assert "Do not wrap the JSON in ``` fences" in prompt
     assert "After any internal reasoning" in prompt
     assert "Never call finish from background knowledge or a guess" in prompt
     assert '{"tool_name": "search", "arguments": {"query": "..."}}' in prompt
     assert '{"tool_name": "get_document", "arguments": {"doc_id": "..."}}' in prompt
+    assert '{"tool_name": "finish", "arguments": {"answer": "..."}}' in prompt
+
+
+def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
+    prompt = build_forced_answer_system_prompt()
+    assert "final-answer boundary" in prompt
+    assert "Remaining search/get_document tool calls: 0" in prompt
+    assert "finish does not consume the tool-call budget" in prompt
+    assert "Do not call search or get_document" in prompt
     assert '{"tool_name": "finish", "arguments": {"answer": "..."}}' in prompt
 
 

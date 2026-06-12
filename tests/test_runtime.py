@@ -169,13 +169,21 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=1024)
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=100,
+        max_context_tokens=1024,
+        max_tool_calls=2,
+    )
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "completed"
     assert result.final_answer == "done"
     assert len(model.prompts) == 2
+    assert "Remaining search/get_document tool calls: 2" in model.prompts[0]
+    assert "Remaining search/get_document tool calls: 1" in model.prompts[1]
     assert "### SYSTEM" in model.prompts[1]
     assert "exactly one JSON object" in model.prompts[1]
     assert "Available tools:" in model.prompts[1]
@@ -514,9 +522,14 @@ def test_runtime_malformed_result_feeds_trajectory_extraction() -> None:
     assert [sample.reward for sample in samples] == [-1.0]
 
 
-def test_runtime_stops_with_budget_exhausted_after_tool_limit() -> None:
+def test_runtime_forces_final_answer_after_tool_limit() -> None:
     backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={})
-    model = ScriptedModel(outputs=[tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')])
+    model = RecordingModel(
+        outputs=[
+            tool_output('{"tool_name": "search", "arguments": {"query": "q"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}'),
+        ]
+    )
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
@@ -527,9 +540,31 @@ def test_runtime_stops_with_budget_exhausted_after_tool_limit() -> None:
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
-    assert result.status == "budget_exhausted"
-    assert result.final_answer is None
-    assert result.turn_rewards == {"tool-1": -1.0}
+    assert result.status == "completed"
+    assert result.final_answer == "best available"
+    assert result.tool_call_counts == {"search": 1, "get_document": 0}
+    assert result.turn_records[-1]["kind"] == "final_answer"
+    assert "final-answer boundary" in model.prompts[1]
+    assert "Remaining search/get_document tool calls: 0" in model.prompts[1]
+    assert "Do not call search or get_document" in model.prompts[1]
+
+
+def test_runtime_rejects_non_finish_action_after_tool_limit() -> None:
+    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={})
+    model = RecordingModel(outputs=[tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=100,
+        max_context_tokens=1024,
+        max_tool_calls=0,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "malformed_tool_call"
+    assert result.tool_call_counts == {"search": 0, "get_document": 0}
+    assert "final-answer boundary" in model.prompts[0]
 
 
 def test_runtime_applies_fit_check_to_full_summary_generation_prompt() -> None:

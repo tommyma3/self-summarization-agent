@@ -197,17 +197,21 @@ class AgentExecutor(AgentExecutorBase):
             return text, token_ids, _logprobs_for_output(output, token_ids)
 
         while active.result is None:
-            if runtime.max_tool_calls is not None and sum(active.tool_call_counts.values()) >= runtime.max_tool_calls:
-                active.result = runtime._budget_exhausted_result(
-                    active.state.query_id,
-                    active.summary_turns,
-                    active.retrieved_docids,
-                    active.tool_call_counts,
-                    active.turn_records,
-                )
+            remaining_tool_calls = runtime._remaining_tool_calls(active)
+            if remaining_tool_calls == 0:
+                acting_prompt = runtime._build_forced_answer_prompt(active)
+                active.context_manager.assert_fits(acting_prompt)
+                raw_action, action_token_ids, action_logprobs = await generate_for_prompt(acting_prompt)
+                parsed_action = parse_model_tool_call(raw_action)
+                if parsed_action is None:
+                    train_segments.append((acting_prompt, action_token_ids, action_logprobs))
+                else:
+                    _, normalized_action = parsed_action
+                    train_segments.append((acting_prompt, _tokenize(hf_tokenizer, normalized_action), None))
+                runtime._apply_forced_answer_output(active, raw_action, acting_prompt)
                 break
 
-            acting_prompt = runtime._build_runtime_prompt(active.state)
+            acting_prompt = runtime._build_runtime_prompt(active.state, remaining_tool_calls)
             active.context_manager.assert_fits(acting_prompt)
             raw_action, action_token_ids, action_logprobs = await generate_for_prompt(acting_prompt)
             parsed_action = parse_model_tool_call(raw_action)
