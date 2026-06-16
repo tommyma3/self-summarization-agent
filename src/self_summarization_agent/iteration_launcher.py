@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Sequence
 
 from self_summarization_agent.checkpoints import advance_latest_checkpoint, checkpoint_id_from_path, resolve_latest_checkpoint
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
-from self_summarization_agent.launcher_utils import ensure_dir
+from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir, utc_timestamp
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -56,6 +57,36 @@ def _append_cli_overrides(command: list[str], overrides: Sequence[str]) -> None:
         command.extend(["--set", override])
 
 
+def _run_timed_phase(
+    *,
+    phase: str,
+    iteration: int,
+    command: Sequence[str],
+    command_runner: CommandRunner,
+    timings_path: Path,
+) -> int:
+    print(f"[iteration_launcher] starting {phase}", flush=True)
+    started = time.perf_counter()
+    status = command_runner(command)
+    elapsed_seconds = time.perf_counter() - started
+    print(
+        f"[iteration_launcher] finished {phase}: "
+        f"exit_code={status}, elapsed_seconds={elapsed_seconds:.3f}",
+        flush=True,
+    )
+    append_jsonl(
+        timings_path,
+        {
+            "iteration": iteration,
+            "timestamp_utc": utc_timestamp(),
+            "phase": phase,
+            "elapsed_seconds": elapsed_seconds,
+            "exit_code": status,
+        },
+    )
+    return status
+
+
 def run_training_iteration(
     config,
     *,
@@ -73,6 +104,7 @@ def run_training_iteration(
     checkpoints_dir = ensure_dir(train_dir / "checkpoints")
     metrics_path = train_dir / "step_metrics.jsonl"
     eval_metrics_path = train_dir / "eval_metrics.jsonl"
+    phase_timings_path = train_dir / "phase_timings.jsonl"
     raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.raw.jsonl"
     judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.jsonl"
     eval_raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.raw.jsonl"
@@ -123,13 +155,31 @@ def run_training_iteration(
         str(metrics_path),
     ]
     _append_cli_overrides(train_command, overrides)
-    rollout_status = command_runner(rollout_command)
+    rollout_status = _run_timed_phase(
+        phase="train_rollout",
+        iteration=iteration,
+        command=rollout_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+    )
     if rollout_status != 0:
         raise RuntimeError(f"Rollout subprocess failed with exit code {rollout_status}")
-    judge_status = command_runner(judge_command)
+    judge_status = _run_timed_phase(
+        phase="train_judge",
+        iteration=iteration,
+        command=judge_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+    )
     if judge_status != 0:
         raise RuntimeError(f"Judge subprocess failed with exit code {judge_status}")
-    train_status = command_runner(train_command)
+    train_status = _run_timed_phase(
+        phase="train_update",
+        iteration=iteration,
+        command=train_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+    )
     if train_status != 0:
         raise RuntimeError(f"Training subprocess failed with exit code {train_status}")
     if config.dataset.eval_limit > 0:
@@ -177,13 +227,31 @@ def run_training_iteration(
             "--policy-checkpoint-id",
             checkpoint_id_from_path(next_checkpoint),
         ]
-        eval_rollout_status = command_runner(eval_rollout_command)
+        eval_rollout_status = _run_timed_phase(
+            phase="eval_rollout",
+            iteration=iteration,
+            command=eval_rollout_command,
+            command_runner=command_runner,
+            timings_path=phase_timings_path,
+        )
         if eval_rollout_status != 0:
             raise RuntimeError(f"Eval rollout subprocess failed with exit code {eval_rollout_status}")
-        eval_judge_status = command_runner(eval_judge_command)
+        eval_judge_status = _run_timed_phase(
+            phase="eval_judge",
+            iteration=iteration,
+            command=eval_judge_command,
+            command_runner=command_runner,
+            timings_path=phase_timings_path,
+        )
         if eval_judge_status != 0:
             raise RuntimeError(f"Eval judge subprocess failed with exit code {eval_judge_status}")
-        eval_metrics_status = command_runner(eval_metrics_command)
+        eval_metrics_status = _run_timed_phase(
+            phase="eval_metrics",
+            iteration=iteration,
+            command=eval_metrics_command,
+            command_runner=command_runner,
+            timings_path=phase_timings_path,
+        )
         if eval_metrics_status != 0:
             raise RuntimeError(f"Eval metrics subprocess failed with exit code {eval_metrics_status}")
     advanced = advance_latest_checkpoint(train_dir, next_checkpoint)

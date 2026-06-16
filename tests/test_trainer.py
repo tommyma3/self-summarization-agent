@@ -85,22 +85,27 @@ def test_fsdp_context_parallel_encoding_leaves_aligned_sequence_unpadded() -> No
 
 
 def test_transformers_trainer_reuses_batch_for_clipped_grpo_updates() -> None:
-    trainer = TransformersPolicyTrainer.__new__(TransformersPolicyTrainer)
-    trainer.training_config = TrainingConfig(update_epochs=3, minibatch_size=2, clip_range=0.2)
-    trainer.model = torch.nn.Linear(1, 1, bias=False)
-    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.01)
     feature_by_turn = {
         "q1-good": 1.0,
         "q1-bad": 2.0,
         "q2-good": 3.0,
         "q2-bad": 4.0,
     }
+    batch_sizes = []
 
-    def sequence_logprob(sample: RLSample) -> torch.Tensor:
-        feature = torch.tensor([[feature_by_turn[sample.turn_id]]], dtype=torch.float32)
-        return trainer.model(feature).mean()
+    class FakeBatchedTrainer(TransformersPolicyTrainer):
+        def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+            batch_sizes.append(len(samples))
+            features = torch.tensor([[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32)
+            return self.model(features).squeeze(-1)
 
-    trainer._sequence_logprob = sequence_logprob
+        def _model_device(self) -> torch.device:
+            return torch.device("cpu")
+
+    trainer = FakeBatchedTrainer.__new__(FakeBatchedTrainer)
+    trainer.training_config = TrainingConfig(update_epochs=3, minibatch_size=2, clip_range=0.2)
+    trainer.model = torch.nn.Linear(1, 1, bias=False)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.01)
     grouped_samples = {
         "q1": [
             make_rewarded_sample("q1", "q1-good", 1.0),
@@ -118,3 +123,4 @@ def test_transformers_trainer_reuses_batch_for_clipped_grpo_updates() -> None:
     assert metrics.optimizer_step_count == 6
     assert metrics.loss != 0.0
     assert 0.0 <= metrics.clip_fraction <= 1.0
+    assert batch_sizes == [2, 2, 2, 2, 2, 2, 2, 2]

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from self_summarization_agent.checkpoints import mark_checkpoint_complete, resolve_latest_checkpoint, write_latest_checkpoint
@@ -70,6 +71,14 @@ def test_iteration_launcher_runs_rollout_then_train_and_advances_latest(tmp_path
     assert str(latest_root / "rollouts" / "iteration-00001.jsonl") in calls[1]
     assert str(latest_root / "rollouts" / "iteration-00001.jsonl") in calls[2]
     assert resolve_latest_checkpoint(latest_root).checkpoint_id == "iteration-00001"
+    timing_rows = [
+        json.loads(line)
+        for line in (latest_root / "phase_timings.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in timing_rows] == ["train_rollout", "train_judge", "train_update"]
+    assert all(row["iteration"] == 1 for row in timing_rows)
+    assert all(row["exit_code"] == 0 for row in timing_rows)
+    assert all(row["elapsed_seconds"] >= 0 for row in timing_rows)
 
 
 def test_iteration_launcher_can_pass_resume_to_rollout_collection(tmp_path: Path) -> None:

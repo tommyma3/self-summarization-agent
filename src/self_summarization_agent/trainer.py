@@ -112,6 +112,12 @@ def _minibatches(
         yield items[start:end], reference_logprobs[start:end]
 
 
+def _minibatch_ranges(item_count: int, minibatch_size: int | None):
+    effective_size = item_count if minibatch_size is None else minibatch_size
+    for start in range(0, item_count, effective_size):
+        yield start, min(start + effective_size, item_count)
+
+
 def _clipped_grpo_loss(
     logprob: torch.Tensor,
     reference_logprob: torch.Tensor,
@@ -129,6 +135,74 @@ def _clipped_grpo_loss(
     approx_kl = reference_logprob - logprob.detach()
     clipped = (torch.abs(ratio.detach() - 1.0) > clip_range).to(logprob.dtype)
     return loss, approx_kl, clipped
+
+
+def _clipped_grpo_losses(
+    logprobs: torch.Tensor,
+    reference_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    *,
+    clip_range: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    reference_logprobs = reference_logprobs.to(device=logprobs.device, dtype=logprobs.dtype)
+    advantages = advantages.to(device=logprobs.device, dtype=logprobs.dtype)
+    ratio = torch.exp(logprobs - reference_logprobs)
+    clipped_ratio = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
+    unclipped_objective = ratio * advantages
+    clipped_objective = clipped_ratio * advantages
+    losses = -torch.minimum(unclipped_objective, clipped_objective)
+    approx_kls = reference_logprobs - logprobs.detach()
+    clipped = (torch.abs(ratio.detach() - 1.0) > clip_range).to(logprobs.dtype)
+    return losses, approx_kls, clipped
+
+
+def _pad_1d_tensors(items: list[torch.Tensor], *, pad_value: int) -> torch.Tensor:
+    if not items:
+        raise ValueError("Cannot pad an empty tensor list")
+    max_length = max(tensor.shape[0] for tensor in items)
+    padded = torch.full(
+        (len(items), max_length),
+        pad_value,
+        dtype=items[0].dtype,
+        device=items[0].device,
+    )
+    for index, tensor in enumerate(items):
+        padded[index, : tensor.shape[0]] = tensor
+    return padded
+
+
+def _pad_bool_tensors(items: list[torch.Tensor]) -> torch.Tensor:
+    if not items:
+        raise ValueError("Cannot pad an empty tensor list")
+    max_length = max(tensor.shape[0] for tensor in items)
+    padded = torch.zeros(
+        (len(items), max_length),
+        dtype=torch.bool,
+        device=items[0].device,
+    )
+    for index, tensor in enumerate(items):
+        padded[index, : tensor.shape[0]] = tensor
+    return padded
+
+
+def _mean_masked_logprobs(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    completion_mask: torch.Tensor,
+) -> torch.Tensor:
+    token_losses = torch.nn.functional.cross_entropy(
+        logits.reshape(-1, logits.shape[-1]),
+        labels.reshape(-1),
+        reduction="none",
+    ).reshape_as(labels)
+    mask = completion_mask.to(token_losses.dtype)
+    token_counts = mask.sum(dim=1)
+    logprob_sums = -(token_losses * mask).sum(dim=1)
+    return torch.where(
+        token_counts > 0,
+        logprob_sums / token_counts.clamp_min(1),
+        torch.zeros_like(logprob_sums),
+    )
 
 
 @dataclass(slots=True)
@@ -168,6 +242,12 @@ class TransformersPolicyTrainer:
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def _model_device(self) -> torch.device:
+        device = getattr(self.model, "device", None)
+        if device is not None:
+            return torch.device(device)
+        return next(self.model.parameters()).device
 
     def _format_prompt(self, prompt: str) -> str:
         if not getattr(self.tokenizer, "chat_template", None):
@@ -213,24 +293,52 @@ class TransformersPolicyTrainer:
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
     def _sequence_logprob(self, sample: RLSample) -> torch.Tensor:
-        prompt_ids = self.tokenizer.encode(sample.prompt, add_special_tokens=False)
-        full_ids = self.tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
-        max_len = getattr(self.training_config, "max_sequence_length", None)
-        if max_len is not None and len(full_ids) > max_len:
-            drop = len(full_ids) - max_len
-            full_ids = full_ids[drop:]
-            prompt_ids = prompt_ids[drop:] if len(prompt_ids) > drop else []
-        if len(full_ids) <= len(prompt_ids):
-            return torch.zeros((), device=self.model.device)
-        input_ids = torch.tensor([full_ids], device=self.model.device)
+        return self._sequence_logprobs([sample])[0]
+
+    def _encode_shifted_samples(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        device = self._model_device()
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        input_tensors: list[torch.Tensor] = []
+        label_tensors: list[torch.Tensor] = []
+        mask_tensors: list[torch.Tensor] = []
+        for sample in samples:
+            prompt_ids = self.tokenizer.encode(sample.prompt, add_special_tokens=False)
+            full_ids = self.tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
+            max_len = getattr(self.training_config, "max_sequence_length", None)
+            if max_len is not None and len(full_ids) > max_len:
+                drop = len(full_ids) - max_len
+                full_ids = full_ids[drop:]
+                prompt_ids = prompt_ids[drop:] if len(prompt_ids) > drop else []
+
+            if len(full_ids) <= len(prompt_ids):
+                input_ids = torch.tensor([int(pad_token_id)], dtype=torch.long, device=device)
+                labels = torch.tensor([int(pad_token_id)], dtype=torch.long, device=device)
+                completion_mask = torch.zeros((1,), dtype=torch.bool, device=device)
+            else:
+                input_ids = torch.tensor(full_ids[:-1], dtype=torch.long, device=device)
+                labels = torch.tensor(full_ids[1:], dtype=torch.long, device=device)
+                completion_mask = torch.zeros_like(labels, dtype=torch.bool)
+                completion_start = max(len(prompt_ids) - 1, 0)
+                completion_mask[completion_start:] = True
+            input_tensors.append(input_ids)
+            label_tensors.append(labels)
+            mask_tensors.append(completion_mask)
+
+        return (
+            _pad_1d_tensors(input_tensors, pad_value=int(pad_token_id)),
+            _pad_1d_tensors(label_tensors, pad_value=int(pad_token_id)),
+            _pad_bool_tensors(mask_tensors),
+        )
+
+    def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+        input_ids, labels, completion_mask = self._encode_shifted_samples(samples)
         outputs = self.model(input_ids=input_ids)
-        logits = outputs.logits[:, :-1, :]
-        targets = input_ids[:, 1:]
-        log_probs = torch.log_softmax(logits, dim=-1)
-        token_log_probs = log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        completion_start = max(len(prompt_ids) - 1, 0)
-        completion_log_probs = token_log_probs[:, completion_start:]
-        return completion_log_probs.mean()
+        return _mean_masked_logprobs(outputs.logits, labels, completion_mask)
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
         update_epochs, minibatch_size, clip_range = _validate_grpo_training_config(self.training_config)
@@ -246,10 +354,11 @@ class TransformersPolicyTrainer:
                 f"update_epochs={update_epochs}, minibatch_size={minibatch_size or len(batch.contributing)}"
             )
         with torch.no_grad():
-            reference_logprobs = [
-                self._sequence_logprob(sample).detach()
-                for sample, _advantage in batch.contributing
-            ]
+            reference_logprob_chunks = []
+            for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
+                reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
+                reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
+            reference_logprobs = torch.cat(reference_logprob_chunks)
 
         detached_losses: list[float] = []
         detached_kls: list[float] = []
@@ -259,28 +368,27 @@ class TransformersPolicyTrainer:
         for epoch_index in range(update_epochs):
             if stop_training:
                 break
-            for minibatch, minibatch_reference_logprobs in _minibatches(
-                batch.contributing,
-                reference_logprobs,
-                minibatch_size,
-            ):
+            for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
+                minibatch = batch.contributing[start:end]
+                minibatch_reference_logprobs = reference_logprobs[start:end]
                 self.optimizer.zero_grad(set_to_none=True)
-                scale = 1.0 / len(minibatch)
-                minibatch_kls: list[float] = []
-                for (sample, advantage), reference_logprob in zip(minibatch, minibatch_reference_logprobs):
-                    logprob = self._sequence_logprob(sample)
-                    loss, approx_kl, clipped = _clipped_grpo_loss(
-                        logprob,
-                        reference_logprob,
-                        advantage,
-                        clip_range=clip_range,
-                    )
-                    detached_losses.append(float(loss.detach().cpu()))
-                    kl_value = float(approx_kl.detach().cpu())
-                    detached_kls.append(kl_value)
-                    minibatch_kls.append(kl_value)
-                    detached_clipped.append(float(clipped.detach().cpu()))
-                    (loss * scale).backward()
+                samples = [sample for sample, _advantage in minibatch]
+                advantages = torch.tensor(
+                    [advantage for _sample, advantage in minibatch],
+                    dtype=torch.float32,
+                    device=self._model_device(),
+                )
+                logprobs = self._sequence_logprobs(samples)
+                losses, approx_kls, clipped = _clipped_grpo_losses(
+                    logprobs,
+                    minibatch_reference_logprobs,
+                    advantages,
+                    clip_range=clip_range,
+                )
+                detached_losses.extend(losses.detach().cpu().tolist())
+                detached_kls.extend(approx_kls.detach().cpu().tolist())
+                detached_clipped.extend(clipped.detach().cpu().tolist())
+                losses.mean().backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
                 self.optimizer.step()
                 optimizer_step_count += 1
@@ -291,7 +399,8 @@ class TransformersPolicyTrainer:
                         f"optimizer_step={optimizer_step_count} minibatch_size={len(minibatch)}"
                     )
                 target_kl = self.training_config.target_kl
-                if target_kl is not None and minibatch_kls and sum(minibatch_kls) / len(minibatch_kls) > target_kl:
+                minibatch_kl = float(approx_kls.detach().mean().cpu()) if approx_kls.numel() else 0.0
+                if target_kl is not None and approx_kls.numel() and minibatch_kl > target_kl:
                     if is_main:
                         print(f"[TransformersPolicyTrainer]  Stopping early: target_kl={target_kl} reached")
                     stop_training = True
@@ -389,6 +498,36 @@ class FSDP2ContextParallelPolicyTrainer:
         input_ids, labels, completion_mask = self._pad_for_context_parallel(input_ids, labels, completion_mask)
         return input_ids, labels, completion_mask
 
+    def _encode_shifted_samples(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.eos_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        input_tensors: list[torch.Tensor] = []
+        label_tensors: list[torch.Tensor] = []
+        mask_tensors: list[torch.Tensor] = []
+        for sample in samples:
+            input_ids, labels, completion_mask = self._encode_shifted_sample(sample)
+            if input_ids.numel() == 0:
+                input_ids = torch.tensor([int(pad_token_id)], dtype=torch.long, device=self.accelerator.device)
+                labels = torch.tensor([int(pad_token_id)], dtype=torch.long, device=self.accelerator.device)
+                completion_mask = torch.zeros((1,), dtype=torch.bool, device=self.accelerator.device)
+            else:
+                input_ids = input_ids.squeeze(0)
+                labels = labels.squeeze(0)
+                completion_mask = completion_mask.squeeze(0)
+            input_tensors.append(input_ids)
+            label_tensors.append(labels)
+            mask_tensors.append(completion_mask)
+
+        return (
+            _pad_1d_tensors(input_tensors, pad_value=int(pad_token_id)),
+            _pad_1d_tensors(label_tensors, pad_value=int(pad_token_id)),
+            _pad_bool_tensors(mask_tensors),
+        )
+
     def _pad_for_context_parallel(
         self,
         input_ids: torch.Tensor,
@@ -432,9 +571,12 @@ class FSDP2ContextParallelPolicyTrainer:
         )
 
     def _sequence_logprob(self, sample: RLSample) -> torch.Tensor:
-        input_ids, labels, completion_mask = self._encode_shifted_sample(sample)
+        return self._sequence_logprobs([sample])[0]
+
+    def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+        input_ids, labels, completion_mask = self._encode_shifted_samples(samples)
         if input_ids.numel() == 0:
-            return torch.zeros((), device=self.accelerator.device)
+            return torch.zeros((len(samples),), device=self.accelerator.device)
 
         max_len = getattr(self.training_config, "max_sequence_length", None)
         if max_len is not None and input_ids.shape[1] > max_len:
@@ -451,29 +593,48 @@ class FSDP2ContextParallelPolicyTrainer:
             ):
                 outputs = self.model(input_ids=input_ids)
                 logits = outputs.logits
-                token_losses = torch.nn.functional.cross_entropy(
-                    logits.reshape(-1, logits.shape[-1]),
-                    labels.reshape(-1),
-                    reduction="none",
-                ).reshape_as(labels)
-                local_logprob_sum = -(token_losses * completion_mask.to(token_losses.dtype)).sum()
-                local_token_count = completion_mask.sum().to(token_losses.dtype)
+                local_logprob_sums, local_token_counts = self._masked_logprob_sums_and_counts(
+                    logits,
+                    labels,
+                    completion_mask,
+                )
         else:
             outputs = self.model(input_ids=input_ids)
             logits = outputs.logits
-            token_losses = torch.nn.functional.cross_entropy(
-                logits.reshape(-1, logits.shape[-1]),
-                labels.reshape(-1),
-                reduction="none",
-            ).reshape_as(labels)
-            local_logprob_sum = -(token_losses * completion_mask.to(token_losses.dtype)).sum()
-            local_token_count = completion_mask.sum().to(token_losses.dtype)
+            local_logprob_sums, local_token_counts = self._masked_logprob_sums_and_counts(
+                logits,
+                labels,
+                completion_mask,
+            )
 
+        global_logprob_sums = self._accelerator_reduce(local_logprob_sums)
         with torch.no_grad():
-            global_token_count = self.accelerator.reduce(local_token_count.detach(), reduction="sum")
-        if global_token_count.item() == 0:
-            return torch.zeros((), device=self.accelerator.device)
-        return local_logprob_sum / global_token_count.clamp_min(1)
+            global_token_counts = self._accelerator_reduce(local_token_counts.detach())
+        return torch.where(
+            global_token_counts > 0,
+            global_logprob_sums / global_token_counts.clamp_min(1),
+            torch.zeros_like(global_logprob_sums),
+        )
+
+    def _masked_logprob_sums_and_counts(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        completion_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_losses = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            labels.reshape(-1),
+            reduction="none",
+        ).reshape_as(labels)
+        mask = completion_mask.to(token_losses.dtype)
+        return -(token_losses * mask).sum(dim=1), mask.sum(dim=1)
+
+    def _accelerator_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
+        reduce = getattr(self.accelerator, "reduce", None)
+        if reduce is None:
+            return tensor
+        return reduce(tensor, reduction="sum")
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
         update_epochs, minibatch_size, clip_range = _validate_grpo_training_config(self.training_config)
@@ -489,10 +650,11 @@ class FSDP2ContextParallelPolicyTrainer:
                 f"update_epochs={update_epochs}, minibatch_size={minibatch_size or len(batch.contributing)}"
             )
         with torch.no_grad():
-            reference_logprobs = [
-                self._sequence_logprob(sample).detach()
-                for sample, _advantage in batch.contributing
-            ]
+            reference_logprob_chunks = []
+            for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
+                reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
+                reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
+            reference_logprobs = torch.cat(reference_logprob_chunks)
 
         detached_losses: list[float] = []
         detached_kls: list[float] = []
@@ -502,28 +664,27 @@ class FSDP2ContextParallelPolicyTrainer:
         for epoch_index in range(update_epochs):
             if stop_training:
                 break
-            for minibatch, minibatch_reference_logprobs in _minibatches(
-                batch.contributing,
-                reference_logprobs,
-                minibatch_size,
-            ):
+            for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
+                minibatch = batch.contributing[start:end]
+                minibatch_reference_logprobs = reference_logprobs[start:end]
                 self.optimizer.zero_grad(set_to_none=True)
-                scale = 1.0 / len(minibatch)
-                minibatch_kls: list[float] = []
-                for (sample, advantage), reference_logprob in zip(minibatch, minibatch_reference_logprobs):
-                    logprob = self._sequence_logprob(sample)
-                    loss, approx_kl, clipped = _clipped_grpo_loss(
-                        logprob,
-                        reference_logprob,
-                        advantage,
-                        clip_range=clip_range,
-                    )
-                    detached_losses.append(float(loss.detach().cpu()))
-                    kl_value = float(approx_kl.detach().cpu())
-                    detached_kls.append(kl_value)
-                    minibatch_kls.append(kl_value)
-                    detached_clipped.append(float(clipped.detach().cpu()))
-                    self.accelerator.backward(loss * scale)
+                samples = [sample for sample, _advantage in minibatch]
+                advantages = torch.tensor(
+                    [advantage for _sample, advantage in minibatch],
+                    dtype=torch.float32,
+                    device=self.accelerator.device,
+                )
+                logprobs = self._sequence_logprobs(samples)
+                losses, approx_kls, clipped = _clipped_grpo_losses(
+                    logprobs,
+                    minibatch_reference_logprobs,
+                    advantages,
+                    clip_range=clip_range,
+                )
+                detached_losses.extend(losses.detach().cpu().tolist())
+                detached_kls.extend(approx_kls.detach().cpu().tolist())
+                detached_clipped.extend(clipped.detach().cpu().tolist())
+                self.accelerator.backward(losses.mean())
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
                 self.optimizer.step()
                 optimizer_step_count += 1
@@ -534,7 +695,8 @@ class FSDP2ContextParallelPolicyTrainer:
                         f"optimizer_step={optimizer_step_count} minibatch_size={len(minibatch)}"
                     )
                 target_kl = self.training_config.target_kl
-                if target_kl is not None and minibatch_kls and sum(minibatch_kls) / len(minibatch_kls) > target_kl:
+                minibatch_kl = float(approx_kls.detach().mean().cpu()) if approx_kls.numel() else 0.0
+                if target_kl is not None and approx_kls.numel() and minibatch_kl > target_kl:
                     if is_main:
                         print(f"[FSDP2CPTrainer]  Stopping early: target_kl={target_kl} reached")
                     stop_training = True
