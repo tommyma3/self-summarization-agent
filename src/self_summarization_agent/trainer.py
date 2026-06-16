@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import functools
 import os
+from pathlib import Path
+import shutil
 from typing import Any
 import warnings
 
@@ -40,6 +42,15 @@ class UpdateMetrics:
     optimizer_step_count: int = 0
     mean_policy_kl: float = 0.0
     clip_fraction: float = 0.0
+
+
+def _copy_processor_configs(source_dir: str, target_dir: str) -> None:
+    source = Path(source_dir)
+    target = Path(target_dir)
+    for filename in ("preprocessor_config.json", "video_preprocessor_config.json"):
+        src = source / filename
+        if src.exists():
+            shutil.copy2(src, target / filename)
 
 
 def _prepare_policy_batch(grouped_samples: dict[str, list[RLSample]]) -> _PolicyBatch:
@@ -298,6 +309,7 @@ class TransformersPolicyTrainer:
     def save_checkpoint(self, path: str) -> None:
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
+        _copy_processor_configs(self.model_config.model_path, path)
 
 
 @dataclass(slots=True)
@@ -546,4 +558,5 @@ class FSDP2ContextParallelPolicyTrainer:
             if hasattr(unwrapped_model, "generation_config") and unwrapped_model.generation_config is not None:
                 unwrapped_model.generation_config.save_pretrained(path)
             self.tokenizer.save_pretrained(path)
+            _copy_processor_configs(self.model_config.model_path, path)
         self.accelerator.wait_for_everyone()

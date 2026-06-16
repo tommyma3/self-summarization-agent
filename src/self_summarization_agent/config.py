@@ -66,6 +66,7 @@ class ModelConfig:
     max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = True
+    language_model_only: bool = False
 
 
 @dataclass(slots=True)

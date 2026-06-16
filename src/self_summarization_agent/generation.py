@@ -117,6 +117,7 @@ class VLLMGenerator:
     max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = False
+    language_model_only: bool = False
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
     _sampling_params_cls: Any = field(init=False)
@@ -140,13 +141,16 @@ class VLLMGenerator:
             "trust_remote_code": self.trust_remote_code,
             "tensor_parallel_size": self.tensor_parallel_size,
             "max_model_len": self.max_model_len,
+            "language_model_only": self.language_model_only,
         }
-        supported_kwargs = set(inspect.signature(LLM).parameters)
+        sig = inspect.signature(LLM)
+        supported_kwargs = set(sig.parameters)
+        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
         self.llm = LLM(
             **{
                 key: value
                 for key, value in llm_kwargs.items()
-                if key in supported_kwargs and value is not None
+                if (key in supported_kwargs or has_var_keyword) and value is not None
             }
         )
 
@@ -247,6 +251,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             max_model_len=max_model_len,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
+            language_model_only=model_config.language_model_only,
         )
     raise ValueError(f"Unsupported model backend: {model_config.backend}")
 
