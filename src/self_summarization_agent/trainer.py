@@ -85,20 +85,26 @@ def _metrics_without_update(batch: _PolicyBatch) -> UpdateMetrics:
     )
 
 
-def _validate_grpo_training_config(training_config: TrainingConfig) -> tuple[int, int | None, float]:
+def _validate_grpo_training_config(training_config: TrainingConfig) -> tuple[int, int | None, int, float]:
     update_epochs = training_config.update_epochs
     if update_epochs < 1:
         raise ValueError(f"training.update_epochs must be at least 1, got {update_epochs}")
     minibatch_size = training_config.minibatch_size
     if minibatch_size is not None and minibatch_size < 1:
         raise ValueError(f"training.minibatch_size must be at least 1, got {minibatch_size}")
+    microbatch_size = training_config.gradient_accumulation_microbatch_size
+    if microbatch_size < 1:
+        raise ValueError(
+            "training.gradient_accumulation_microbatch_size must be at least 1, "
+            f"got {microbatch_size}"
+        )
     clip_range = training_config.clip_range
     if clip_range < 0:
         raise ValueError(f"training.clip_range must be non-negative, got {clip_range}")
     target_kl = training_config.target_kl
     if target_kl is not None and target_kl <= 0:
         raise ValueError(f"training.target_kl must be positive when set, got {target_kl}")
-    return update_epochs, minibatch_size, clip_range
+    return update_epochs, minibatch_size, microbatch_size, clip_range
 
 
 def _minibatches(
@@ -116,6 +122,11 @@ def _minibatch_ranges(item_count: int, minibatch_size: int | None):
     effective_size = item_count if minibatch_size is None else minibatch_size
     for start in range(0, item_count, effective_size):
         yield start, min(start + effective_size, item_count)
+
+
+def _microbatch_ranges(start: int, end: int, microbatch_size: int):
+    for microbatch_start in range(start, end, microbatch_size):
+        yield microbatch_start, min(microbatch_start + microbatch_size, end)
 
 
 def _clipped_grpo_loss(
@@ -341,21 +352,25 @@ class TransformersPolicyTrainer:
         return _mean_masked_logprobs(outputs.logits, labels, completion_mask)
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
-        update_epochs, minibatch_size, clip_range = _validate_grpo_training_config(self.training_config)
+        update_epochs, minibatch_size, microbatch_size, clip_range = _validate_grpo_training_config(
+            self.training_config
+        )
         batch = _prepare_policy_batch(grouped_samples)
         if not batch.flat_samples or not batch.contributing:
             return _metrics_without_update(batch)
 
         is_main = int(os.environ.get("RANK", "0")) == 0
+        effective_minibatch_size = minibatch_size or len(batch.contributing)
         if is_main:
             print(
                 "[TransformersPolicyTrainer] Starting clipped GRPO update: "
                 f"{len(batch.flat_samples)} samples, {len(batch.contributing)} contributing, "
-                f"update_epochs={update_epochs}, minibatch_size={minibatch_size or len(batch.contributing)}"
+                f"update_epochs={update_epochs}, minibatch_size={effective_minibatch_size}, "
+                f"microbatch_size={microbatch_size}"
             )
         with torch.no_grad():
             reference_logprob_chunks = []
-            for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
+            for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
                 reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
                 reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
             reference_logprobs = torch.cat(reference_logprob_chunks)
@@ -369,26 +384,33 @@ class TransformersPolicyTrainer:
             if stop_training:
                 break
             for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
-                minibatch = batch.contributing[start:end]
-                minibatch_reference_logprobs = reference_logprobs[start:end]
+                minibatch_size_actual = end - start
                 self.optimizer.zero_grad(set_to_none=True)
-                samples = [sample for sample, _advantage in minibatch]
-                advantages = torch.tensor(
-                    [advantage for _sample, advantage in minibatch],
-                    dtype=torch.float32,
-                    device=self._model_device(),
-                )
-                logprobs = self._sequence_logprobs(samples)
-                losses, approx_kls, clipped = _clipped_grpo_losses(
-                    logprobs,
-                    minibatch_reference_logprobs,
-                    advantages,
-                    clip_range=clip_range,
-                )
-                detached_losses.extend(losses.detach().cpu().tolist())
-                detached_kls.extend(approx_kls.detach().cpu().tolist())
-                detached_clipped.extend(clipped.detach().cpu().tolist())
-                losses.mean().backward()
+                minibatch_kl_sum = 0.0
+                minibatch_kl_count = 0
+                for micro_start, micro_end in _microbatch_ranges(start, end, microbatch_size):
+                    microbatch = batch.contributing[micro_start:micro_end]
+                    microbatch_reference_logprobs = reference_logprobs[micro_start:micro_end]
+                    samples = [sample for sample, _advantage in microbatch]
+                    advantages = torch.tensor(
+                        [advantage for _sample, advantage in microbatch],
+                        dtype=torch.float32,
+                        device=self._model_device(),
+                    )
+                    logprobs = self._sequence_logprobs(samples)
+                    losses, approx_kls, clipped = _clipped_grpo_losses(
+                        logprobs,
+                        microbatch_reference_logprobs,
+                        advantages,
+                        clip_range=clip_range,
+                    )
+                    detached_losses.extend(losses.detach().cpu().tolist())
+                    detached_kls.extend(approx_kls.detach().cpu().tolist())
+                    detached_clipped.extend(clipped.detach().cpu().tolist())
+                    if approx_kls.numel():
+                        minibatch_kl_sum += float(approx_kls.detach().sum().cpu())
+                        minibatch_kl_count += int(approx_kls.numel())
+                    (losses.sum() / minibatch_size_actual).backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
                 self.optimizer.step()
                 optimizer_step_count += 1
@@ -396,11 +418,11 @@ class TransformersPolicyTrainer:
                     print(
                         "[TransformersPolicyTrainer]  "
                         f"epoch={epoch_index + 1}/{update_epochs} "
-                        f"optimizer_step={optimizer_step_count} minibatch_size={len(minibatch)}"
+                        f"optimizer_step={optimizer_step_count} minibatch_size={minibatch_size_actual}"
                     )
                 target_kl = self.training_config.target_kl
-                minibatch_kl = float(approx_kls.detach().mean().cpu()) if approx_kls.numel() else 0.0
-                if target_kl is not None and approx_kls.numel() and minibatch_kl > target_kl:
+                minibatch_kl = minibatch_kl_sum / minibatch_kl_count if minibatch_kl_count else 0.0
+                if target_kl is not None and minibatch_kl_count and minibatch_kl > target_kl:
                     if is_main:
                         print(f"[TransformersPolicyTrainer]  Stopping early: target_kl={target_kl} reached")
                     stop_training = True
@@ -637,21 +659,25 @@ class FSDP2ContextParallelPolicyTrainer:
         return reduce(tensor, reduction="sum")
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
-        update_epochs, minibatch_size, clip_range = _validate_grpo_training_config(self.training_config)
+        update_epochs, minibatch_size, microbatch_size, clip_range = _validate_grpo_training_config(
+            self.training_config
+        )
         batch = _prepare_policy_batch(grouped_samples)
         if not batch.flat_samples or not batch.contributing:
             return _metrics_without_update(batch)
 
         is_main = getattr(self.accelerator, "is_main_process", True)
+        effective_minibatch_size = minibatch_size or len(batch.contributing)
         if is_main:
             print(
                 "[FSDP2CPTrainer] Starting clipped GRPO update: "
                 f"{len(batch.flat_samples)} samples, {len(batch.contributing)} contributing, "
-                f"update_epochs={update_epochs}, minibatch_size={minibatch_size or len(batch.contributing)}"
+                f"update_epochs={update_epochs}, minibatch_size={effective_minibatch_size}, "
+                f"microbatch_size={microbatch_size}"
             )
         with torch.no_grad():
             reference_logprob_chunks = []
-            for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
+            for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
                 reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
                 reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
             reference_logprobs = torch.cat(reference_logprob_chunks)
@@ -665,26 +691,33 @@ class FSDP2ContextParallelPolicyTrainer:
             if stop_training:
                 break
             for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
-                minibatch = batch.contributing[start:end]
-                minibatch_reference_logprobs = reference_logprobs[start:end]
+                minibatch_size_actual = end - start
                 self.optimizer.zero_grad(set_to_none=True)
-                samples = [sample for sample, _advantage in minibatch]
-                advantages = torch.tensor(
-                    [advantage for _sample, advantage in minibatch],
-                    dtype=torch.float32,
-                    device=self.accelerator.device,
-                )
-                logprobs = self._sequence_logprobs(samples)
-                losses, approx_kls, clipped = _clipped_grpo_losses(
-                    logprobs,
-                    minibatch_reference_logprobs,
-                    advantages,
-                    clip_range=clip_range,
-                )
-                detached_losses.extend(losses.detach().cpu().tolist())
-                detached_kls.extend(approx_kls.detach().cpu().tolist())
-                detached_clipped.extend(clipped.detach().cpu().tolist())
-                self.accelerator.backward(losses.mean())
+                minibatch_kl_sum = 0.0
+                minibatch_kl_count = 0
+                for micro_start, micro_end in _microbatch_ranges(start, end, microbatch_size):
+                    microbatch = batch.contributing[micro_start:micro_end]
+                    microbatch_reference_logprobs = reference_logprobs[micro_start:micro_end]
+                    samples = [sample for sample, _advantage in microbatch]
+                    advantages = torch.tensor(
+                        [advantage for _sample, advantage in microbatch],
+                        dtype=torch.float32,
+                        device=self.accelerator.device,
+                    )
+                    logprobs = self._sequence_logprobs(samples)
+                    losses, approx_kls, clipped = _clipped_grpo_losses(
+                        logprobs,
+                        microbatch_reference_logprobs,
+                        advantages,
+                        clip_range=clip_range,
+                    )
+                    detached_losses.extend(losses.detach().cpu().tolist())
+                    detached_kls.extend(approx_kls.detach().cpu().tolist())
+                    detached_clipped.extend(clipped.detach().cpu().tolist())
+                    if approx_kls.numel():
+                        minibatch_kl_sum += float(approx_kls.detach().sum().cpu())
+                        minibatch_kl_count += int(approx_kls.numel())
+                    self.accelerator.backward(losses.sum() / minibatch_size_actual)
                 self.accelerator.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
                 self.optimizer.step()
                 optimizer_step_count += 1
@@ -692,11 +725,11 @@ class FSDP2ContextParallelPolicyTrainer:
                     print(
                         "[FSDP2CPTrainer]  "
                         f"epoch={epoch_index + 1}/{update_epochs} "
-                        f"optimizer_step={optimizer_step_count} minibatch_size={len(minibatch)}"
+                        f"optimizer_step={optimizer_step_count} minibatch_size={minibatch_size_actual}"
                     )
                 target_kl = self.training_config.target_kl
-                minibatch_kl = float(approx_kls.detach().mean().cpu()) if approx_kls.numel() else 0.0
-                if target_kl is not None and approx_kls.numel() and minibatch_kl > target_kl:
+                minibatch_kl = minibatch_kl_sum / minibatch_kl_count if minibatch_kl_count else 0.0
+                if target_kl is not None and minibatch_kl_count and minibatch_kl > target_kl:
                     if is_main:
                         print(f"[FSDP2CPTrainer]  Stopping early: target_kl={target_kl} reached")
                     stop_training = True
