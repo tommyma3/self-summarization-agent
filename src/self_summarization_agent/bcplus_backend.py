@@ -4,8 +4,10 @@ import argparse
 import logging
 import sys
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
+from urllib import error, request
 
 from transformers import AutoTokenizer
 
@@ -42,6 +44,8 @@ class RealBrowseCompBackend:
     document_max_tokens: int | None = 8192
     snippet_tokenizer_path: str | None = None
     snippet_tokenizer: Any = field(init=False, default=None)
+    _search_cache: dict[str, list[SearchResult]] = field(init=False, default_factory=dict)
+    _document_cache: dict[str, str] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         needs_tokenizer = (
@@ -83,8 +87,7 @@ class RealBrowseCompBackend:
         text = str(candidate.get("snippet") or candidate.get("text") or "")
         return self._truncate_text(text, self.snippet_max_tokens)
 
-    def search(self, query: str) -> list[SearchResult]:
-        candidates = self.searcher.search(query, k=self.top_k)
+    def _format_search_results(self, candidates: list[dict[str, Any]]) -> list[SearchResult]:
         results: list[SearchResult] = []
         for candidate in candidates:
             result: SearchResult = {
@@ -96,14 +99,93 @@ class RealBrowseCompBackend:
             results.append(result)
         return results
 
+    def search(self, query: str) -> list[SearchResult]:
+        return self.search_many([query])[0]
+
+    def search_many(self, queries: list[str]) -> list[list[SearchResult]]:
+        if not queries:
+            return []
+
+        results_by_query: dict[str, list[SearchResult]] = {}
+        misses: list[str] = []
+        for query in queries:
+            cached = self._search_cache.get(query)
+            if cached is None:
+                if query not in results_by_query:
+                    misses.append(query)
+                    results_by_query[query] = []
+                continue
+            results_by_query[query] = [dict(result) for result in cached]
+
+        if misses:
+            search_many = getattr(self.searcher, "search_many", None)
+            if search_many is None:
+                candidate_batches = [self.searcher.search(query, k=self.top_k) for query in misses]
+            else:
+                candidate_batches = search_many(misses, k=self.top_k)
+                if len(candidate_batches) != len(misses):
+                    raise ValueError(
+                        f"search_many returned {len(candidate_batches)} result batches for {len(misses)} queries"
+                    )
+            for query, candidates in zip(misses, candidate_batches):
+                formatted = self._format_search_results(candidates)
+                self._search_cache[query] = [dict(result) for result in formatted]
+                results_by_query[query] = formatted
+
+        return [[dict(result) for result in results_by_query[query]] for query in queries]
+
     def get_document(self, doc_id: str) -> str:
+        cached = self._document_cache.get(doc_id)
+        if cached is not None:
+            return cached
         document = self.searcher.get_document(doc_id)
         if not document or "text" not in document:
             raise KeyError(f"Document not found: {doc_id}")
-        return self._truncate_text(str(document["text"]), self.document_max_tokens)
+        truncated = self._truncate_text(str(document["text"]), self.document_max_tokens)
+        self._document_cache[doc_id] = truncated
+        return truncated
 
 
-def build_backend(bc_plus_root: str | Path, retrieval_config: RetrievalConfig) -> RealBrowseCompBackend:
+@dataclass(slots=True)
+class RetrievalWorkerClient:
+    base_url: str
+    timeout_seconds: float = 300.0
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> Any:
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            f"{self.base_url.rstrip('/')}{path}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                response_payload = response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Retrieval worker request failed: HTTP {exc.code}: {detail}") from exc
+        return json.loads(response_payload) if response_payload else None
+
+    def search(self, query: str) -> list[SearchResult]:
+        return self.search_many([query])[0]
+
+    def search_many(self, queries: list[str]) -> list[list[SearchResult]]:
+        payload = self._post_json("/search_many", {"queries": queries})
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list):
+            raise RuntimeError("Retrieval worker returned invalid search_many payload")
+        return results
+
+    def get_document(self, doc_id: str) -> str:
+        payload = self._post_json("/get_document", {"doc_id": doc_id})
+        document = payload.get("document") if isinstance(payload, dict) else None
+        if not isinstance(document, str):
+            raise RuntimeError("Retrieval worker returned invalid get_document payload")
+        return document
+
+
+def build_direct_backend(bc_plus_root: str | Path, retrieval_config: RetrievalConfig) -> RealBrowseCompBackend:
     _ensure_bc_plus_searcher_imports(bc_plus_root)
     from searchers import SearcherType
 
@@ -119,3 +201,14 @@ def build_backend(bc_plus_root: str | Path, retrieval_config: RetrievalConfig) -
         document_max_tokens=retrieval_config.document_max_tokens,
         snippet_tokenizer_path=retrieval_config.snippet_tokenizer_path,
     )
+
+
+def build_backend(
+    bc_plus_root: str | Path,
+    retrieval_config: RetrievalConfig,
+    *,
+    worker_url: str | None = None,
+) -> RealBrowseCompBackend | RetrievalWorkerClient:
+    if worker_url:
+        return RetrievalWorkerClient(worker_url)
+    return build_direct_backend(bc_plus_root, retrieval_config)

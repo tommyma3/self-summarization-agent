@@ -49,6 +49,36 @@ def test_runtime_injects_summary_after_threshold_crossing() -> None:
     assert result.final_answer == "done"
 
 
+def test_runtime_batches_same_step_search_calls() -> None:
+    class BatchSearchBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__(
+                search_index={"first": ["doc-1"], "second": ["doc-2"]},
+                documents={"doc-1": "fact one", "doc-2": "fact two"},
+            )
+            self.search_many_calls: list[list[str]] = []
+
+        def search_many(self, queries: list[str]):
+            self.search_many_calls.append(list(queries))
+            return [self.search(query) for query in queries]
+
+    backend = BatchSearchBackend()
+    model = ScriptedModel(
+        outputs=[
+            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
+            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done one"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done two"}}'),
+        ]
+    )
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
+
+    results = runtime.run_many([("q1", "question one"), ("q2", "question two")])
+
+    assert backend.search_many_calls == [["first", "second"]]
+    assert [result.final_answer for result in results] == ["done one", "done two"]
+
+
 def test_runtime_stops_on_malformed_tool_call() -> None:
     backend = FakeBackend(search_index={}, documents={})
     model = ScriptedModel(outputs=['{"tool_name": "search"}'])

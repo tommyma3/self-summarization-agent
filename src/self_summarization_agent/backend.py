@@ -12,6 +12,9 @@ class BrowseCompBackend(Protocol):
     def search(self, query: str) -> list[SearchResult]:
         ...
 
+    def search_many(self, queries: list[str]) -> list[list[SearchResult]]:
+        ...
+
     def get_document(self, doc_id: str) -> str:
         ...
 
@@ -26,6 +29,9 @@ class FakeBackend:
             {"docid": doc_id, "snippet": self.documents.get(doc_id, "")}
             for doc_id in self.search_index.get(query, [])
         ]
+
+    def search_many(self, queries: list[str]) -> list[list[SearchResult]]:
+        return [self.search(query) for query in queries]
 
     def get_document(self, doc_id: str) -> str:
         return self.documents[doc_id]

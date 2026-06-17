@@ -99,6 +99,7 @@ def collect_rollouts(
     judge_inline: bool = False,
     sample_seed: int | None = None,
     split: str = "train",
+    retrieval_worker_url: str | None = None,
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
@@ -162,7 +163,11 @@ def collect_rollouts(
     # Build retrieval before narrowing CUDA visibility for vLLM. The FAISS backend can
     # load its embedding model on the normal/default device, while vLLM is restricted
     # to config.rollout.gpu_ids below.
-    backend = backend or build_backend(config.experiment.bc_plus_root, config.retrieval)
+    backend = backend or build_backend(
+        config.experiment.bc_plus_root,
+        config.retrieval,
+        worker_url=retrieval_worker_url,
+    )
     if generator is None and config.rollout.gpu_ids:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in config.rollout.gpu_ids)
     rollout_model_config = replace(
@@ -228,6 +233,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge-inline", action="store_true", help="Judge rollouts during collection instead of writing raw rows.")
     parser.add_argument("--sample-seed", type=int, default=None, help="Seed for per-iteration training-query sampling.")
     parser.add_argument("--split", choices=["train", "eval"], default="train", help="Dataset split to collect.")
+    parser.add_argument("--retrieval-worker-url", default=None, help="Use a persistent retrieval worker at this URL.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -248,6 +254,7 @@ def main() -> None:
         judge_inline=args.judge_inline,
         sample_seed=args.sample_seed,
         split=args.split,
+        retrieval_worker_url=args.retrieval_worker_url,
     )
     print(rollout_path)
 

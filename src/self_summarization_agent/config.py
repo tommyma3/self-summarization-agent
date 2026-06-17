@@ -40,6 +40,8 @@ class RetrievalConfig:
     snippet_max_tokens: int | None = 512
     document_max_tokens: int | None = 8192
     snippet_tokenizer_path: str | None = None
+    persistent_worker: bool = False
+    worker_startup_timeout_seconds: int = 600
     index_path: str = ""
     model_name: str | None = None
     normalize: bool = False

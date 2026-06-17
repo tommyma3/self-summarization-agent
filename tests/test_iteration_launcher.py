@@ -257,6 +257,67 @@ def test_iteration_launcher_runs_eval_after_training_when_eval_split_configured(
     assert str(latest_root / "eval_metrics.jsonl") in calls[6]
 
 
+def test_iteration_launcher_reuses_persistent_retrieval_worker_for_rollout_phases(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = train_config(tmp_path)
+    config.dataset.limit = 2
+    config.dataset.train_limit = 1
+    config.dataset.eval_limit = 1
+    config.training.group_size = 1
+    config.retrieval.persistent_worker = True
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    calls = []
+    worker_starts = []
+    worker_stops = []
+
+    class FakeWorkerProcess:
+        pass
+
+    def fake_start_worker(**kwargs):
+        worker_starts.append(kwargs)
+        return FakeWorkerProcess(), "http://127.0.0.1:12345"
+
+    def fake_stop_worker(process, url):
+        worker_stops.append((process, url))
+
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._start_retrieval_worker",
+        fake_start_worker,
+    )
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._stop_retrieval_worker",
+        fake_stop_worker,
+    )
+
+    def runner(command):
+        calls.append(list(command))
+        if "self_summarization_agent.train_step" in command:
+            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
+            write_fake_checkpoint(next_checkpoint)
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+    )
+
+    rollout_calls = [command for command in calls if "self_summarization_agent.rollout_collection" in command]
+    assert len(worker_starts) == 1
+    assert len(worker_stops) == 1
+    assert len(rollout_calls) == 2
+    assert all("--retrieval-worker-url" in command for command in rollout_calls)
+    assert all("http://127.0.0.1:12345" in command for command in rollout_calls)
+
+
 def test_iteration_launcher_does_not_advance_latest_when_training_fails(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     latest_root = tmp_path / "artifacts" / "train" / "demo"

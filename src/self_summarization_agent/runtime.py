@@ -108,6 +108,16 @@ class _ActiveEpisode:
 
 
 @dataclass(slots=True)
+class _PendingToolAction:
+    active: _ActiveEpisode
+    prompt: str
+    raw_output: str
+    normalized_output: str
+    tool_name: str
+    arguments: dict[str, object]
+
+
+@dataclass(slots=True)
 class EpisodeRuntime:
     model: RuntimeModel
     backend: BrowseCompBackend
@@ -321,7 +331,12 @@ class EpisodeRuntime:
             turn_records=list(active.turn_records),
         )
 
-    def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
+    def _prepare_action_output(
+        self,
+        active: _ActiveEpisode,
+        raw_output: str,
+        prompt: str | None = None,
+    ) -> _PendingToolAction | None:
         state = active.state
         query_id = state.query_id
         prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
@@ -367,7 +382,7 @@ class EpisodeRuntime:
                 }
             )
             active.result = self._completed_result(active, answer)
-            return
+            return None
 
         if tool_name == "search":
             query = arguments.get("query")
@@ -382,11 +397,7 @@ class EpisodeRuntime:
                     active.tool_call_counts,
                     active.turn_records,
                 )
-                return
-            search_results = self.backend.search(query)
-            active.tool_call_counts["search"] += 1
-            self._record_search_result_docids(active.retrieved_docids, search_results)
-            tool_result = json.dumps(search_results, ensure_ascii=False)
+                return None
         elif tool_name == "get_document":
             doc_id = arguments.get("doc_id")
             if not isinstance(doc_id, str):
@@ -400,10 +411,7 @@ class EpisodeRuntime:
                     active.tool_call_counts,
                     active.turn_records,
                 )
-                return
-            self._record_retrieved_docids(active.retrieved_docids, [doc_id])
-            tool_result = self.backend.get_document(doc_id)
-            active.tool_call_counts["get_document"] += 1
+                return None
         else:
             active.result = self._malformed_result(
                 state,
@@ -415,7 +423,30 @@ class EpisodeRuntime:
                 active.tool_call_counts,
                 active.turn_records,
             )
-            return
+            return None
+
+        return _PendingToolAction(
+            active=active,
+            prompt=prompt,
+            raw_output=raw_output,
+            normalized_output=normalized_output,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+
+    def _search_many(self, queries: list[str]) -> list[list[SearchResult]]:
+        search_many = getattr(self.backend, "search_many", None)
+        if search_many is None:
+            return [self.backend.search(query) for query in queries]
+        results = search_many(queries)
+        if len(results) != len(queries):
+            raise ValueError(f"search_many returned {len(results)} result batches for {len(queries)} queries")
+        return results
+
+    def _apply_tool_result(self, action: _PendingToolAction, tool_result: str) -> None:
+        active = action.active
+        state = active.state
+        query_id = state.query_id
 
         tool_turn_id = self._next_tool_turn_id(state)
         active.turn_records.append(
@@ -423,18 +454,45 @@ class EpisodeRuntime:
                 "query_id": query_id,
                 "turn_id": tool_turn_id,
                 "kind": "tool",
-                "prompt": prompt,
-                "completion": raw_output,
-                "normalized_completion": normalized_output,
+                "prompt": action.prompt,
+                "completion": action.raw_output,
+                "normalized_completion": action.normalized_output,
             }
         )
         state.rounds.append(
             ToolRound(
-                assistant_message=Message(role="assistant", content=normalized_output),
-                tool_call=ToolCallRecord(tool_name=tool_name, arguments=arguments, raw_output=normalized_output),
+                assistant_message=Message(role="assistant", content=action.normalized_output),
+                tool_call=ToolCallRecord(
+                    tool_name=action.tool_name,
+                    arguments=action.arguments,
+                    raw_output=action.normalized_output,
+                ),
                 tool_result=Message(role="tool", content=tool_result),
             )
         )
+
+    def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
+        search_actions = [action for action in actions if action.tool_name == "search"]
+        if search_actions:
+            queries = [str(action.arguments["query"]) for action in search_actions]
+            for action, search_results in zip(search_actions, self._search_many(queries)):
+                action.active.tool_call_counts["search"] += 1
+                self._record_search_result_docids(action.active.retrieved_docids, search_results)
+                self._apply_tool_result(action, json.dumps(search_results, ensure_ascii=False))
+
+        for action in actions:
+            if action.tool_name != "get_document":
+                continue
+            doc_id = str(action.arguments["doc_id"])
+            self._record_retrieved_docids(action.active.retrieved_docids, [doc_id])
+            tool_result = self.backend.get_document(doc_id)
+            action.active.tool_call_counts["get_document"] += 1
+            self._apply_tool_result(action, tool_result)
+
+    def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
+        action = self._prepare_action_output(active, raw_output, prompt)
+        if action is not None:
+            self._execute_pending_tool_actions([action])
 
     def _apply_forced_answer_output(self, active: _ActiveEpisode, raw_output: str, prompt: str) -> None:
         state = active.state
@@ -553,11 +611,16 @@ class EpisodeRuntime:
 
             if action_items:
                 action_outputs = self._generate_batch([prompt for _, prompt, _ in action_items])
+                pending_tool_actions: list[_PendingToolAction] = []
                 for (active, prompt, forced_answer), raw_output in zip(action_items, action_outputs):
                     if forced_answer:
                         self._apply_forced_answer_output(active, raw_output, prompt)
                     else:
-                        self._apply_action_output(active, raw_output, prompt)
+                        pending_action = self._prepare_action_output(active, raw_output, prompt)
+                        if pending_action is not None:
+                            pending_tool_actions.append(pending_action)
+                if pending_tool_actions:
+                    self._execute_pending_tool_actions(pending_tool_actions)
 
             summary_items: list[tuple[_ActiveEpisode, str, int]] = []
             for active in active_episodes:
