@@ -84,7 +84,7 @@ training:
   minibatch_size: 128
   clip_range: 0.2
   target_kl: 0.03
-  gradient_accumulation_microbatch_size: 1
+  gradient_accumulation_microbatch_size: 8
   learning_rate: 1.0e-6
   checkpoint_interval: 5
   eval_interval: 0
