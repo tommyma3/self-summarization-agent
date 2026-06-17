@@ -18,6 +18,7 @@ from self_summarization_agent.bcplus_backend import build_backend
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
+from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir
 from simulate_collection import trace_collection
 
@@ -146,6 +147,42 @@ def main() -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.vllm_gpus
     rollout_model_config = build_rollout_model_config(config, args)
     generator = build_generator(rollout_model_config)
+    judge = None
+    if getattr(config, "judge", None) and config.judge.enabled:
+        judge_model_path = config.judge.model_path or config.model.model_path
+        rollout_model_path = rollout_model_config.model_path
+        if judge_model_path == rollout_model_path:
+            # Reuse the launched generator's underlying model/engine.
+            # dataclasses.replace calls __post_init__ for slotted dataclasses,
+            # which would spawn a second vLLM instance and OOM.  We shallow-copy
+            # the fields manually instead.
+            judge_generator = object.__new__(type(generator))
+            for field_name in generator.__dataclass_fields__:
+                setattr(judge_generator, field_name, getattr(generator, field_name))
+            judge_generator.max_new_tokens = config.judge.max_new_tokens
+            judge_generator.temperature = config.judge.temperature
+            judge_generator.top_p = config.judge.top_p
+            judge_generator.do_sample = config.judge.do_sample
+            judge = RewardJudge(judge_generator)
+        else:
+            if config.judge.gpu_ids:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in config.judge.gpu_ids)
+            judge_model_config = replace(
+                config.model,
+                backend=config.judge.backend or config.model.backend,
+                model_path=judge_model_path,
+                tensor_parallel_size=config.judge.tensor_parallel_size
+                if config.judge.tensor_parallel_size is not None
+                else config.model.tensor_parallel_size,
+                attention_backend=config.judge.attention_backend
+                if config.judge.attention_backend is not None
+                else config.model.attention_backend,
+                max_model_len=config.judge.max_model_len
+                if config.judge.max_model_len is not None
+                else config.model.max_model_len,
+            )
+            judge_generator = build_generator(judge_model_config, judge_config=config.judge)
+            judge = RewardJudge(judge_generator)
     runtime = build_runtime(generator, backend, config.runtime)
     output_path = Path(args.output) if args.output else default_output_path(config, example.query_id)
     trace_collection(
@@ -155,6 +192,7 @@ def main() -> None:
         sample_index=sample_index,
         output_path=output_path,
         include_formatted_prompt=args.include_formatted_prompt,
+        judge=judge,
     )
     print(output_path)
 

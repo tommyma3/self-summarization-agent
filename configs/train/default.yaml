@@ -9,8 +9,8 @@ dataset:
   offset: 0
   limit:
   shuffle: false
-  train_limit: 780
-  eval_limit: 50
+  train_limit: 800
+  eval_limit: 30
 
 retrieval:
   backend: faiss
@@ -43,7 +43,7 @@ rollout:
   gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend: TORCH_SDPA
-  max_model_len: 20000
+  max_model_len: 16000
   max_concurrent_episodes: 32
   max_new_tokens: 8192
   temperature: 0.7
@@ -51,16 +51,16 @@ rollout:
   do_sample: true
 
 runtime:
-  context_threshold_tokens: 16000
-  max_context_tokens: 20000
+  context_threshold_tokens: 14000
+  max_context_tokens: 16000
   tool_budget: 16
 
 judge:
   enabled: true
   backend: vllm_offline
   model_path: /124090467/Qwen/Qwen3.5-9B
-  gpu_ids: [2, 3]
-  tensor_parallel_size: 2
+  gpu_ids: [0, 1, 2, 3]
+  tensor_parallel_size: 4
   attention_backend: TORCH_SDPA
   max_model_len: 8192
   max_new_tokens: 4096
@@ -79,12 +79,12 @@ training:
   epochs: 10
   steps: 10
   group_size: 4
-  rollout_query_count: 100
-  update_epochs: 4
+  rollout_query_count: 50
+  update_epochs: 2
   minibatch_size: 128
   clip_range: 0.2
   target_kl: 0.03
-  gradient_accumulation_microbatch_size: 8
+  gradient_accumulation_microbatch_size: 1
   learning_rate: 1.0e-6
   checkpoint_interval: 5
   eval_interval: 0

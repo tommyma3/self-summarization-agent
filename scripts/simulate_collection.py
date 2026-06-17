@@ -18,6 +18,7 @@ from self_summarization_agent.config import load_train_config, parse_cli_overrid
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
+from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir, utc_timestamp
 from self_summarization_agent.models import EpisodeState, Message, ToolCallRecord, ToolRound
 from self_summarization_agent.runtime import EpisodeRuntime, extract_summary_output, parse_model_tool_call
@@ -150,7 +151,7 @@ def write_training_sequences(
 
     if terminal_status == "completed":
         reward_note = (
-            "This probe does not run the judge model. These are the trainable prompt/completion pairs.\n"
+            "These are the trainable prompt/completion pairs.\n"
             "- If the final answer is judged correct, every listed turn gets reward +1.\n"
             "- If the final answer is judged wrong, every listed turn gets reward -1.\n"
         )
@@ -190,6 +191,31 @@ def write_training_sequences(
         handle.write("\n")
 
 
+def _write_judge_output(
+    handle: TextIO,
+    judge: RewardJudge | None,
+    example: QueryExample,
+    status: str,
+    answer: str,
+) -> None:
+    if judge is None:
+        return
+    decision = judge.evaluate(example, status, answer)
+    body = {
+        "outcome": decision.outcome,
+        "parse_error": decision.parse_error,
+    }
+    write_section(handle, "Judge Evaluation", json.dumps(body, indent=2, ensure_ascii=False))
+    if decision.judge_prompt:
+        handle.write("\n--- Judge Prompt ---\n")
+        handle.write(decision.judge_prompt)
+        handle.write("\n")
+    if decision.judge_response:
+        handle.write("\n--- Judge Response ---\n")
+        handle.write(decision.judge_response)
+        handle.write("\n")
+
+
 def trace_collection(
     *,
     runtime: EpisodeRuntime,
@@ -198,6 +224,7 @@ def trace_collection(
     sample_index: int,
     output_path: Path,
     include_formatted_prompt: bool,
+    judge: RewardJudge | None = None,
 ) -> None:
     state = EpisodeState(
         query_id=example.query_id,
@@ -264,6 +291,7 @@ def trace_collection(
                     terminal_status="budget_exhausted",
                     trainable_turns=trainable_turns,
                 )
+                _write_judge_output(handle, judge, example, "budget_exhausted", "")
                 return
 
             round_number = len(state.rounds) + 1
@@ -295,6 +323,7 @@ def trace_collection(
                     terminal_status="malformed_tool_call",
                     trainable_turns=trainable_turns,
                 )
+                _write_judge_output(handle, judge, example, "malformed_tool_call", "")
                 return
 
             payload, normalized_output = parsed_tool_call
@@ -322,6 +351,7 @@ def trace_collection(
                         terminal_status="malformed_tool_call",
                         trainable_turns=trainable_turns,
                     )
+                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
                     return
                 append_trainable_turn(
                     turn_id="final-answer",
@@ -336,6 +366,7 @@ def trace_collection(
                     terminal_status="completed",
                     trainable_turns=trainable_turns,
                 )
+                _write_judge_output(handle, judge, example, "completed", answer)
                 return
 
             if tool_name == "search":
@@ -354,6 +385,7 @@ def trace_collection(
                         terminal_status="malformed_tool_call",
                         trainable_turns=trainable_turns,
                     )
+                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
                     return
                 search_results = runtime.backend.search(query)
                 append_trainable_turn(
@@ -381,6 +413,7 @@ def trace_collection(
                         terminal_status="malformed_tool_call",
                         trainable_turns=trainable_turns,
                     )
+                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
                     return
                 runtime._record_retrieved_docids(retrieved_docids, [doc_id])
                 tool_result = runtime.backend.get_document(doc_id)
@@ -405,6 +438,7 @@ def trace_collection(
                     terminal_status="malformed_tool_call",
                     trainable_turns=trainable_turns,
                 )
+                _write_judge_output(handle, judge, example, "malformed_tool_call", "")
                 return
 
             write_section(
