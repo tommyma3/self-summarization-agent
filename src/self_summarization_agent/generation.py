@@ -196,7 +196,6 @@ class VLLMGenerator:
             sampling_kwargs["top_p"] = self.top_p
         if include_logprobs:
             sampling_kwargs["logprobs"] = 1
-            sampling_kwargs["prompt_logprobs"] = 1
         return sampling_kwargs
 
     def generate_batch(self, prompts: list[str]) -> list[str]:

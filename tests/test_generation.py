@@ -147,5 +147,4 @@ def test_vllm_generator_can_return_generation_metadata(monkeypatch) -> None:
         "temperature": 0.7,
         "top_p": 0.95,
         "logprobs": 1,
-        "prompt_logprobs": 1,
     }
