@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 from typing import Literal
 
 
@@ -46,4 +47,4 @@ class RuntimeResult:
     turn_rewards: dict[str, float]
     retrieved_docids: list[str]
     tool_call_counts: dict[str, int] = field(default_factory=dict)
-    turn_records: list[dict[str, str]] = field(default_factory=list)
+    turn_records: list[dict[str, Any]] = field(default_factory=list)

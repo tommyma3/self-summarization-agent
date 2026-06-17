@@ -66,7 +66,13 @@ def serialize_runtime_result(
     return payload
 
 
-def build_runtime(generator: Any, backend: Any, runtime_config: Any) -> EpisodeRuntime:
+def build_runtime(
+    generator: Any,
+    backend: Any,
+    runtime_config: Any,
+    *,
+    cache_policy_checkpoint_id: str | None = None,
+) -> EpisodeRuntime:
     token_counter = getattr(generator, "count_tokens", None)
     if token_counter is None:
         token_counter = lambda text: len(text.split())
@@ -77,6 +83,7 @@ def build_runtime(generator: Any, backend: Any, runtime_config: Any) -> EpisodeR
         max_context_tokens=runtime_config.max_context_tokens,
         max_tool_calls=runtime_config.tool_budget,
         token_counter=token_counter,
+        cache_policy_checkpoint_id=cache_policy_checkpoint_id,
     )
 
 

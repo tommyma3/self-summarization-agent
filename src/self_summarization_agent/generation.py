@@ -19,6 +19,14 @@ class TextGenerator(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationResult:
+    text: str
+    prompt_token_ids: list[int] | None = None
+    completion_token_ids: list[int] | None = None
+    cumulative_logprob: float | None = None
+
+
 def _resolve_torch_dtype(dtype_name: str):
     mapping = {
         "auto": "auto",
@@ -179,16 +187,22 @@ class VLLMGenerator:
         outputs = self.generate_batch([prompt])
         return outputs[0] if outputs else ""
 
-    def generate_batch(self, prompts: list[str]) -> list[str]:
+    def _sampling_kwargs(self, *, include_logprobs: bool = False) -> dict[str, Any]:
         sampling_kwargs = {
             "max_tokens": self.max_new_tokens,
             "temperature": self.temperature if self.do_sample else 0.0,
         }
         if self.do_sample:
             sampling_kwargs["top_p"] = self.top_p
+        if include_logprobs:
+            sampling_kwargs["logprobs"] = 1
+            sampling_kwargs["prompt_logprobs"] = 1
+        return sampling_kwargs
+
+    def generate_batch(self, prompts: list[str]) -> list[str]:
         outputs = self.llm.generate(
             [self._format_prompt(prompt) for prompt in prompts],
-            self._sampling_params_cls(**sampling_kwargs),
+            self._sampling_params_cls(**self._sampling_kwargs()),
         )
         completions: list[str] = []
         for output in outputs:
@@ -196,6 +210,32 @@ class VLLMGenerator:
                 completions.append("")
                 continue
             completions.append(output.outputs[0].text or "")
+        return completions
+
+    def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
+        outputs = self.llm.generate(
+            [self._format_prompt(prompt) for prompt in prompts],
+            self._sampling_params_cls(**self._sampling_kwargs(include_logprobs=True)),
+        )
+        completions: list[GenerationResult] = []
+        for output in outputs:
+            if not output.outputs:
+                completions.append(GenerationResult(text=""))
+                continue
+            completion = output.outputs[0]
+            prompt_token_ids = getattr(output, "prompt_token_ids", None)
+            completion_token_ids = getattr(completion, "token_ids", None)
+            cumulative_logprob = getattr(completion, "cumulative_logprob", None)
+            completions.append(
+                GenerationResult(
+                    text=completion.text or "",
+                    prompt_token_ids=list(prompt_token_ids) if prompt_token_ids is not None else None,
+                    completion_token_ids=list(completion_token_ids) if completion_token_ids is not None else None,
+                    cumulative_logprob=float(cumulative_logprob)
+                    if cumulative_logprob is not None
+                    else None,
+                )
+            )
         return completions
 
 

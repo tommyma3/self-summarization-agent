@@ -1,12 +1,21 @@
 import contextlib
 import io
 import json
+from dataclasses import dataclass
 
 import main as cli_entrypoint
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.cli import build_smoke_run_record
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import extract_trainable_samples
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataOutput:
+    text: str
+    prompt_token_ids: list[int] | None = None
+    completion_token_ids: list[int] | None = None
+    cumulative_logprob: float | None = None
 
 
 class RecordingModel(ScriptedModel):
@@ -17,6 +26,21 @@ class RecordingModel(ScriptedModel):
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return super().generate(prompt)
+
+
+class MetadataModel:
+    def __init__(self, outputs: list[MetadataOutput]) -> None:
+        self.outputs = outputs
+        self.cursor = 0
+
+    def generate_batch_with_metadata(self, prompts: list[str]) -> list[MetadataOutput]:
+        del prompts
+        batch = self.outputs[self.cursor : self.cursor + 1]
+        self.cursor += 1
+        return batch
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
 
 
 def tool_output(json_text: str, thinking: str = "thinking") -> str:
@@ -77,6 +101,47 @@ def test_runtime_batches_same_step_search_calls() -> None:
 
     assert backend.search_many_calls == [["first", "second"]]
     assert [result.final_answer for result in results] == ["done one", "done two"]
+
+
+def test_runtime_attaches_training_cache_from_generation_metadata() -> None:
+    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact"})
+    model = MetadataModel(
+        [
+            MetadataOutput(
+                text=tool_output('{"tool_name": "search", "arguments": {"query": "q"}}'),
+                prompt_token_ids=[10, 11],
+                completion_token_ids=[12, 13],
+                cumulative_logprob=-2.0,
+            ),
+            MetadataOutput(
+                text=tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
+                prompt_token_ids=[20],
+                completion_token_ids=[21],
+                cumulative_logprob=-0.5,
+            ),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1000,
+        max_context_tokens=1024,
+        cache_policy_checkpoint_id="step-00001",
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    tool_cache = result.turn_records[0]["training_cache"]
+    assert tool_cache["policy_checkpoint_id"] == "step-00001"
+    assert tool_cache["input_ids"] == [10, 11, 12]
+    assert tool_cache["labels"] == [11, 12, 13]
+    assert tool_cache["completion_mask"] == [False, True, True]
+    assert tool_cache["reference_logprob"] == -1.0
+    final_cache = result.turn_records[1]["training_cache"]
+    assert final_cache["input_ids"] == [20]
+    assert final_cache["labels"] == [21]
+    assert final_cache["completion_mask"] == [True]
+    assert final_cache["reference_logprob"] == -0.5
 
 
 def test_runtime_stops_on_malformed_tool_call() -> None:

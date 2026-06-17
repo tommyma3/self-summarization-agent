@@ -321,6 +321,39 @@ def _has_complete_cached_rollouts(
     return True
 
 
+def _has_inline_cached_rollouts(
+    path: Path,
+    *,
+    checkpoint_id: str,
+    expected_count: int | None,
+) -> bool:
+    if not path.exists():
+        return False
+    rows = _load_jsonl(path)
+    if expected_count is not None and len(rows) != expected_count:
+        return False
+    if expected_count is None and not rows:
+        return False
+    for index, row in enumerate(rows, start=1):
+        if row.get("policy_checkpoint_id") != checkpoint_id:
+            raise ValueError(
+                f"Cannot use inline cache from {path}: row {index} has checkpoint "
+                f"{row.get('policy_checkpoint_id')!r}, expected {checkpoint_id!r}"
+            )
+        turn_records = row.get("turn_records")
+        turn_rewards = row.get("turn_rewards")
+        if not isinstance(turn_records, list) or not isinstance(turn_rewards, dict):
+            return False
+        if row.get("trainable_sample_count") == 0:
+            continue
+        samples = extract_trainable_samples(turn_records, turn_rewards)
+        if not samples:
+            return False
+        if any(not sample.has_training_cache for sample in samples):
+            return False
+    return True
+
+
 def _has_eval_metrics(metrics_path: Path, *, iteration: int, policy_checkpoint_id: str) -> bool:
     if not metrics_path.exists():
         return False
@@ -506,14 +539,21 @@ def run_training_iteration(
             completed=train_judged_complete,
             error_message="Judge subprocess",
         )
+        expected_train_count = _expected_train_rollout_count(config)
+        inline_cached_rollouts = _has_inline_cached_rollouts(
+            judged_rollout_path,
+            checkpoint_id=current.checkpoint_id,
+            expected_count=expected_train_count,
+        )
         train_cached_complete = should_resume and (
             training_already_advanced
             or _has_complete_cached_rollouts(
                 cached_rollout_path,
                 checkpoint_id=current.checkpoint_id,
-                expected_count=_expected_train_rollout_count(config),
+                expected_count=expected_train_count,
             )
         )
+        train_cached_complete = inline_cached_rollouts or train_cached_complete
         _run_or_skip_phase(
             phase="train_cache",
             iteration=iteration,
@@ -523,6 +563,8 @@ def run_training_iteration(
             completed=train_cached_complete,
             error_message="Cache subprocess",
         )
+        if inline_cached_rollouts:
+            train_command[train_command.index("--rollouts") + 1] = str(judged_rollout_path)
         checkpoint_complete = should_resume and (
             training_already_advanced or is_vllm_loadable_checkpoint(next_checkpoint)
         )

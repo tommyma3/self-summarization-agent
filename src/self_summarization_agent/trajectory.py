@@ -31,6 +31,38 @@ class RLSample:
         )
 
 
+def build_training_cache_from_token_ids(
+    *,
+    prompt_token_ids: list[int],
+    completion_token_ids: list[int],
+    cumulative_logprob: float | None,
+    policy_checkpoint_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not completion_token_ids or cumulative_logprob is None:
+        return None
+    if not math.isfinite(float(cumulative_logprob)):
+        return None
+    full_ids = list(prompt_token_ids) + list(completion_token_ids)
+    if len(full_ids) <= 1:
+        return None
+    input_ids = full_ids[:-1]
+    labels = full_ids[1:]
+    completion_mask = [False] * len(labels)
+    completion_start = max(len(prompt_token_ids) - 1, 0)
+    for index in range(completion_start, len(completion_mask)):
+        completion_mask[index] = True
+    payload: dict[str, Any] = {
+        "version": TOKEN_CACHE_VERSION,
+        "input_ids": input_ids,
+        "labels": labels,
+        "completion_mask": completion_mask,
+        "reference_logprob": float(cumulative_logprob) / len(completion_token_ids),
+    }
+    if policy_checkpoint_id is not None:
+        payload["policy_checkpoint_id"] = policy_checkpoint_id
+    return payload
+
+
 def _validate_int_list(value: Any, *, field_name: str, turn_id: str) -> list[int]:
     if not isinstance(value, list):
         raise ValueError(f"Trainable turn_id {turn_id} has non-list {field_name}")

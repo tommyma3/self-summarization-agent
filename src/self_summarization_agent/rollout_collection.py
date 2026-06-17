@@ -193,7 +193,12 @@ def collect_rollouts(
     generator = generator or build_generator(rollout_model_config)
     if judge_inline:
         judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
-    runtime = build_runtime(generator, backend, config.runtime)
+    runtime = build_runtime(
+        generator,
+        backend,
+        config.runtime,
+        cache_policy_checkpoint_id=checkpoint_id,
+    )
 
     for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
         results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)

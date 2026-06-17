@@ -1,7 +1,7 @@
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
@@ -12,6 +12,7 @@ from self_summarization_agent.rewards import (
     apply_terminal_reward,
     trainable_turn_ids_from_records,
 )
+from self_summarization_agent.trajectory import build_training_cache_from_token_ids
 
 
 _JSON_DECODER = json.JSONDecoder()
@@ -103,8 +104,14 @@ class _ActiveEpisode:
     summary_turns: list[str] = field(default_factory=list)
     retrieved_docids: list[str] = field(default_factory=list)
     tool_call_counts: dict[str, int] = field(default_factory=lambda: {"search": 0, "get_document": 0})
-    turn_records: list[dict[str, str]] = field(default_factory=list)
+    turn_records: list[dict[str, Any]] = field(default_factory=list)
     result: RuntimeResult | None = None
+
+
+@dataclass(slots=True)
+class _GeneratedOutput:
+    text: str
+    training_cache: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -115,6 +122,7 @@ class _PendingToolAction:
     normalized_output: str
     tool_name: str
     arguments: dict[str, object]
+    training_cache: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -125,6 +133,7 @@ class EpisodeRuntime:
     max_context_tokens: int
     max_tool_calls: int | None = None
     token_counter: Callable[[str], int] = field(default=lambda text: len(text.split()))
+    cache_policy_checkpoint_id: str | None = None
 
     def _build_transcript_block(self, label: str, content: str) -> str:
         return f"### {label}\n{content}"
@@ -228,19 +237,21 @@ class EpisodeRuntime:
         summary_turns: list[str],
         retrieved_docids: list[str],
         tool_call_counts: dict[str, int],
-        turn_records: list[dict[str, str]],
+        turn_records: list[dict[str, Any]],
+        training_cache: dict[str, Any] | None = None,
     ) -> RuntimeResult:
         malformed_turn_id = self._next_tool_turn_id(state)
         recorded_turns = list(turn_records)
-        recorded_turns.append(
-            {
-                "query_id": query_id,
-                "turn_id": malformed_turn_id,
-                "kind": "tool",
-                "prompt": prompt,
-                "completion": completion,
-            }
-        )
+        turn_record: dict[str, Any] = {
+            "query_id": query_id,
+            "turn_id": malformed_turn_id,
+            "kind": "tool",
+            "prompt": prompt,
+            "completion": completion,
+        }
+        if training_cache is not None:
+            turn_record["training_cache"] = training_cache
+        recorded_turns.append(turn_record)
         return RuntimeResult(
             query_id=query_id,
             status="malformed_tool_call",
@@ -258,7 +269,7 @@ class EpisodeRuntime:
         summary_turns: list[str],
         retrieved_docids: list[str],
         tool_call_counts: dict[str, int],
-        turn_records: list[dict[str, str]],
+        turn_records: list[dict[str, Any]],
     ) -> RuntimeResult:
         return RuntimeResult(
             query_id=query_id,
@@ -289,14 +300,41 @@ class EpisodeRuntime:
         doc_ids = [str(result["docid"]) for result in search_results if result.get("docid") is not None]
         self._record_retrieved_docids(retrieved_docids, doc_ids)
 
-    def _generate_batch(self, prompts: list[str]) -> list[str]:
+    def _training_cache_from_generation(self, result: Any) -> dict[str, Any] | None:
+        prompt_token_ids = getattr(result, "prompt_token_ids", None)
+        completion_token_ids = getattr(result, "completion_token_ids", None)
+        cumulative_logprob = getattr(result, "cumulative_logprob", None)
+        if prompt_token_ids is None or completion_token_ids is None:
+            return None
+        return build_training_cache_from_token_ids(
+            prompt_token_ids=list(prompt_token_ids),
+            completion_token_ids=list(completion_token_ids),
+            cumulative_logprob=cumulative_logprob,
+            policy_checkpoint_id=self.cache_policy_checkpoint_id,
+        )
+
+    def _generate_batch(self, prompts: list[str]) -> list[_GeneratedOutput]:
+        generate_batch_with_metadata = getattr(self.model, "generate_batch_with_metadata", None)
+        if self.cache_policy_checkpoint_id is not None and generate_batch_with_metadata is not None:
+            metadata_outputs = generate_batch_with_metadata(prompts)
+            if len(metadata_outputs) != len(prompts):
+                raise ValueError(
+                    f"Batch generator returned {len(metadata_outputs)} outputs for {len(prompts)} prompts"
+                )
+            return [
+                _GeneratedOutput(
+                    text=output.text,
+                    training_cache=self._training_cache_from_generation(output),
+                )
+                for output in metadata_outputs
+            ]
         generate_batch = getattr(self.model, "generate_batch", None)
         if generate_batch is None:
-            return [self.model.generate(prompt) for prompt in prompts]
+            return [_GeneratedOutput(text=self.model.generate(prompt)) for prompt in prompts]
         outputs = generate_batch(prompts)
         if len(outputs) != len(prompts):
             raise ValueError(f"Batch generator returned {len(outputs)} outputs for {len(prompts)} prompts")
-        return outputs
+        return [_GeneratedOutput(text=output) for output in outputs]
 
     def _new_active_episode(self, query_id: str, user_prompt: str) -> _ActiveEpisode:
         return _ActiveEpisode(
@@ -334,12 +372,13 @@ class EpisodeRuntime:
     def _prepare_action_output(
         self,
         active: _ActiveEpisode,
-        raw_output: str,
+        generated_output: _GeneratedOutput,
         prompt: str | None = None,
     ) -> _PendingToolAction | None:
         state = active.state
         query_id = state.query_id
         prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
+        raw_output = generated_output.text
         parsed_tool_call = parse_model_tool_call(raw_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
@@ -351,6 +390,7 @@ class EpisodeRuntime:
                 active.retrieved_docids,
                 active.tool_call_counts,
                 active.turn_records,
+                generated_output.training_cache,
             )
             return
         payload, normalized_output = parsed_tool_call
@@ -369,18 +409,20 @@ class EpisodeRuntime:
                     active.retrieved_docids,
                     active.tool_call_counts,
                     active.turn_records,
+                    generated_output.training_cache,
                 )
                 return
-            active.turn_records.append(
-                {
-                    "query_id": query_id,
-                    "turn_id": "final-answer",
-                    "kind": "final_answer",
-                    "prompt": prompt,
-                    "completion": raw_output,
-                    "normalized_completion": normalized_output,
-                }
-            )
+            turn_record: dict[str, Any] = {
+                "query_id": query_id,
+                "turn_id": "final-answer",
+                "kind": "final_answer",
+                "prompt": prompt,
+                "completion": raw_output,
+                "normalized_completion": normalized_output,
+            }
+            if generated_output.training_cache is not None:
+                turn_record["training_cache"] = generated_output.training_cache
+            active.turn_records.append(turn_record)
             active.result = self._completed_result(active, answer)
             return None
 
@@ -396,6 +438,7 @@ class EpisodeRuntime:
                     active.retrieved_docids,
                     active.tool_call_counts,
                     active.turn_records,
+                    generated_output.training_cache,
                 )
                 return None
         elif tool_name == "get_document":
@@ -410,6 +453,7 @@ class EpisodeRuntime:
                     active.retrieved_docids,
                     active.tool_call_counts,
                     active.turn_records,
+                    generated_output.training_cache,
                 )
                 return None
         else:
@@ -422,6 +466,7 @@ class EpisodeRuntime:
                 active.retrieved_docids,
                 active.tool_call_counts,
                 active.turn_records,
+                generated_output.training_cache,
             )
             return None
 
@@ -432,6 +477,7 @@ class EpisodeRuntime:
             normalized_output=normalized_output,
             tool_name=tool_name,
             arguments=arguments,
+            training_cache=generated_output.training_cache,
         )
 
     def _search_many(self, queries: list[str]) -> list[list[SearchResult]]:
@@ -449,16 +495,17 @@ class EpisodeRuntime:
         query_id = state.query_id
 
         tool_turn_id = self._next_tool_turn_id(state)
-        active.turn_records.append(
-            {
-                "query_id": query_id,
-                "turn_id": tool_turn_id,
-                "kind": "tool",
-                "prompt": action.prompt,
-                "completion": action.raw_output,
-                "normalized_completion": action.normalized_output,
-            }
-        )
+        turn_record: dict[str, Any] = {
+            "query_id": query_id,
+            "turn_id": tool_turn_id,
+            "kind": "tool",
+            "prompt": action.prompt,
+            "completion": action.raw_output,
+            "normalized_completion": action.normalized_output,
+        }
+        if action.training_cache is not None:
+            turn_record["training_cache"] = action.training_cache
+        active.turn_records.append(turn_record)
         state.rounds.append(
             ToolRound(
                 assistant_message=Message(role="assistant", content=action.normalized_output),
@@ -490,13 +537,19 @@ class EpisodeRuntime:
             self._apply_tool_result(action, tool_result)
 
     def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
-        action = self._prepare_action_output(active, raw_output, prompt)
+        action = self._prepare_action_output(active, _GeneratedOutput(text=raw_output), prompt)
         if action is not None:
             self._execute_pending_tool_actions([action])
 
-    def _apply_forced_answer_output(self, active: _ActiveEpisode, raw_output: str, prompt: str) -> None:
+    def _apply_forced_answer_output(
+        self,
+        active: _ActiveEpisode,
+        generated_output: _GeneratedOutput,
+        prompt: str,
+    ) -> None:
         state = active.state
         query_id = state.query_id
+        raw_output = generated_output.text
         parsed_tool_call = parse_model_tool_call(raw_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
@@ -508,6 +561,7 @@ class EpisodeRuntime:
                 active.retrieved_docids,
                 active.tool_call_counts,
                 active.turn_records,
+                generated_output.training_cache,
             )
             return
 
@@ -524,6 +578,7 @@ class EpisodeRuntime:
                 active.retrieved_docids,
                 active.tool_call_counts,
                 active.turn_records,
+                generated_output.training_cache,
             )
             return
 
@@ -538,19 +593,21 @@ class EpisodeRuntime:
                 active.retrieved_docids,
                 active.tool_call_counts,
                 active.turn_records,
+                generated_output.training_cache,
             )
             return
 
-        active.turn_records.append(
-            {
-                "query_id": query_id,
-                "turn_id": "final-answer",
-                "kind": "final_answer",
-                "prompt": prompt,
-                "completion": raw_output,
-                "normalized_completion": normalized_output,
-            }
-        )
+        turn_record: dict[str, Any] = {
+            "query_id": query_id,
+            "turn_id": "final-answer",
+            "kind": "final_answer",
+            "prompt": prompt,
+            "completion": raw_output,
+            "normalized_completion": normalized_output,
+        }
+        if generated_output.training_cache is not None:
+            turn_record["training_cache"] = generated_output.training_cache
+        active.turn_records.append(turn_record)
         active.result = self._completed_result(active, answer)
 
     def _build_summary_prompt_for_active(self, active: _ActiveEpisode) -> tuple[str, int] | None:
@@ -569,23 +626,25 @@ class EpisodeRuntime:
         active: _ActiveEpisode,
         prompt: str,
         retired_count: int,
-        generated_summary: str,
+        generated_output: _GeneratedOutput,
     ) -> None:
+        generated_summary = generated_output.text
         summary_extraction = extract_summary_output(generated_summary)
         state = active.state
         state.summary_count += 1
         summary_turn_id = f"summary-{state.summary_count}"
-        active.turn_records.append(
-            {
-                "query_id": state.query_id,
-                "turn_id": summary_turn_id,
-                "kind": "summary",
-                "prompt": prompt,
-                "completion": generated_summary,
-                "thinking": summary_extraction.thinking,
-                "summary": summary_extraction.summary,
-            }
-        )
+        turn_record: dict[str, Any] = {
+            "query_id": state.query_id,
+            "turn_id": summary_turn_id,
+            "kind": "summary",
+            "prompt": prompt,
+            "completion": generated_summary,
+            "thinking": summary_extraction.thinking,
+            "summary": summary_extraction.summary,
+        }
+        if generated_output.training_cache is not None:
+            turn_record["training_cache"] = generated_output.training_cache
+        active.turn_records.append(turn_record)
         if not summary_extraction.summary:
             return
         state.latest_summary = summary_extraction.summary
@@ -612,11 +671,11 @@ class EpisodeRuntime:
             if action_items:
                 action_outputs = self._generate_batch([prompt for _, prompt, _ in action_items])
                 pending_tool_actions: list[_PendingToolAction] = []
-                for (active, prompt, forced_answer), raw_output in zip(action_items, action_outputs):
+                for (active, prompt, forced_answer), generated_output in zip(action_items, action_outputs):
                     if forced_answer:
-                        self._apply_forced_answer_output(active, raw_output, prompt)
+                        self._apply_forced_answer_output(active, generated_output, prompt)
                     else:
-                        pending_action = self._prepare_action_output(active, raw_output, prompt)
+                        pending_action = self._prepare_action_output(active, generated_output, prompt)
                         if pending_action is not None:
                             pending_tool_actions.append(pending_action)
                 if pending_tool_actions:
@@ -634,8 +693,8 @@ class EpisodeRuntime:
 
             if summary_items:
                 summary_outputs = self._generate_batch([prompt for _, prompt, _ in summary_items])
-                for (active, prompt, retired_count), generated_summary in zip(summary_items, summary_outputs):
-                    self._apply_summary_output(active, prompt, retired_count, generated_summary)
+                for (active, prompt, retired_count), generated_output in zip(summary_items, summary_outputs):
+                    self._apply_summary_output(active, prompt, retired_count, generated_output)
 
         return [active.result for active in active_episodes if active.result is not None]
 

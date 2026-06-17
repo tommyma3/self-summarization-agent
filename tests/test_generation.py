@@ -12,13 +12,21 @@ class FakeSamplingParams:
 
 
 class FakeCompletion:
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        token_ids: list[int] | None = None,
+        cumulative_logprob: float | None = None,
+    ) -> None:
         self.text = text
+        self.token_ids = token_ids
+        self.cumulative_logprob = cumulative_logprob
 
 
 class FakeRequestOutput:
-    def __init__(self, text: str) -> None:
-        self.outputs = [FakeCompletion(text)]
+    def __init__(self, text: str, prompt_token_ids: list[int] | None = None) -> None:
+        self.prompt_token_ids = prompt_token_ids
+        self.outputs = [FakeCompletion(text, token_ids=[11, 12], cumulative_logprob=-2.0)]
 
 
 class FakeLLM:
@@ -105,3 +113,39 @@ def test_vllm_generator_batches_prompts(monkeypatch) -> None:
     assert outputs == ["response:first", "response:second"]
     assert generator.llm.prompts == ["first", "second"]
     assert generator.llm.params.kwargs == {"max_tokens": 16, "temperature": 0.7, "top_p": 0.95}
+
+
+def test_vllm_generator_can_return_generation_metadata(monkeypatch) -> None:
+    class MetadataLLM(FakeLLM):
+        def generate(self, prompts: list[str], params: FakeSamplingParams) -> list[FakeRequestOutput]:
+            self.prompts = prompts
+            self.params = params
+            return [FakeRequestOutput(f"response:{prompt}", prompt_token_ids=[1, 2]) for prompt in prompts]
+
+    def fake_init(self) -> None:
+        self.tokenizer = FakeTokenizer()
+        self.llm = MetadataLLM()
+        self._sampling_params_cls = FakeSamplingParams
+
+    monkeypatch.setattr(VLLMGenerator, "__post_init__", fake_init)
+    generator = VLLMGenerator(
+        model_path="/models/demo",
+        max_new_tokens=16,
+        temperature=0.7,
+        top_p=0.95,
+        do_sample=True,
+    )
+
+    outputs = generator.generate_batch_with_metadata(["first"])
+
+    assert outputs[0].text == "response:first"
+    assert outputs[0].prompt_token_ids == [1, 2]
+    assert outputs[0].completion_token_ids == [11, 12]
+    assert outputs[0].cumulative_logprob == -2.0
+    assert generator.llm.params.kwargs == {
+        "max_tokens": 16,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "logprobs": 1,
+        "prompt_logprobs": 1,
+    }
