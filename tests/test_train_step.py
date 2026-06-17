@@ -47,6 +47,16 @@ class FakeTrainer:
         self.saved_checkpoints.append(path)
 
 
+def training_cache(reference_logprob: float = -0.5) -> dict:
+    return {
+        "version": 1,
+        "input_ids": [1, 2],
+        "labels": [2, 3],
+        "completion_mask": [False, True],
+        "reference_logprob": reference_logprob,
+    }
+
+
 def train_config(tmp_path: Path) -> TrainConfig:
     return TrainConfig(
         experiment=ExperimentConfig(name="demo", seed=1, output_root=str(tmp_path), bc_plus_root=str(tmp_path)),
@@ -71,6 +81,7 @@ def write_rollout(path: Path, checkpoint_id: str) -> None:
                 "kind": "tool",
                 "prompt": "tool prompt",
                 "completion": '{"tool_name": "search", "arguments": {"query": "question"}}',
+                "training_cache": training_cache(-0.5),
             },
             {
                 "query_id": "q1",
@@ -78,6 +89,7 @@ def write_rollout(path: Path, checkpoint_id: str) -> None:
                 "kind": "final_answer",
                 "prompt": "prompt",
                 "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+                "training_cache": training_cache(-0.25),
             }
         ],
         "turn_rewards": {"tool-1": 1.0, "final-answer": 1.0},
@@ -97,6 +109,7 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
                 "kind": "summary",
                 "prompt": "prompt",
                 "completion": "summary",
+                "training_cache": training_cache(-0.5),
             },
             {
                 "query_id": "q1",
@@ -104,6 +117,7 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
                 "turn_id": "tool-2",
                 "prompt": "tool prompt",
                 "completion": '{"tool_name": "search"}',
+                "training_cache": training_cache(-0.25),
             },
         ],
         "turn_rewards": {"summary-1": -1.0, "tool-2": -1.0},
@@ -124,6 +138,24 @@ def write_raw_rollout(path: Path, checkpoint_id: str) -> None:
                 "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
             }
         ],
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def write_uncached_judged_rollout(path: Path, checkpoint_id: str) -> None:
+    row = {
+        "policy_checkpoint_id": checkpoint_id,
+        "trainable_sample_count": 1,
+        "turn_records": [
+            {
+                "query_id": "q1",
+                "turn_id": "final-answer",
+                "kind": "final_answer",
+                "prompt": "prompt",
+                "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            }
+        ],
+        "turn_rewards": {"final-answer": 1.0},
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -215,5 +247,28 @@ def test_run_train_step_rejects_raw_unjudged_rollouts(tmp_path: Path) -> None:
         assert "turn_records or turn_rewards" in str(exc)
     else:
         raise AssertionError("Expected raw rollout rows to be rejected")
+
+    assert trainer.grouped_samples is None
+
+
+def test_run_train_step_rejects_uncached_judged_rollouts(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    write_uncached_judged_rollout(rollout_path, "step-00001")
+    trainer = FakeTrainer()
+
+    try:
+        run_train_step(
+            train_config(tmp_path),
+            checkpoint_path=checkpoint,
+            rollout_path=rollout_path,
+            output_checkpoint_path=tmp_path / "step-00002",
+            trainer=trainer,
+        )
+    except ValueError as exc:
+        assert "uncached trainable samples" in str(exc)
+    else:
+        raise AssertionError("Expected uncached judged rollout rows to be rejected")
 
     assert trainer.grouped_samples is None

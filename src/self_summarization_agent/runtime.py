@@ -362,7 +362,8 @@ class EpisodeRuntime:
                     "turn_id": "final-answer",
                     "kind": "final_answer",
                     "prompt": prompt,
-                    "completion": normalized_output,
+                    "completion": raw_output,
+                    "normalized_completion": normalized_output,
                 }
             )
             active.result = self._completed_result(active, answer)
@@ -423,7 +424,8 @@ class EpisodeRuntime:
                 "turn_id": tool_turn_id,
                 "kind": "tool",
                 "prompt": prompt,
-                "completion": normalized_output,
+                "completion": raw_output,
+                "normalized_completion": normalized_output,
             }
         )
         state.rounds.append(
@@ -487,7 +489,8 @@ class EpisodeRuntime:
                 "turn_id": "final-answer",
                 "kind": "final_answer",
                 "prompt": prompt,
-                "completion": normalized_output,
+                "completion": raw_output,
+                "normalized_completion": normalized_output,
             }
         )
         active.result = self._completed_result(active, answer)

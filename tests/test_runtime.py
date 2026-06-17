@@ -143,7 +143,7 @@ def test_extract_summary_output_uses_full_output_without_think_end() -> None:
     assert extracted.summary == "Summary without explicit thinking."
 
 
-def test_runtime_records_clean_tool_call_when_model_outputs_thinking() -> None:
+def test_runtime_records_raw_tool_call_completion_when_model_outputs_thinking() -> None:
     backend = FakeBackend(search_index={"focused query": ["doc-1"]}, documents={"doc-1": "fact from doc-1"})
     model = ScriptedModel(
         outputs=[
@@ -157,8 +157,16 @@ def test_runtime_records_clean_tool_call_when_model_outputs_thinking() -> None:
 
     assert result.status == "completed"
     assert result.turn_records[0]["kind"] == "tool"
-    assert result.turn_records[0]["completion"] == '{"tool_name": "search", "arguments": {"query": "focused query"}}'
-    assert result.turn_records[1]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
+    assert (
+        result.turn_records[0]["completion"]
+        == '<think>I should search.</think>\n```json\n{"tool_name": "search", "arguments": {"query": "focused query"}}\n```'
+    )
+    assert result.turn_records[0]["normalized_completion"] == '{"tool_name": "search", "arguments": {"query": "focused query"}}'
+    assert (
+        result.turn_records[1]["completion"]
+        == '<think>The document supports it.</think>\n{"tool_name": "finish", "arguments": {"answer": "done"}}'
+    )
+    assert result.turn_records[1]["normalized_completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
 
 
 def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
@@ -457,13 +465,13 @@ def test_runtime_records_trainable_tool_summary_and_final_answer_turns() -> None
     assert [record["kind"] for record in result.turn_records] == ["tool", "tool", "summary", "final_answer"]
     assert [record["query_id"] for record in result.turn_records] == ["q1", "q1", "q1", "q1"]
     assert result.turn_records[0]["turn_id"] == "tool-1"
-    assert result.turn_records[0]["completion"] == '{"tool_name": "search", "arguments": {"query": "first"}}'
+    assert result.turn_records[0]["completion"] == tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
     assert result.turn_records[1]["turn_id"] == "tool-2"
-    assert result.turn_records[1]["completion"] == '{"tool_name": "search", "arguments": {"query": "second"}}'
+    assert result.turn_records[1]["completion"] == tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
     assert result.turn_records[2]["turn_id"] == "summary-1"
     assert result.turn_records[2]["completion"] == "summary of old-doc only"
     assert result.turn_records[3]["turn_id"] == "final-answer"
-    assert result.turn_records[3]["completion"] == '{"tool_name": "finish", "arguments": {"answer": "done"}}'
+    assert result.turn_records[3]["completion"] == tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
     assert result.turn_rewards == {"tool-1": 1.0, "tool-2": 1.0, "summary-1": 1.0, "final-answer": 1.0}
 
 

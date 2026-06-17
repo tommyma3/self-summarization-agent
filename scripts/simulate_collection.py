@@ -327,7 +327,7 @@ def trace_collection(
                     turn_id="final-answer",
                     kind="final_answer",
                     prompt=acting_prompt,
-                    completion=normalized_output,
+                    completion=raw_output,
                 )
                 write_section(handle, "Terminal Status", f"status: completed\nfinal_answer: {answer}\n")
                 write_training_sequences(
@@ -360,7 +360,7 @@ def trace_collection(
                     turn_id=next_tool_turn_id(),
                     kind="tool",
                     prompt=acting_prompt,
-                    completion=normalized_output,
+                    completion=raw_output,
                 )
                 tool_call_counts["search"] += 1
                 runtime._record_search_result_docids(retrieved_docids, search_results)
@@ -388,7 +388,7 @@ def trace_collection(
                     turn_id=next_tool_turn_id(),
                     kind="tool",
                     prompt=acting_prompt,
-                    completion=normalized_output,
+                    completion=raw_output,
                 )
                 tool_call_counts["get_document"] += 1
             else:

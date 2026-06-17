@@ -105,8 +105,10 @@ def test_openrlhf_executor_keeps_tool_cot_out_of_next_prompt() -> None:
     assert result["reward"] == 1.0
     assert len(result["action_ranges"]) == 2
     trained_text = tokenizer.decode(result["observation_tokens"])
-    assert "secret search thought" not in trained_text
-    assert "secret final thought" not in trained_text
+    assert "secret search thought" in trained_text
+    assert "secret final thought" in trained_text
+    assert "<think>secret search thought</think>" in trained_text
+    assert "<think>secret final thought</think>" in trained_text
     assert '{"tool_name": "search", "arguments": {"query": "q"}}' in trained_text
     assert '{"tool_name": "finish", "arguments": {"answer": "done"}}' in trained_text
 

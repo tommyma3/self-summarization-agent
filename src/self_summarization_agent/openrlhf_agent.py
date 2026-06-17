@@ -206,8 +206,7 @@ class AgentExecutor(AgentExecutorBase):
                 if parsed_action is None:
                     train_segments.append((acting_prompt, action_token_ids, action_logprobs))
                 else:
-                    _, normalized_action = parsed_action
-                    train_segments.append((acting_prompt, _tokenize(hf_tokenizer, normalized_action), None))
+                    train_segments.append((acting_prompt, action_token_ids, action_logprobs))
                 runtime._apply_forced_answer_output(active, raw_action, acting_prompt)
                 break
 
@@ -218,8 +217,7 @@ class AgentExecutor(AgentExecutorBase):
             if parsed_action is None:
                 train_segments.append((acting_prompt, action_token_ids, action_logprobs))
             else:
-                _, normalized_action = parsed_action
-                train_segments.append((acting_prompt, _tokenize(hf_tokenizer, normalized_action), None))
+                train_segments.append((acting_prompt, action_token_ids, action_logprobs))
             runtime._apply_action_output(active, raw_action, acting_prompt)
 
             if active.result is not None:

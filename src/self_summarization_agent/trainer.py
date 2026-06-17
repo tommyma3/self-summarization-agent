@@ -12,7 +12,7 @@ import torch
 from transformers import AutoModelForMultimodalLM, AutoTokenizer
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
-from self_summarization_agent.trajectory import RLSample
+from self_summarization_agent.trajectory import RLSample, TOKEN_CACHE_VERSION
 
 
 @dataclass(slots=True)
@@ -196,6 +196,77 @@ def _pad_bool_tensors(items: list[torch.Tensor]) -> torch.Tensor:
     return padded
 
 
+def _pad_token_id_from_tokenizer(tokenizer: Any) -> int:
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        pad_token_id = tokenizer.eos_token_id
+    if pad_token_id is None:
+        pad_token_id = 0
+    return int(pad_token_id)
+
+
+def _encode_shifted_sample_from_text(
+    sample: RLSample,
+    *,
+    tokenizer: Any,
+    device: torch.device,
+    max_sequence_length: int | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    pad_token_id = _pad_token_id_from_tokenizer(tokenizer)
+    prompt_ids = tokenizer.encode(sample.prompt, add_special_tokens=False)
+    full_ids = tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
+    if max_sequence_length is not None and len(full_ids) > max_sequence_length:
+        drop = len(full_ids) - max_sequence_length
+        full_ids = full_ids[drop:]
+        prompt_ids = prompt_ids[drop:] if len(prompt_ids) > drop else []
+
+    if len(full_ids) <= len(prompt_ids):
+        input_ids = torch.tensor([pad_token_id], dtype=torch.long, device=device)
+        labels = torch.tensor([pad_token_id], dtype=torch.long, device=device)
+        completion_mask = torch.zeros((1,), dtype=torch.bool, device=device)
+    else:
+        input_ids = torch.tensor(full_ids[:-1], dtype=torch.long, device=device)
+        labels = torch.tensor(full_ids[1:], dtype=torch.long, device=device)
+        completion_mask = torch.zeros_like(labels, dtype=torch.bool)
+        completion_start = max(len(prompt_ids) - 1, 0)
+        completion_mask[completion_start:] = True
+    return input_ids, labels, completion_mask
+
+
+def _cached_shifted_sample_tensors(
+    sample: RLSample,
+    *,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not sample.has_training_cache:
+        raise ValueError(f"Sample {sample.turn_id} is missing training cache")
+    return (
+        torch.tensor(sample.input_ids, dtype=torch.long, device=device),
+        torch.tensor(sample.labels, dtype=torch.long, device=device),
+        torch.tensor(sample.completion_mask, dtype=torch.bool, device=device),
+    )
+
+
+def _all_samples_have_training_cache(samples: list[RLSample]) -> bool:
+    return all(sample.has_training_cache for sample in samples)
+
+
+def _training_cache_payload(
+    *,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    completion_mask: torch.Tensor,
+    reference_logprob: float,
+) -> dict[str, Any]:
+    return {
+        "version": TOKEN_CACHE_VERSION,
+        "input_ids": [int(token_id) for token_id in input_ids.detach().cpu().tolist()],
+        "labels": [int(token_id) for token_id in labels.detach().cpu().tolist()],
+        "completion_mask": [bool(value) for value in completion_mask.detach().cpu().tolist()],
+        "reference_logprob": float(reference_logprob),
+    }
+
+
 def _mean_masked_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
@@ -308,41 +379,29 @@ class TransformersPolicyTrainer:
 
     def _encode_shifted_samples(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = self._model_device()
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
-        if pad_token_id is None:
-            pad_token_id = 0
+        pad_token_id = _pad_token_id_from_tokenizer(self.tokenizer)
 
         input_tensors: list[torch.Tensor] = []
         label_tensors: list[torch.Tensor] = []
         mask_tensors: list[torch.Tensor] = []
+        max_len = getattr(self.training_config, "max_sequence_length", None)
         for sample in samples:
-            prompt_ids = self.tokenizer.encode(sample.prompt, add_special_tokens=False)
-            full_ids = self.tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
-            max_len = getattr(self.training_config, "max_sequence_length", None)
-            if max_len is not None and len(full_ids) > max_len:
-                drop = len(full_ids) - max_len
-                full_ids = full_ids[drop:]
-                prompt_ids = prompt_ids[drop:] if len(prompt_ids) > drop else []
-
-            if len(full_ids) <= len(prompt_ids):
-                input_ids = torch.tensor([int(pad_token_id)], dtype=torch.long, device=device)
-                labels = torch.tensor([int(pad_token_id)], dtype=torch.long, device=device)
-                completion_mask = torch.zeros((1,), dtype=torch.bool, device=device)
+            if sample.has_training_cache:
+                input_ids, labels, completion_mask = _cached_shifted_sample_tensors(sample, device=device)
             else:
-                input_ids = torch.tensor(full_ids[:-1], dtype=torch.long, device=device)
-                labels = torch.tensor(full_ids[1:], dtype=torch.long, device=device)
-                completion_mask = torch.zeros_like(labels, dtype=torch.bool)
-                completion_start = max(len(prompt_ids) - 1, 0)
-                completion_mask[completion_start:] = True
+                input_ids, labels, completion_mask = _encode_shifted_sample_from_text(
+                    sample,
+                    tokenizer=self.tokenizer,
+                    device=device,
+                    max_sequence_length=max_len,
+                )
             input_tensors.append(input_ids)
             label_tensors.append(labels)
             mask_tensors.append(completion_mask)
 
         return (
-            _pad_1d_tensors(input_tensors, pad_value=int(pad_token_id)),
-            _pad_1d_tensors(label_tensors, pad_value=int(pad_token_id)),
+            _pad_1d_tensors(input_tensors, pad_value=pad_token_id),
+            _pad_1d_tensors(label_tensors, pad_value=pad_token_id),
             _pad_bool_tensors(mask_tensors),
         )
 
@@ -350,6 +409,40 @@ class TransformersPolicyTrainer:
         input_ids, labels, completion_mask = self._encode_shifted_samples(samples)
         outputs = self.model(input_ids=input_ids)
         return _mean_masked_logprobs(outputs.logits, labels, completion_mask)
+
+    def _cached_reference_logprobs(self, samples: list[RLSample]) -> torch.Tensor | None:
+        if not _all_samples_have_training_cache(samples):
+            return None
+        return torch.tensor(
+            [float(sample.reference_logprob) for sample in samples],
+            dtype=torch.float32,
+            device=self._model_device(),
+        )
+
+    def cache_samples(self, samples: list[RLSample]) -> list[dict[str, Any]]:
+        if not samples:
+            return []
+        device = self._model_device()
+        max_len = getattr(self.training_config, "max_sequence_length", None)
+        encoded = [
+            _encode_shifted_sample_from_text(
+                sample,
+                tokenizer=self.tokenizer,
+                device=device,
+                max_sequence_length=max_len,
+            )
+            for sample in samples
+        ]
+        reference_logprobs = self._sequence_logprobs(samples).detach().cpu().tolist()
+        return [
+            _training_cache_payload(
+                input_ids=input_ids,
+                labels=labels,
+                completion_mask=completion_mask,
+                reference_logprob=float(reference_logprob),
+            )
+            for (input_ids, labels, completion_mask), reference_logprob in zip(encoded, reference_logprobs)
+        ]
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
         update_epochs, minibatch_size, microbatch_size, clip_range = _validate_grpo_training_config(
@@ -369,11 +462,14 @@ class TransformersPolicyTrainer:
                 f"microbatch_size={microbatch_size}"
             )
         with torch.no_grad():
-            reference_logprob_chunks = []
-            for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
-                reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
-                reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
-            reference_logprobs = torch.cat(reference_logprob_chunks)
+            contributing_samples = [sample for sample, _advantage in batch.contributing]
+            reference_logprobs = self._cached_reference_logprobs(contributing_samples)
+            if reference_logprobs is None:
+                reference_logprob_chunks = []
+                for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
+                    reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
+                    reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
+                reference_logprobs = torch.cat(reference_logprob_chunks)
 
         detached_losses: list[float] = []
         detached_kls: list[float] = []
@@ -506,37 +602,33 @@ class FSDP2ContextParallelPolicyTrainer:
         return mapping[self.model_config.dtype]
 
     def _encode_shifted_sample(self, sample: RLSample) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        prompt_ids = self.tokenizer.encode(sample.prompt, add_special_tokens=False)
-        full_ids = self.tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
-        if len(full_ids) <= len(prompt_ids):
-            empty = torch.empty((1, 0), dtype=torch.long, device=self.accelerator.device)
-            return empty, empty, empty.to(dtype=torch.bool)
-
-        input_ids = torch.tensor([full_ids[:-1]], dtype=torch.long, device=self.accelerator.device)
-        labels = torch.tensor([full_ids[1:]], dtype=torch.long, device=self.accelerator.device)
-        completion_mask = torch.zeros_like(labels, dtype=torch.bool)
-        completion_start = max(len(prompt_ids) - 1, 0)
-        completion_mask[:, completion_start:] = True
+        max_len = getattr(self.training_config, "max_sequence_length", None)
+        input_ids, labels, completion_mask = _encode_shifted_sample_from_text(
+            sample,
+            tokenizer=self.tokenizer,
+            device=self.accelerator.device,
+            max_sequence_length=max_len,
+        )
+        input_ids = input_ids.unsqueeze(0)
+        labels = labels.unsqueeze(0)
+        completion_mask = completion_mask.unsqueeze(0)
         input_ids, labels, completion_mask = self._pad_for_context_parallel(input_ids, labels, completion_mask)
         return input_ids, labels, completion_mask
 
     def _encode_shifted_samples(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
-        if pad_token_id is None:
-            pad_token_id = 0
+        pad_token_id = _pad_token_id_from_tokenizer(self.tokenizer)
 
         input_tensors: list[torch.Tensor] = []
         label_tensors: list[torch.Tensor] = []
         mask_tensors: list[torch.Tensor] = []
         for sample in samples:
-            input_ids, labels, completion_mask = self._encode_shifted_sample(sample)
-            if input_ids.numel() == 0:
-                input_ids = torch.tensor([int(pad_token_id)], dtype=torch.long, device=self.accelerator.device)
-                labels = torch.tensor([int(pad_token_id)], dtype=torch.long, device=self.accelerator.device)
-                completion_mask = torch.zeros((1,), dtype=torch.bool, device=self.accelerator.device)
+            if sample.has_training_cache:
+                input_ids, labels, completion_mask = _cached_shifted_sample_tensors(
+                    sample,
+                    device=self.accelerator.device,
+                )
             else:
+                input_ids, labels, completion_mask = self._encode_shifted_sample(sample)
                 input_ids = input_ids.squeeze(0)
                 labels = labels.squeeze(0)
                 completion_mask = completion_mask.squeeze(0)
@@ -545,8 +637,8 @@ class FSDP2ContextParallelPolicyTrainer:
             mask_tensors.append(completion_mask)
 
         return (
-            _pad_1d_tensors(input_tensors, pad_value=int(pad_token_id)),
-            _pad_1d_tensors(label_tensors, pad_value=int(pad_token_id)),
+            _pad_1d_tensors(input_tensors, pad_value=pad_token_id),
+            _pad_1d_tensors(label_tensors, pad_value=pad_token_id),
             _pad_bool_tensors(mask_tensors),
         )
 
@@ -563,11 +655,7 @@ class FSDP2ContextParallelPolicyTrainer:
         if pad_length == 0:
             return input_ids, labels, completion_mask
 
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id
-        if pad_token_id is None:
-            pad_token_id = 0
+        pad_token_id = _pad_token_id_from_tokenizer(self.tokenizer)
 
         input_pad = torch.full(
             (input_ids.shape[0], pad_length),
@@ -607,6 +695,11 @@ class FSDP2ContextParallelPolicyTrainer:
             completion_mask = completion_mask[:, -max_len:]
 
         if self.training_config.context_parallel_size > 1:
+            input_ids, labels, completion_mask = self._pad_for_context_parallel(
+                input_ids,
+                labels,
+                completion_mask,
+            )
             buffers = [input_ids, labels, completion_mask]
             with self.accelerator.maybe_context_parallel(
                 buffers=buffers,
@@ -637,6 +730,39 @@ class FSDP2ContextParallelPolicyTrainer:
             global_logprob_sums / global_token_counts.clamp_min(1),
             torch.zeros_like(global_logprob_sums),
         )
+
+    def _cached_reference_logprobs(self, samples: list[RLSample]) -> torch.Tensor | None:
+        if not _all_samples_have_training_cache(samples):
+            return None
+        return torch.tensor(
+            [float(sample.reference_logprob) for sample in samples],
+            dtype=torch.float32,
+            device=self.accelerator.device,
+        )
+
+    def cache_samples(self, samples: list[RLSample]) -> list[dict[str, Any]]:
+        if not samples:
+            return []
+        max_len = getattr(self.training_config, "max_sequence_length", None)
+        encoded = [
+            _encode_shifted_sample_from_text(
+                sample,
+                tokenizer=self.tokenizer,
+                device=self.accelerator.device,
+                max_sequence_length=max_len,
+            )
+            for sample in samples
+        ]
+        reference_logprobs = self._sequence_logprobs(samples).detach().cpu().tolist()
+        return [
+            _training_cache_payload(
+                input_ids=input_ids,
+                labels=labels,
+                completion_mask=completion_mask,
+                reference_logprob=float(reference_logprob),
+            )
+            for (input_ids, labels, completion_mask), reference_logprob in zip(encoded, reference_logprobs)
+        ]
 
     def _masked_logprob_sums_and_counts(
         self,
@@ -676,11 +802,14 @@ class FSDP2ContextParallelPolicyTrainer:
                 f"microbatch_size={microbatch_size}"
             )
         with torch.no_grad():
-            reference_logprob_chunks = []
-            for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
-                reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
-                reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
-            reference_logprobs = torch.cat(reference_logprob_chunks)
+            contributing_samples = [sample for sample, _advantage in batch.contributing]
+            reference_logprobs = self._cached_reference_logprobs(contributing_samples)
+            if reference_logprobs is None:
+                reference_logprob_chunks = []
+                for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
+                    reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
+                    reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
+                reference_logprobs = torch.cat(reference_logprob_chunks)
 
         detached_losses: list[float] = []
         detached_kls: list[float] = []

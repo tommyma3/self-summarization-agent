@@ -55,6 +55,21 @@ def make_rewarded_sample(query_id: str, turn_id: str, reward: float) -> RLSample
     )
 
 
+def make_cached_rewarded_sample(query_id: str, turn_id: str, reward: float, reference_logprob: float) -> RLSample:
+    return RLSample(
+        query_id=query_id,
+        turn_id=turn_id,
+        prompt="prompt",
+        completion=f" completion {turn_id}",
+        reward=reward,
+        trainable_kind="final_answer",
+        input_ids=[1, 2],
+        labels=[2, 3],
+        completion_mask=[False, True],
+        reference_logprob=reference_logprob,
+    )
+
+
 def test_fsdp_context_parallel_encoding_pads_to_required_multiple() -> None:
     trainer = make_fsdp_trainer(
         FakeTokenizer(prompt_ids=[1, 2, 3, 4, 5], full_ids=list(range(17))),
@@ -174,3 +189,48 @@ def test_transformers_trainer_accumulates_microbatches_within_minibatch() -> Non
     assert metrics.sample_count == 4
     assert metrics.optimizer_step_count == 1
     assert batch_sizes == [1, 1, 1, 1, 1, 1, 1, 1]
+
+
+def test_transformers_trainer_uses_cached_reference_logprobs() -> None:
+    feature_by_turn = {
+        "q1-good": 1.0,
+        "q1-bad": 2.0,
+        "q2-good": 3.0,
+        "q2-bad": 4.0,
+    }
+    batch_sizes = []
+
+    class FakeBatchedTrainer(TransformersPolicyTrainer):
+        def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+            batch_sizes.append(len(samples))
+            features = torch.tensor([[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32)
+            return self.model(features).squeeze(-1)
+
+        def _model_device(self) -> torch.device:
+            return torch.device("cpu")
+
+    trainer = FakeBatchedTrainer.__new__(FakeBatchedTrainer)
+    trainer.training_config = TrainingConfig(
+        update_epochs=3,
+        minibatch_size=2,
+        gradient_accumulation_microbatch_size=2,
+        clip_range=0.2,
+    )
+    trainer.model = torch.nn.Linear(1, 1, bias=False)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.01)
+    grouped_samples = {
+        "q1": [
+            make_cached_rewarded_sample("q1", "q1-good", 1.0, -0.5),
+            make_cached_rewarded_sample("q1", "q1-bad", 0.0, -0.5),
+        ],
+        "q2": [
+            make_cached_rewarded_sample("q2", "q2-good", 1.0, -0.5),
+            make_cached_rewarded_sample("q2", "q2-bad", 0.0, -0.5),
+        ],
+    }
+
+    metrics = trainer.step(grouped_samples)
+
+    assert metrics.sample_count == 4
+    assert metrics.optimizer_step_count == 6
+    assert batch_sizes == [2, 2, 2, 2, 2, 2]

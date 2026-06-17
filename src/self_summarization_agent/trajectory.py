@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 import math
 from collections.abc import Mapping
+from typing import Any
+
+
+TOKEN_CACHE_VERSION = 1
+TOKEN_CACHE_FIELD = "training_cache"
 
 
 @dataclass(slots=True)
@@ -11,6 +16,73 @@ class RLSample:
     completion: str
     reward: float
     trainable_kind: str
+    input_ids: list[int] | None = None
+    labels: list[int] | None = None
+    completion_mask: list[bool] | None = None
+    reference_logprob: float | None = None
+
+    @property
+    def has_training_cache(self) -> bool:
+        return (
+            self.input_ids is not None
+            and self.labels is not None
+            and self.completion_mask is not None
+            and self.reference_logprob is not None
+        )
+
+
+def _validate_int_list(value: Any, *, field_name: str, turn_id: str) -> list[int]:
+    if not isinstance(value, list):
+        raise ValueError(f"Trainable turn_id {turn_id} has non-list {field_name}")
+    output: list[int] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, int) or isinstance(item, bool):
+            raise ValueError(f"Trainable turn_id {turn_id} has invalid {field_name}[{index}]")
+        output.append(item)
+    return output
+
+
+def _validate_bool_list(value: Any, *, field_name: str, turn_id: str) -> list[bool]:
+    if not isinstance(value, list):
+        raise ValueError(f"Trainable turn_id {turn_id} has non-list {field_name}")
+    output: list[bool] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, bool):
+            raise ValueError(f"Trainable turn_id {turn_id} has invalid {field_name}[{index}]")
+        output.append(item)
+    return output
+
+
+def _extract_training_cache(
+    turn: Mapping[str, object],
+    *,
+    turn_id: str,
+) -> tuple[list[int] | None, list[int] | None, list[bool] | None, float | None]:
+    cache = turn.get(TOKEN_CACHE_FIELD)
+    if cache is None:
+        return None, None, None, None
+    if not isinstance(cache, Mapping):
+        raise ValueError(f"Trainable turn_id {turn_id} has non-object {TOKEN_CACHE_FIELD}")
+    version = cache.get("version")
+    if version != TOKEN_CACHE_VERSION:
+        raise ValueError(
+            f"Trainable turn_id {turn_id} has unsupported training cache version: {version!r}"
+        )
+    input_ids = _validate_int_list(cache.get("input_ids"), field_name="input_ids", turn_id=turn_id)
+    labels = _validate_int_list(cache.get("labels"), field_name="labels", turn_id=turn_id)
+    completion_mask = _validate_bool_list(
+        cache.get("completion_mask"),
+        field_name="completion_mask",
+        turn_id=turn_id,
+    )
+    if len(input_ids) != len(labels) or len(labels) != len(completion_mask):
+        raise ValueError(f"Trainable turn_id {turn_id} has mismatched cached tensor lengths")
+    reference_logprob = cache.get("reference_logprob")
+    if not isinstance(reference_logprob, (int, float)) or isinstance(reference_logprob, bool):
+        raise ValueError(f"Trainable turn_id {turn_id} has non-numeric reference_logprob")
+    if not math.isfinite(float(reference_logprob)):
+        raise ValueError(f"Trainable turn_id {turn_id} has non-finite reference_logprob")
+    return input_ids, labels, completion_mask, float(reference_logprob)
 
 
 def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[str, float]) -> list[RLSample]:
@@ -56,6 +128,10 @@ def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[s
             raise ValueError(f"Trainable turn_id {turn_id} has non-numeric reward")
         if not math.isfinite(float(reward)):
             raise ValueError(f"Trainable turn_id {turn_id} has non-finite reward")
+        input_ids, labels, completion_mask, reference_logprob = _extract_training_cache(
+            turn,
+            turn_id=turn_id,
+        )
         samples.append(
             RLSample(
                 query_id=query_id,
@@ -64,6 +140,10 @@ def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[s
                 completion=completion,
                 reward=float(reward),
                 trainable_kind=turn_kind,
+                input_ids=input_ids,
+                labels=labels,
+                completion_mask=completion_mask,
+                reference_logprob=reference_logprob,
             )
         )
     unknown_reward_ids = sorted(set(rewards) - seen_turn_ids)

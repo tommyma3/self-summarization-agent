@@ -16,6 +16,7 @@ from self_summarization_agent.checkpoints import (
 )
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir, utc_timestamp
+from self_summarization_agent.trajectory import extract_trainable_samples
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -30,7 +31,12 @@ def _train_dir(config) -> Path:
     return Path(config.experiment.output_root) / "artifacts" / "train" / config.experiment.name
 
 
-def _train_step_command_prefix(config, python_executable: str) -> list[str]:
+def _train_step_command_prefix(
+    config,
+    python_executable: str,
+    *,
+    module_name: str = "self_summarization_agent.train_step",
+) -> list[str]:
     if config.training.backend == "fsdp2_context_parallel":
         command = [
             "accelerate",
@@ -53,9 +59,9 @@ def _train_step_command_prefix(config, python_executable: str) -> list[str]:
         ]
         if config.training.activation_checkpointing:
             command.append("--fsdp_activation_checkpointing=true")
-        command.extend(["-m", "self_summarization_agent.train_step"])
+        command.extend(["-m", module_name])
         return command
-    return [python_executable, "-m", "self_summarization_agent.train_step"]
+    return [python_executable, "-m", module_name]
 
 
 def _append_cli_overrides(command: list[str], overrides: Sequence[str]) -> None:
@@ -207,6 +213,46 @@ def _has_complete_judged_rollouts(
     return True
 
 
+def _has_complete_cached_rollouts(
+    path: Path,
+    *,
+    checkpoint_id: str,
+    expected_count: int | None,
+) -> bool:
+    if not path.exists():
+        return False
+    rows = _load_jsonl(path)
+    if expected_count is not None and len(rows) != expected_count:
+        return False
+    if expected_count is None and not rows:
+        return False
+    for index, row in enumerate(rows, start=1):
+        if row.get("policy_checkpoint_id") != checkpoint_id:
+            raise ValueError(
+                f"Cannot resume from {path}: row {index} has checkpoint "
+                f"{row.get('policy_checkpoint_id')!r}, expected {checkpoint_id!r}"
+            )
+        turn_records = row.get("turn_records")
+        turn_rewards = row.get("turn_rewards")
+        if not isinstance(turn_records, list):
+            raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_records")
+        if not isinstance(turn_rewards, dict):
+            raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_rewards")
+        if row.get("trainable_sample_count") == 0:
+            continue
+        missing_cache_turn_ids = [
+            sample.turn_id
+            for sample in extract_trainable_samples(turn_records, turn_rewards)
+            if not sample.has_training_cache
+        ]
+        if missing_cache_turn_ids:
+            raise ValueError(
+                f"Cannot resume from {path}: row {index} has uncached trainable samples: "
+                f"{', '.join(missing_cache_turn_ids)}"
+            )
+    return True
+
+
 def _has_eval_metrics(metrics_path: Path, *, iteration: int, policy_checkpoint_id: str) -> bool:
     if not metrics_path.exists():
         return False
@@ -261,7 +307,8 @@ def run_training_iteration(
     eval_metrics_path = train_dir / "eval_metrics.jsonl"
     phase_timings_path = train_dir / "phase_timings.jsonl"
     raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.raw.jsonl"
-    judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.jsonl"
+    judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.judged.jsonl"
+    cached_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.jsonl"
     eval_raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.raw.jsonl"
     eval_judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.jsonl"
     next_checkpoint = checkpoints_dir / f"iteration-{iteration:05d}"
@@ -307,6 +354,24 @@ def run_training_iteration(
         str(judged_rollout_path),
     ]
     _append_cli_overrides(judge_command, overrides)
+    cache_command = [
+        *_train_step_command_prefix(
+            config,
+            python_executable,
+            module_name="self_summarization_agent.cache_step",
+        ),
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(current.path),
+        "--rollouts",
+        str(judged_rollout_path),
+        "--output",
+        str(cached_rollout_path),
+    ]
+    _append_cli_overrides(cache_command, overrides)
+    if should_resume:
+        cache_command.append("--resume")
     train_command = [
         *_train_step_command_prefix(config, python_executable),
         "--config",
@@ -314,7 +379,7 @@ def run_training_iteration(
         "--checkpoint",
         str(current.path),
         "--rollouts",
-        str(judged_rollout_path),
+        str(cached_rollout_path),
         "--output-checkpoint",
         str(next_checkpoint),
         "--metrics",
@@ -355,6 +420,23 @@ def run_training_iteration(
         timings_path=phase_timings_path,
         completed=train_judged_complete,
         error_message="Judge subprocess",
+    )
+    train_cached_complete = should_resume and (
+        training_already_advanced
+        or _has_complete_cached_rollouts(
+            cached_rollout_path,
+            checkpoint_id=current.checkpoint_id,
+            expected_count=_expected_train_rollout_count(config),
+        )
+    )
+    _run_or_skip_phase(
+        phase="train_cache",
+        iteration=iteration,
+        command=cache_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+        completed=train_cached_complete,
+        error_message="Cache subprocess",
     )
     checkpoint_complete = should_resume and (
         training_already_advanced or is_vllm_loadable_checkpoint(next_checkpoint)

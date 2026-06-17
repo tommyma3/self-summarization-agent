@@ -47,7 +47,13 @@ def samples_from_rollout_rows(rows: list[dict[str, Any]], *, expected_checkpoint
             raise ValueError(f"Rollout row {index} is missing turn_records or turn_rewards")
         if row.get("trainable_sample_count") == 0:
             continue
-        samples.extend(extract_trainable_samples(turn_records, turn_rewards))
+        row_samples = extract_trainable_samples(turn_records, turn_rewards)
+        missing_cache_turn_ids = [sample.turn_id for sample in row_samples if not sample.has_training_cache]
+        if missing_cache_turn_ids:
+            raise ValueError(
+                f"Rollout row {index} has uncached trainable samples: {', '.join(missing_cache_turn_ids)}"
+            )
+        samples.extend(row_samples)
     return samples
 
 
