@@ -438,6 +438,8 @@ def run_training_iteration(
         "--sample-seed",
         str(config.experiment.seed + iteration),
     ]
+    if config.rollout.overlap_judge and config.judge.enabled:
+        rollout_command.extend(["--judged-output", str(judged_rollout_path)])
     _append_cli_overrides(rollout_command, overrides)
     if should_resume:
         rollout_command.append("--resume")
@@ -530,6 +532,13 @@ def run_training_iteration(
                 require_judge=False,
             )
         )
+        if not train_judged_complete and config.rollout.overlap_judge and config.judge.enabled:
+            train_judged_complete = _has_complete_judged_rollouts(
+                judged_rollout_path,
+                checkpoint_id=current.checkpoint_id,
+                expected_count=_expected_train_rollout_count(config),
+                require_judge=False,
+            )
         _run_or_skip_phase(
             phase="train_judge",
             iteration=iteration,
@@ -591,6 +600,8 @@ def run_training_iteration(
                 "--split",
                 "eval",
             ]
+            if config.rollout.overlap_judge and config.judge.enabled:
+                eval_rollout_command.extend(["--judged-output", str(eval_judged_rollout_path)])
             _append_cli_overrides(eval_rollout_command, overrides)
             eval_rollout_command.extend(["--set", "training.group_size=1"])
             if should_resume:
@@ -647,6 +658,13 @@ def run_training_iteration(
                 expected_count=eval_expected_count,
                 require_judge=True,
             )
+            if not eval_judged_complete and config.rollout.overlap_judge and config.judge.enabled:
+                eval_judged_complete = _has_complete_judged_rollouts(
+                    eval_judged_rollout_path,
+                    checkpoint_id=eval_checkpoint_id,
+                    expected_count=eval_expected_count,
+                    require_judge=True,
+                )
             _run_or_skip_phase(
                 phase="eval_judge",
                 iteration=iteration,

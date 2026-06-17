@@ -90,6 +90,9 @@ class FakeJudge:
             parse_error=False,
         )
 
+    def evaluate_batch(self, items: list[tuple[QueryExample, str, str]]) -> list[FakeJudgeDecision]:
+        return [self.evaluate(example, status, response) for example, status, response in items]
+
 
 def train_config(tmp_path: Path) -> TrainConfig:
     return TrainConfig(
@@ -166,6 +169,41 @@ def test_collect_rollouts_can_still_judge_inline(tmp_path: Path) -> None:
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert all(row["trainable_sample_count"] == 2 for row in rows)
     assert all(row["turn_rewards"] == {"tool-1": 1.0, "final-answer": 1.0} for row in rows)
+
+
+def test_collect_rollouts_can_overlap_judge_to_separate_output(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    backend = FakeBackend(search_index={"question": ["doc-1"]}, documents={"doc-1": "fact"})
+    generator = CyclingGenerator(
+        [
+            tool_output('{"tool_name": "search", "arguments": {"query": "question"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
+        ]
+    )
+    examples = [QueryExample(query_id="q1", query="question", answer="done")]
+    raw_path = tmp_path / "rollouts.raw.jsonl"
+    judged_path = tmp_path / "rollouts.judged.jsonl"
+
+    collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=raw_path,
+        judged_output_path=judged_path,
+        examples=examples,
+        backend=backend,
+        generator=generator,
+        judge=FakeJudge(),
+    )
+
+    raw_rows = [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()]
+    judged_rows = [json.loads(line) for line in judged_path.read_text(encoding="utf-8").splitlines()]
+    assert len(raw_rows) == 2
+    assert len(judged_rows) == 2
+    assert all("turn_rewards" not in row for row in raw_rows)
+    assert all(row["judge"]["outcome"] == "correct_answer" for row in judged_rows)
+    assert all(row["turn_rewards"] == {"tool-1": 1.0, "final-answer": 1.0} for row in judged_rows)
 
 
 def test_collect_rollouts_batches_active_queries(tmp_path: Path) -> None:

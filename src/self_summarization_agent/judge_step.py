@@ -98,7 +98,7 @@ def _validate_raw_row(row: dict[str, Any], *, index: int, expected_checkpoint_id
         raise ValueError(f"Rollout row {index} is missing summary_turns")
 
 
-def _apply_decision_to_row(row: dict[str, Any], decision: JudgeDecision) -> dict[str, Any]:
+def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) -> dict[str, Any]:
     status = row.get("status")
     judged_row = dict(row)
     trainable_turn_ids = trainable_turn_ids_from_records(row["turn_records"])
@@ -131,23 +131,16 @@ def _apply_decision_to_row(row: dict[str, Any], decision: JudgeDecision) -> dict
     return judged_row
 
 
-def judge_rollouts(
-    config,
+def judge_rollout_rows(
+    rows: list[dict[str, Any]],
     *,
-    rollout_path: str | Path,
-    output_path: str | Path,
-    checkpoint_path: str | Path | None = None,
-    judge: RewardJudge | None = None,
-    examples_by_query_id: dict[str, QueryExample] | None = None,
-    split: str = "train",
-) -> Path:
-    expected_checkpoint_id = checkpoint_id_from_path(checkpoint_path) if checkpoint_path is not None else None
-    rows = _load_rollout_rows(rollout_path)
-    examples = examples_by_query_id or _load_examples_by_query_id(config, split=split)
+    judge: RewardJudge,
+    examples_by_query_id: dict[str, QueryExample],
+    expected_checkpoint_id: str | None = None,
+) -> list[dict[str, Any]]:
     for index, row in enumerate(rows, start=1):
         _validate_raw_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
 
-    judge = judge or build_judge(config)
     judge_items: list[tuple[QueryExample, str, str]] = []
     judge_row_indices: list[int] = []
     decisions_by_row_index: dict[int, JudgeDecision] = {}
@@ -161,7 +154,7 @@ def judge_rollouts(
             )
             continue
         query_id = row["query_id"]
-        example = examples.get(query_id)
+        example = examples_by_query_id.get(query_id)
         if example is None:
             raise ValueError(f"Rollout row {index + 1} references unknown query_id: {query_id}")
         judge_items.append((example, str(row.get("status") or ""), str(row.get("final_answer") or "")))
@@ -173,12 +166,37 @@ def judge_rollouts(
     for row_index, decision in zip(judge_row_indices, judge_decisions):
         decisions_by_row_index[row_index] = decision
 
+    return [apply_decision_to_rollout_row(row, decisions_by_row_index[index]) for index, row in enumerate(rows)]
+
+
+def judge_rollouts(
+    config,
+    *,
+    rollout_path: str | Path,
+    output_path: str | Path,
+    checkpoint_path: str | Path | None = None,
+    judge: RewardJudge | None = None,
+    examples_by_query_id: dict[str, QueryExample] | None = None,
+    split: str = "train",
+) -> Path:
+    expected_checkpoint_id = checkpoint_id_from_path(checkpoint_path) if checkpoint_path is not None else None
+    rows = _load_rollout_rows(rollout_path)
+    examples = examples_by_query_id or _load_examples_by_query_id(config, split=split)
+
+    judge = judge or build_judge(config)
+    judged_rows = judge_rollout_rows(
+        rows,
+        judge=judge,
+        examples_by_query_id=examples,
+        expected_checkpoint_id=expected_checkpoint_id,
+    )
+
     output = Path(output_path)
     ensure_dir(output.parent)
     if output.exists():
         output.unlink()
-    for index, row in enumerate(rows):
-        append_jsonl(output, _apply_decision_to_row(row, decisions_by_row_index[index]))
+    for row in judged_rows:
+        append_jsonl(output, row)
     return output
 
 

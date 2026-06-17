@@ -241,8 +241,8 @@ Training notes:
 The new orchestration path uses checkpoint files as the weight-sync boundary:
 
 ```powershell
-python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl
-python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl --resume
+python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.raw.jsonl --judged-output /path/to/rollouts.judged.jsonl
+python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.raw.jsonl --judged-output /path/to/rollouts.judged.jsonl --resume
 python -m self_summarization_agent.judge_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/raw-rollouts.jsonl --output /path/to/judged-rollouts.jsonl
 python -m self_summarization_agent.cache_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/judged-rollouts.jsonl --output /path/to/cached-rollouts.jsonl --resume
 python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/cached-rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
@@ -251,10 +251,10 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 
 For the intended GPU run:
 
-- rollout collection builds the FAISS searcher before vLLM, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
+- rollout collection builds the FAISS searcher before vLLM, starts the overlap judge worker on GPU 1, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
-- rollout collection writes raw, unjudged trajectories by default; `--judge-inline` is only a compatibility path
-- `judge_step` loads the judge model after collection, can use a different judge model from `judge.model_path`, and writes judged rollouts with `turn_rewards`
+- rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
+- `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` loads the rollout checkpoint, writes tokenized trainable turns and frozen reference logprobs, and supports `--resume` for partially cached artifacts
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend

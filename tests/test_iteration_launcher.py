@@ -164,6 +164,48 @@ def test_iteration_launcher_runs_rollout_then_train_and_advances_latest(tmp_path
     assert all(row["elapsed_seconds"] >= 0 for row in timing_rows)
 
 
+def test_iteration_launcher_skips_train_judge_when_overlap_writes_judged_rows(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    calls = []
+
+    def runner(command):
+        calls.append(list(command))
+        if "self_summarization_agent.rollout_collection" in command:
+            write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=2)
+            write_judged_rollouts(
+                latest_root / "rollouts" / "iteration-00001.judged.jsonl",
+                "iteration-00000",
+                count=2,
+            )
+        if "self_summarization_agent.train_step" in command:
+            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+    )
+
+    assert "self_summarization_agent.rollout_collection" in calls[0]
+    assert "--judged-output" in calls[0]
+    assert all("self_summarization_agent.judge_step" not in command for command in calls)
+    timing_rows = [
+        json.loads(line)
+        for line in (latest_root / "phase_timings.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in timing_rows] == ["train_rollout", "train_judge", "train_cache", "train_update"]
+    assert timing_rows[1]["skipped"] is True
+    assert timing_rows[1]["elapsed_seconds"] == 0.0
+
+
 def test_iteration_launcher_can_pass_resume_to_rollout_collection(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     latest_root = tmp_path / "artifacts" / "train" / "demo"

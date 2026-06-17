@@ -79,6 +79,7 @@ class RolloutConfig:
     attention_backend: str | None = "TORCH_SDPA"
     max_model_len: int | None = None
     max_concurrent_episodes: int = 32
+    overlap_judge: bool = True
     max_new_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
