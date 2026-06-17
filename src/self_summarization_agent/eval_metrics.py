@@ -32,6 +32,12 @@ def write_eval_metrics(
     iteration: int,
     policy_checkpoint_id: str,
 ) -> dict[str, Any]:
+    output = Path(metrics_path)
+    if output.exists():
+        for row in _load_rows(output):
+            if row.get("iteration") == iteration and row.get("policy_checkpoint_id") == policy_checkpoint_id:
+                return row
+
     rows = _load_rows(judged_rollout_path)
     correct = 0
     malformed = 0
@@ -59,7 +65,7 @@ def write_eval_metrics(
         "eval_malformed": malformed,
         "eval_parse_errors": parse_errors,
     }
-    append_jsonl(metrics_path, record)
+    append_jsonl(output, record)
     return record
 
 

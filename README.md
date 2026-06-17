@@ -245,7 +245,7 @@ python -m self_summarization_agent.rollout_collection --config configs/train/def
 python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl --resume
 python -m self_summarization_agent.judge_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/raw-rollouts.jsonl --output /path/to/judged-rollouts.jsonl
 python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/judged-rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --resume-rollouts
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --resume
 ```
 
 For the intended GPU run:
@@ -254,10 +254,10 @@ For the intended GPU run:
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
 - rollout collection writes raw, unjudged trajectories by default; `--judge-inline` is only a compatibility path
 - `judge_step` loads the judge model after collection, can use a different judge model from `judge.model_path`, and writes judged rollouts with `turn_rewards`
-- interrupted rollout collection can be resumed with `--resume`; existing rows are validated against the current checkpoint and skipped by `(query_id, rollout_index)`
+- interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes judged rollout JSONL and applies `training.update_epochs` clipped GRPO passes over the collected batch
-- evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and appends accuracy to `eval_metrics.jsonl`
+- evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 ## Notes
