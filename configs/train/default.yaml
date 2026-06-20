@@ -45,7 +45,7 @@ rollout:
   gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend: TORCH_SDPA
-  max_model_len: 16000
+  max_model_len: 17000
   max_concurrent_episodes: 32
   overlap_judge: true
   max_new_tokens: 8192
@@ -55,7 +55,7 @@ rollout:
 
 runtime:
   context_threshold_tokens: 14000
-  max_context_tokens: 16000
+  max_context_tokens: 17000
   tool_budget: 16
 
 judge:
