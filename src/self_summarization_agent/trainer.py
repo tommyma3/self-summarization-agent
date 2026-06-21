@@ -129,6 +129,24 @@ def _microbatch_ranges(start: int, end: int, microbatch_size: int):
         yield microbatch_start, min(microbatch_start + microbatch_size, end)
 
 
+class _AllReduceSum(torch.autograd.Function):
+    """Differentiable wrapper for a sum reduction across distributed ranks.
+
+    ``torch.distributed.all_reduce`` is not registered with the autograd
+    dispatcher, so back-propagating through it triggers a deprecation warning
+    (and will eventually error).  For a *sum* reduction the gradient is the
+    identity, so we explicitly implement that here.
+    """
+
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, reduce_fn) -> torch.Tensor:
+        return reduce_fn(tensor.detach())
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return grad_output, None
+
+
 def _clipped_grpo_loss(
     logprob: torch.Tensor,
     reference_logprob: torch.Tensor,
@@ -722,7 +740,7 @@ class FSDP2ContextParallelPolicyTrainer:
                 completion_mask,
             )
 
-        global_logprob_sums = self._accelerator_reduce(local_logprob_sums)
+        global_logprob_sums = _AllReduceSum.apply(local_logprob_sums, self._accelerator_reduce)
         with torch.no_grad():
             global_token_counts = self._accelerator_reduce(local_token_counts.detach())
         return torch.where(
