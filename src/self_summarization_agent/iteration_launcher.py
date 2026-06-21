@@ -499,10 +499,8 @@ def run_training_iteration(
     )
     retrieval_worker_process = None
     retrieval_worker_url = None
-    needs_retrieval_worker = config.retrieval.persistent_worker and (
-        not train_raw_complete or config.dataset.eval_limit > 0
-    )
-    if needs_retrieval_worker:
+    needs_train_retrieval_worker = config.retrieval.persistent_worker and not train_raw_complete
+    if needs_train_retrieval_worker:
         retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
             config_path=config_path,
             train_dir=train_dir,
@@ -514,15 +512,20 @@ def run_training_iteration(
     try:
         if retrieval_worker_url:
             rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
-        _run_or_skip_phase(
-            phase="train_rollout",
-            iteration=iteration,
-            command=rollout_command,
-            command_runner=command_runner,
-            timings_path=phase_timings_path,
-            completed=train_raw_complete,
-            error_message="Rollout subprocess",
-        )
+        try:
+            _run_or_skip_phase(
+                phase="train_rollout",
+                iteration=iteration,
+                command=rollout_command,
+                command_runner=command_runner,
+                timings_path=phase_timings_path,
+                completed=train_raw_complete,
+                error_message="Rollout subprocess",
+            )
+        finally:
+            _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
+            retrieval_worker_process = None
+            retrieval_worker_url = None
         train_judged_complete = should_resume and (
             training_already_advanced
             or _has_complete_judged_rollouts(
@@ -606,8 +609,6 @@ def run_training_iteration(
             eval_rollout_command.extend(["--set", "training.group_size=1"])
             if should_resume:
                 eval_rollout_command.append("--resume")
-            if retrieval_worker_url:
-                eval_rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
             eval_judge_command = [
                 python_executable,
                 "-m",
@@ -643,15 +644,29 @@ def run_training_iteration(
                 checkpoint_id=eval_checkpoint_id,
                 expected_count=eval_expected_count,
             )
-            _run_or_skip_phase(
-                phase="eval_rollout",
-                iteration=iteration,
-                command=eval_rollout_command,
-                command_runner=command_runner,
-                timings_path=phase_timings_path,
-                completed=eval_raw_complete,
-                error_message="Eval rollout subprocess",
-            )
+            if config.retrieval.persistent_worker and not eval_raw_complete:
+                retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
+                    config_path=config_path,
+                    train_dir=train_dir,
+                    python_executable=python_executable,
+                    overrides=overrides,
+                    startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
+                )
+                eval_rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
+            try:
+                _run_or_skip_phase(
+                    phase="eval_rollout",
+                    iteration=iteration,
+                    command=eval_rollout_command,
+                    command_runner=command_runner,
+                    timings_path=phase_timings_path,
+                    completed=eval_raw_complete,
+                    error_message="Eval rollout subprocess",
+                )
+            finally:
+                _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
+                retrieval_worker_process = None
+                retrieval_worker_url = None
             eval_judged_complete = should_resume and _has_complete_judged_rollouts(
                 eval_judged_rollout_path,
                 checkpoint_id=eval_checkpoint_id,

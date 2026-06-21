@@ -251,7 +251,8 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 
 For the intended GPU run:
 
-- rollout collection builds the FAISS searcher before vLLM, starts the overlap judge worker on GPU 1, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
+- each train or eval rollout uses a phase-scoped FAISS worker; the embedding model is unloaded before judging, caching, and policy weight updates
+- rollout collection starts the overlap judge worker on GPU 1, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
 - rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`

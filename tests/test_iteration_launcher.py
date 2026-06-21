@@ -299,7 +299,7 @@ def test_iteration_launcher_runs_eval_after_training_when_eval_split_configured(
     assert str(latest_root / "eval_metrics.jsonl") in calls[6]
 
 
-def test_iteration_launcher_reuses_persistent_retrieval_worker_for_rollout_phases(
+def test_iteration_launcher_scopes_retrieval_workers_to_rollout_phases(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -316,16 +316,23 @@ def test_iteration_launcher_reuses_persistent_retrieval_worker_for_rollout_phase
     calls = []
     worker_starts = []
     worker_stops = []
+    events = []
 
     class FakeWorkerProcess:
-        pass
+        def __init__(self, worker_id):
+            self.worker_id = worker_id
 
     def fake_start_worker(**kwargs):
+        worker_id = len(worker_starts) + 1
         worker_starts.append(kwargs)
-        return FakeWorkerProcess(), "http://127.0.0.1:12345"
+        events.append(f"start:{worker_id}")
+        return FakeWorkerProcess(worker_id), f"http://127.0.0.1:{12344 + worker_id}"
 
     def fake_stop_worker(process, url):
+        if process is None:
+            return
         worker_stops.append((process, url))
+        events.append(f"stop:{process.worker_id}")
 
     monkeypatch.setattr(
         "self_summarization_agent.iteration_launcher._start_retrieval_worker",
@@ -338,6 +345,7 @@ def test_iteration_launcher_reuses_persistent_retrieval_worker_for_rollout_phase
 
     def runner(command):
         calls.append(list(command))
+        events.append(f"run:{command[command.index('-m') + 1]}")
         if "self_summarization_agent.train_step" in command:
             next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
             write_fake_checkpoint(next_checkpoint)
@@ -353,11 +361,61 @@ def test_iteration_launcher_reuses_persistent_retrieval_worker_for_rollout_phase
     )
 
     rollout_calls = [command for command in calls if "self_summarization_agent.rollout_collection" in command]
-    assert len(worker_starts) == 1
-    assert len(worker_stops) == 1
+    assert len(worker_starts) == 2
+    assert len(worker_stops) == 2
     assert len(rollout_calls) == 2
     assert all("--retrieval-worker-url" in command for command in rollout_calls)
-    assert all("http://127.0.0.1:12345" in command for command in rollout_calls)
+    assert "http://127.0.0.1:12345" in rollout_calls[0]
+    assert "http://127.0.0.1:12346" in rollout_calls[1]
+    judge_events = [index for index, event in enumerate(events) if event == "run:self_summarization_agent.judge_step"]
+    assert events.index("stop:1") < judge_events[0]
+    assert events.index("stop:1") < events.index("run:self_summarization_agent.train_step")
+    assert events.index("run:self_summarization_agent.train_step") < events.index("start:2")
+    assert events.index("stop:2") < judge_events[1]
+
+
+def test_iteration_launcher_stops_retrieval_worker_when_train_rollout_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = train_config(tmp_path)
+    config.retrieval.persistent_worker = True
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    worker_process = object()
+    worker_stops = []
+
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._start_retrieval_worker",
+        lambda **kwargs: (worker_process, "http://127.0.0.1:12345"),
+    )
+
+    def fake_stop_worker(process, url):
+        if process is not None:
+            worker_stops.append((process, url))
+
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._stop_retrieval_worker",
+        fake_stop_worker,
+    )
+
+    try:
+        run_training_iteration(
+            config,
+            config_path="train.yaml",
+            iteration=1,
+            latest_root=latest_root,
+            command_runner=lambda command: 7,
+            python_executable="python",
+        )
+    except RuntimeError as exc:
+        assert "Rollout subprocess failed with exit code 7" in str(exc)
+    else:
+        raise AssertionError("Expected train rollout failure")
+
+    assert worker_stops == [(worker_process, "http://127.0.0.1:12345")]
 
 
 def test_iteration_launcher_does_not_advance_latest_when_training_fails(tmp_path: Path) -> None:
@@ -607,12 +665,13 @@ def test_iteration_launcher_resume_after_training_runs_eval_next(tmp_path: Path)
     assert "self_summarization_agent.eval_metrics" in calls[2]
 
 
-def test_iteration_launcher_resume_after_eval_rollout_runs_eval_judge_next(tmp_path: Path) -> None:
+def test_iteration_launcher_resume_after_eval_rollout_runs_eval_judge_next(tmp_path: Path, monkeypatch) -> None:
     config = train_config(tmp_path)
     config.dataset.limit = 2
     config.dataset.train_limit = 1
     config.dataset.eval_limit = 1
     config.training.group_size = 1
+    config.retrieval.persistent_worker = True
     latest_root = tmp_path / "artifacts" / "train" / "demo"
     initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
     next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
@@ -624,6 +683,14 @@ def test_iteration_launcher_resume_after_eval_rollout_runs_eval_judge_next(tmp_p
     write_cached_rollouts(latest_root / "rollouts" / "iteration-00001.jsonl", "iteration-00000", count=1)
     write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=1)
     calls = []
+
+    def fail_if_worker_starts(**kwargs):
+        raise AssertionError("Completed rollout phases must not start a retrieval worker")
+
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._start_retrieval_worker",
+        fail_if_worker_starts,
+    )
 
     def runner(command):
         calls.append(list(command))
