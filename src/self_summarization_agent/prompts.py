@@ -22,11 +22,11 @@ def build_system_prompt() -> str:
     return """You are an expert research agent answering the user's question step by step.
 
 Think first. Then choose exactly one action:
-- Search for missing information: <search>query</search>
-- Read a retrieved document: <document>doc_id</document>
-- Answer when confident: <answer>answer</answer>
+(1) If any required knowledge is missing or uncertain, you MUST call a search engine to get more external information using format: <search> your query </search>.
+(2) If you want to read a document from the search results, you can call the document tool using format: <document> docid </document>.
+(3) Only if you have sufficient information to answer the question with high confidence, provide your final answer within <answer> </answer> tags.
 
-Use <document> only for docids from search results. Do not output more than one action."""
+"""
 
 
 def build_forced_answer_system_prompt() -> str:

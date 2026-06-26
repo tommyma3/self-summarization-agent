@@ -15,6 +15,9 @@ Requires-Dist: torch>=2.7.0
 Requires-Dist: transformers>=4.57.0
 Requires-Dist: vllm>=0.17.0
 Requires-Dist: accelerate>=1.13.0
+Provides-Extra: verl
+Requires-Dist: verl @ git+https://github.com/verl-project/verl.git ; extra == "verl"
+Requires-Dist: ray[default]>=2.40.0; extra == "verl"
 
 # Self-Summarization Agent
 
@@ -23,7 +26,7 @@ This repo contains the first runtime slice for a self-summarization agent on `Br
 Current scope:
 - runtime loop with `search`, `get_document`, and `finish`
 - runtime-controlled summarization after completed tool rounds
-- trajectory extraction for RL on `summary` and `final_answer` turns
+- trajectory extraction for RL on tool-call, `summary`, and `final_answer` turns
 - BrowseComp-style run export
 - smoke and unit-test entrypoints
 
@@ -45,6 +48,12 @@ uv sync --group dev
 ```
 
 The GPU training environment also needs vLLM and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
+
+For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
+
+```powershell
+uv sync --extra verl --group dev
+```
 
 If you prefer the project virtualenv directly:
 
@@ -145,7 +154,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated offline vLLM rollout collection plus one training update
+- `iteration_launcher` for process-isolated offline vLLM rollout collection, judging, and clipped GRPO training updates
 
 The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
@@ -166,6 +175,7 @@ The practical workflow is:
 6. Inspect:
    - rollout JSONL under `artifacts/train/.../rollouts/`
    - `metrics.jsonl`
+   - `eval_metrics.jsonl`
    - `accuracy_history.jsonl`
    - checkpoints
 
@@ -191,8 +201,8 @@ grouped = group_samples_by_query(samples)
 ```
 
 What the runtime returns:
-- `turn_records` for `summary` and `final_answer` turns
-- local malformed-tool records for non-trainable `tool` turns
+- `turn_records` for tool-call, `summary`, and `final_answer` turns
+- malformed tool-call records as negative trainable examples
 - `turn_rewards` aligned with those turn ids
 - `summary_turns`, `retrieved_docids`, and `tool_call_counts`
 
@@ -246,36 +256,62 @@ python scripts/plot_accuracy.py artifacts/train/qwen-bcplus-train/accuracy_histo
 
 Training notes:
 
-- the default training config uses queries 1-200 for training and 201-210 for evaluation
+- the default training config uses queries 1-780 for training and 781-830 for evaluation
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
 - the new process-isolated path uses `rollout.backend: vllm_offline` and `training.backend: fsdp2_context_parallel`
-- in the new path, each iteration collects rollout JSONL from the latest checkpoint, runs one training update, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+- in the new path, each iteration samples 100 training questions, collects raw rollout JSONL from the latest checkpoint, judges those rollouts, caches tokenized trainable sequences plus reference logprobs, runs clipped GRPO updates over the cached batch, evaluates the new checkpoint on the 50 held-out questions, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
 ### Process-isolated vLLM rollout/training loop
 
 The new orchestration path uses checkpoint files as the weight-sync boundary:
 
 ```powershell
-python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl
-python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.jsonl --resume
-python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --resume-rollouts
+python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.raw.jsonl --judged-output /path/to/rollouts.judged.jsonl
+python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.raw.jsonl --judged-output /path/to/rollouts.judged.jsonl --resume
+python -m self_summarization_agent.judge_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/raw-rollouts.jsonl --output /path/to/judged-rollouts.jsonl
+python -m self_summarization_agent.cache_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/judged-rollouts.jsonl --output /path/to/cached-rollouts.jsonl --resume
+python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/cached-rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --resume
 ```
 
 For the intended GPU run:
 
-- rollout collection builds the FAISS searcher before vLLM, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
+- each train or eval rollout uses a phase-scoped FAISS worker; the embedding model is unloaded before judging, caching, and policy weight updates
+- rollout collection starts the overlap judge worker on GPU 1, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
-- interrupted rollout collection can be resumed with `--resume`; existing rows are validated against the current checkpoint and skipped by `(query_id, rollout_index)`
+- rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
+- `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
+- `cache_step` loads the rollout checkpoint, writes tokenized trainable turns and frozen reference logprobs, and supports `--resume` for partially cached artifacts
+- interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
-- training applies one optimizer step after processing the full configured training split
+- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over the collected batch
+- evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
+
+### Optional verl/Ray training backend
+
+The `training.backend: verl_ray` path is an optional infrastructure pilot for running the policy update inside a Ray worker while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray actor, runs the current clipped GRPO update in the actor, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
+
+Example override:
+
+```powershell
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.num_gpus_per_worker=4
+```
+
+Useful `training.verl` knobs:
+
+- `address`: connect to an existing Ray cluster; leave unset for local Ray initialization inside the remote training job.
+- `num_gpus_per_worker`: GPU resources requested by the training actor; defaults to `len(training.gpu_ids)` or `training.data_parallel_size`.
+- `worker_backend`: currently `transformers`; this keeps the first verl/Ray path runnable without changing rollout artifacts.
+- `shutdown_ray`: shuts down Ray after checkpoint save when the train step owns Ray initialization.
+
+Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel` or `transformers`.
 
 ## Notes
 
 - The summarization trigger is runtime-controlled, not model-controlled.
 - Summarization happens only after a completed tool round.
-- RL training data is produced only from `summary` and `final_answer` turns.
-- Malformed tool calls terminate the rollout immediately and only penalize the offending tool turn.
+- RL training data is produced from tool-call, `summary`, and `final_answer` turns.
+- Malformed tool calls terminate the rollout immediately and assign negative trainable rewards to the recorded generated steps in that failed trajectory.

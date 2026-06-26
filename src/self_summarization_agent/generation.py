@@ -6,7 +6,12 @@ import os
 from typing import Any, Protocol
 
 import torch
-from transformers import AutoModelForMultimodalLM, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer
+
+try:
+    from transformers import AutoModelForMultimodalLM
+except ImportError:
+    AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
 
 from self_summarization_agent.config import JudgeConfig, ModelConfig
 
