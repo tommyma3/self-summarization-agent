@@ -19,54 +19,30 @@ def format_history_round(tool_name: str, arguments: dict[str, object], tool_resu
 
 
 def build_system_prompt() -> str:
-    return """You are a deep research AI agent.
+    return """You are an expert research agent answering the user's question step by step.
 
-Your response must include any reasoning first, then exactly one action tag.
-The final visible action must be one complete tag and nothing after it.
+Think first. Then choose exactly one action:
+- Search for missing information: <search>query</search>
+- Read a retrieved document: <document>doc_id</document>
+- Answer when confident: <answer>answer</answer>
 
-Available tools:
-- search: find candidate documents for a search query. Use <search>focused search query</search>
-- document: read one retrieved document by id. Use <document>returned-doc-id</document>
-- answer: submit the final answer. Use <answer>concise final answer</answer>
-
-Valid final action examples:
-<search>focused search query</search>
-<document>returned-doc-id</document>
-<answer>concise final answer</answer>
-
-Tool strategy:
-- Start with search unless the answer is already fully supported by the conversation.
-- Use focused search queries with names, dates, entities, and distinguishing facts from the question.
-- Use document only with docid values returned by search.
-- If evidence is insufficient, keep searching or reading documents.
-- Never answer from background knowledge or a guess.
-- Call answer only when the evidence is sufficient, and make the answer concise and directly responsive."""
+Use <document> only for docids from search results. Do not output more than one action."""
 
 
 def build_forced_answer_system_prompt() -> str:
-    return """You are a deep research AI agent at the final-answer boundary.
+    return """You are an expert research agent. You are at the final-answer boundary.
 
-The search/document tool-call budget is exhausted.
+Search and document actions are no longer available.
+Think first, then answer with exactly one action:
+<answer>best supported answer</answer>
 
-Your response must include any reasoning first, then exactly one answer tag.
-The final visible action must be one complete <answer>...</answer> tag and nothing after it.
-
-Available tool:
-- answer: submit the final answer. Use <answer>concise final answer</answer>
-
-Valid response example:
-<answer>concise final answer</answer>
-
-Final-answer strategy:
-- Do not call search or document.
-- Use only the current conversation, summary, and tool results.
-- Output the best concise answer supported by the evidence available now."""
+Use only the conversation, summary, and tool results."""
 
 
 def build_summary_system_prompt() -> str:
     return """You are a context summarization AI agent.
 
-Your task is to summarize the previous research context so another step of the same agent can continue the task.
+Your task is to summarize the previous research context so the research agent can continue the task.
 Return only the summary text after thinking.
 Do not emit a JSON tool call.
 """
@@ -74,8 +50,5 @@ Do not emit a JSON tool call.
 
 def build_summary_prompt() -> str:
     return (
-        "Write a clean summary containing only the essential information needed "
-        "to continue solving the task. Preserve normalized facts, current "
-        "hypotheses, unresolved questions, and useful next steps. Keep "
-        "evidence-grounded facts tied to doc_id citations. Keep the summary structured with bullet points. Use short sentences."
+        "Write a clean summary containing only the essential information needed to continue solving the task. Keep the summary structured. Use short sentences."
     )

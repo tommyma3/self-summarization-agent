@@ -312,8 +312,8 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert "Tool Budget Remaining" not in model.prompts[0]
     assert "Tool Budget Remaining" not in model.prompts[1]
     assert "### SYSTEM" in model.prompts[1]
-    assert "exactly one action tag" in model.prompts[1]
-    assert "Available tools:" in model.prompts[1]
+    assert "choose exactly one action" in model.prompts[1]
+    assert "Think first, then output one action tag" in model.prompts[1]
     assert "### USER\nquestion" in model.prompts[1]
     assert "### HISTORY\n<search>q</search>" in model.prompts[1]
     assert '<information>[{"docid": "doc-1", "snippet": "fact from doc-1"}]</information>' in model.prompts[1]
@@ -366,8 +366,8 @@ def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> N
     assert len(model.prompts) == 4
     acting_prompt_after_summary = model.prompts[3]
     assert "### SYSTEM" in acting_prompt_after_summary
-    assert "exactly one action tag" in acting_prompt_after_summary
-    assert "Available tools:" in acting_prompt_after_summary
+    assert "choose exactly one action" in acting_prompt_after_summary
+    assert "Think first, then output one action tag" in acting_prompt_after_summary
     assert "### USER\nquestion" in acting_prompt_after_summary
     assert "### SUMMARY\nsummary of old-doc only" in acting_prompt_after_summary
     assert "<search>first</search>" not in acting_prompt_after_summary
@@ -673,7 +673,7 @@ def test_runtime_forces_final_answer_after_tool_limit() -> None:
     assert result.turn_records[-1]["kind"] == "final_answer"
     assert "final-answer boundary" in model.prompts[1]
     assert "Tool Budget Remaining" not in model.prompts[1]
-    assert "Do not call search or document" in model.prompts[1]
+    assert "Search and document actions are no longer available" in model.prompts[1]
 
 
 def test_runtime_rejects_non_finish_action_after_tool_limit() -> None:

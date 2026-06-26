@@ -12,22 +12,22 @@ def test_build_system_prompt_mentions_tools() -> None:
     assert "search" in prompt
     assert "document" in prompt
     assert "answer" in prompt
-    assert "exactly one action tag" in prompt
+    assert "choose exactly one action" in prompt
     assert "Tool Budget Remaining" not in prompt
     assert "```" not in prompt
-    assert "reasoning first" in prompt
-    assert "Never answer from background knowledge or a guess" in prompt
-    assert "<search>focused search query</search>" in prompt
-    assert "<document>returned-doc-id</document>" in prompt
-    assert "<answer>concise final answer</answer>" in prompt
+    assert "Think first" in prompt
+    assert "Do not output more than one action" in prompt
+    assert "<search>query</search>" in prompt
+    assert "<document>doc_id</document>" in prompt
+    assert "<answer>answer</answer>" in prompt
 
 
 def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     prompt = build_forced_answer_system_prompt()
     assert "final-answer boundary" in prompt
     assert "Tool Budget Remaining" not in prompt
-    assert "Do not call search or document" in prompt
-    assert "<answer>concise final answer</answer>" in prompt
+    assert "Search and document actions are no longer available" in prompt
+    assert "<answer>best supported answer</answer>" in prompt
 
 
 def test_build_summary_prompt_mentions_doc_ids() -> None:

@@ -269,11 +269,8 @@ class EpisodeRuntime:
             pieces.append(self._build_transcript_block("HISTORY", "\n".join(history)))
         pieces.append(
             "### NEXT_ACTION\n"
-            "Return exactly one action tag for the next step. "
-            "After any thinking, the final visible action must be only <search>...</search>, "
-            "<document>...</document>, or <answer>...</answer>. "
-            "Do not include labels, markdown, code fences, explanations, or any text after the action tag. "
-            "Return one action only."
+            "Think first, then output one action tag: "
+            "<search>...</search>, <document>...</document>, or <answer>...</answer>."
         )
         return "\n".join(pieces)
 
@@ -297,10 +294,8 @@ class EpisodeRuntime:
             pieces.append(self._build_transcript_block("HISTORY", "\n".join(history)))
         pieces.append(
             "### NEXT_ACTION\n"
-            "The search/document budget is exhausted. "
-            "Return exactly one <answer>...</answer> tag. "
-            "After any thinking, the final visible action must be only the answer tag. "
-            "Do not include labels, markdown, code fences, explanations, or any text after the action tag."
+            "Search and document actions are no longer available. "
+            "Think first, then output one <answer>...</answer> tag."
         )
         return "\n".join(pieces)
 
