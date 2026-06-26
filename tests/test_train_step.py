@@ -22,6 +22,7 @@ class FakeUpdateMetrics:
     mean_reward: float
     mean_advantage: float
     loss: float
+    extra_metrics: dict | None = None
 
 
 class FakeTrainer:
@@ -180,6 +181,38 @@ def test_run_train_step_consumes_matching_rollouts_and_saves_checkpoint(tmp_path
     assert list(trainer.grouped_samples) == ["q1"]
     assert trainer.saved_checkpoints == [str(output_checkpoint)]
     assert (output_checkpoint / ".complete").exists()
+
+
+def test_run_train_step_writes_backend_and_extra_metrics(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    write_rollout(rollout_path, "step-00001")
+    output_checkpoint = tmp_path / "checkpoints" / "step-00002"
+    metrics_path = tmp_path / "step_metrics.jsonl"
+
+    class MetricsTrainer(FakeTrainer):
+        def step(self, grouped_samples):
+            metrics = super().step(grouped_samples)
+            metrics.extra_metrics = {"backend": "verl_ray", "verl_ray/sample_count": metrics.sample_count}
+            return metrics
+
+    config = train_config(tmp_path)
+    config.training.backend = "verl_ray"
+
+    run_train_step(
+        config,
+        checkpoint_path=checkpoint,
+        rollout_path=rollout_path,
+        output_checkpoint_path=output_checkpoint,
+        metrics_path=metrics_path,
+        trainer=MetricsTrainer(),
+    )
+
+    metric_row = json.loads(metrics_path.read_text(encoding="utf-8").strip())
+    assert metric_row["training_backend"] == "verl_ray"
+    assert metric_row["backend"] == "verl_ray"
+    assert metric_row["verl_ray/sample_count"] == 2
 
 
 def test_run_train_step_rejects_checkpoint_mismatch_before_trainer_mutation(tmp_path: Path) -> None:

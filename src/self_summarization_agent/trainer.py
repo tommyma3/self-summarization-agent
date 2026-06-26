@@ -42,6 +42,7 @@ class UpdateMetrics:
     optimizer_step_count: int = 0
     mean_policy_kl: float = 0.0
     clip_fraction: float = 0.0
+    extra_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def _copy_processor_configs(source_dir: str, target_dir: str) -> None:

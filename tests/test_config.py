@@ -111,3 +111,59 @@ training:
     assert config.judge.max_model_len == 8192
     assert config.training.backend == "fsdp2_context_parallel"
     assert config.training.context_parallel_size == 4
+
+
+def test_load_train_config_reads_verl_ray_section(tmp_path: Path) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        """
+experiment:
+  name: demo
+  seed: 7
+  output_root: output
+  bc_plus_root: bc-plus
+dataset: {}
+retrieval:
+  backend: faiss
+  index_path: indexes/corpus.pkl
+model:
+  backend: transformers
+  model_path: model-dir
+runtime:
+  context_threshold_tokens: 32
+  max_context_tokens: 64
+  tool_budget: 4
+judge:
+  enabled: true
+training:
+  backend: verl_ray
+  gpu_ids: [0, 1, 2, 3]
+  group_size: 2
+  verl:
+    address: auto
+    namespace: remote-train
+    num_cpus: 8
+    num_gpus_per_worker: 4
+    runtime_env:
+      env_vars:
+        TOKENIZERS_PARALLELISM: "true"
+    worker_backend: transformers
+    ignore_reinit_error: false
+    log_to_driver: false
+    shutdown_ray: false
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_train_config(config_path)
+
+    assert config.training.backend == "verl_ray"
+    assert config.training.verl.address == "auto"
+    assert config.training.verl.namespace == "remote-train"
+    assert config.training.verl.num_cpus == 8
+    assert config.training.verl.num_gpus_per_worker == 4
+    assert config.training.verl.runtime_env == {"env_vars": {"TOKENIZERS_PARALLELISM": "true"}}
+    assert config.training.verl.worker_backend == "transformers"
+    assert config.training.verl.ignore_reinit_error is False
+    assert config.training.verl.log_to_driver is False
+    assert config.training.verl.shutdown_ray is False

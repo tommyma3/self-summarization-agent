@@ -75,7 +75,15 @@ def run_train_step(
 
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
-        if config.training.backend == "fsdp2_context_parallel":
+        if config.training.backend == "verl_ray":
+            from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
+
+            trainer = VerlRayPolicyTrainer(
+                model_config,
+                config.training,
+                checkpoint_id=checkpoint_id,
+            )
+        elif config.training.backend == "fsdp2_context_parallel":
             if os.environ.get("RANK") is None:
                 warnings.warn(
                     "training.backend='fsdp2_context_parallel' requires accelerate launch. "
@@ -90,7 +98,8 @@ def run_train_step(
         else:
             raise NotImplementedError(
                 "The local environment cannot execute backend="
-                f"{config.training.backend!r}. Supported backends are 'transformers' and 'fsdp2_context_parallel'."
+                f"{config.training.backend!r}. Supported backends are 'transformers', "
+                "'fsdp2_context_parallel', and 'verl_ray'."
             )
 
     metrics = trainer.step(grouped_samples)
@@ -109,20 +118,20 @@ def run_train_step(
         mark_checkpoint_complete(output_checkpoint)
 
     if metrics_path is not None and is_main:
-        append_jsonl(
-            metrics_path,
-            {
-                "policy_checkpoint_id": checkpoint_id,
-                "next_checkpoint_id": checkpoint_id_from_path(output_checkpoint),
-                "sample_count": metrics.sample_count,
-                "mean_reward": metrics.mean_reward,
-                "mean_advantage": metrics.mean_advantage,
-                "loss": metrics.loss,
-                "optimizer_step_count": getattr(metrics, "optimizer_step_count", 0),
-                "mean_policy_kl": getattr(metrics, "mean_policy_kl", 0.0),
-                "clip_fraction": getattr(metrics, "clip_fraction", 0.0),
-            },
-        )
+        metrics_payload = {
+            "policy_checkpoint_id": checkpoint_id,
+            "next_checkpoint_id": checkpoint_id_from_path(output_checkpoint),
+            "training_backend": config.training.backend,
+            "sample_count": metrics.sample_count,
+            "mean_reward": metrics.mean_reward,
+            "mean_advantage": metrics.mean_advantage,
+            "loss": metrics.loss,
+            "optimizer_step_count": getattr(metrics, "optimizer_step_count", 0),
+            "mean_policy_kl": getattr(metrics, "mean_policy_kl", 0.0),
+            "clip_fraction": getattr(metrics, "clip_fraction", 0.0),
+        }
+        metrics_payload.update(getattr(metrics, "extra_metrics", {}) or {})
+        append_jsonl(metrics_path, metrics_payload)
     return output_checkpoint
 
 

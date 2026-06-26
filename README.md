@@ -28,6 +28,12 @@ uv sync --group dev
 
 The GPU training environment also needs vLLM and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
 
+For the optional SkillZero/verl-style Ray training backend, install the extra in the remote GPU environment:
+
+```powershell
+uv sync --extra verl --group dev
+```
+
 If you prefer the project virtualenv directly:
 
 ```powershell
@@ -262,6 +268,25 @@ For the intended GPU run:
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over the collected batch
 - evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
+
+### Optional verl/Ray training backend
+
+The `training.backend: verl_ray` path is an optional infrastructure pilot for running the policy update inside a Ray worker while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray actor, runs the current clipped GRPO update in the actor, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
+
+Example override:
+
+```powershell
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.num_gpus_per_worker=4
+```
+
+Useful `training.verl` knobs:
+
+- `address`: connect to an existing Ray cluster; leave unset for local Ray initialization inside the remote training job.
+- `num_gpus_per_worker`: GPU resources requested by the training actor; defaults to `len(training.gpu_ids)` or `training.data_parallel_size`.
+- `worker_backend`: currently `transformers`; this keeps the first verl/Ray path runnable without changing rollout artifacts.
+- `shutdown_ray`: shuts down Ray after checkpoint save when the train step owns Ray initialization.
+
+Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel` or `transformers`.
 
 ## Notes
 

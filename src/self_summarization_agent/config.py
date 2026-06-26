@@ -109,6 +109,19 @@ class JudgeConfig:
 
 
 @dataclass(slots=True)
+class VerlRayConfig:
+    address: str | None = None
+    namespace: str = "self-summarization-agent"
+    num_cpus: int | None = None
+    num_gpus_per_worker: float | None = None
+    runtime_env: dict[str, Any] = field(default_factory=dict)
+    worker_backend: str = "transformers"
+    ignore_reinit_error: bool = True
+    log_to_driver: bool = True
+    shutdown_ray: bool = True
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     backend: str = "transformers"
     gpu_ids: list[int] = field(default_factory=list)
@@ -132,6 +145,7 @@ class TrainingConfig:
     checkpoint_interval: int = 100
     eval_interval: int = 0
     max_grad_norm: float = 1.0
+    verl: VerlRayConfig = field(default_factory=VerlRayConfig)
 
 
 @dataclass(slots=True)
@@ -234,11 +248,22 @@ def _derive_rollout_config(raw: dict[str, Any], training: TrainingConfig) -> Rol
     return RolloutConfig()
 
 
+def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
+    training_section = dict(_require_section(raw, "training"))
+    verl_section = training_section.pop("verl", {})
+    if not isinstance(verl_section, dict):
+        raise ValueError("Config section 'training.verl' must be a mapping")
+    return TrainingConfig(
+        **training_section,
+        verl=VerlRayConfig(**verl_section),
+    )
+
+
 def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None) -> TrainConfig:
     raw = _load_yaml(path)
     if overrides:
         raw = apply_overrides(raw, overrides)
-    training = TrainingConfig(**_require_section(raw, "training"))
+    training = _load_training_config(raw)
     return TrainConfig(
         experiment=ExperimentConfig(**_require_section(raw, "experiment")),
         dataset=DatasetConfig(**_require_section(raw, "dataset")),

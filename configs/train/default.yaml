@@ -92,3 +92,13 @@ training:
   checkpoint_interval: 5
   eval_interval: 0
   max_grad_norm: 1.0
+  verl:
+    address:
+    namespace: self-summarization-agent
+    num_cpus:
+    num_gpus_per_worker:
+    runtime_env: {}
+    worker_backend: transformers
+    ignore_reinit_error: true
+    log_to_driver: true
+    shutdown_ray: true
