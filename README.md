@@ -28,7 +28,7 @@ uv sync --group dev
 
 The GPU training environment also needs vLLM and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
 
-For the optional SkillZero/verl-style Ray training backend, install the extra in the remote GPU environment:
+For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
 
 ```powershell
 uv sync --extra verl --group dev

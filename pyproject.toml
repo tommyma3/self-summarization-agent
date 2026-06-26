@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 verl = [
-  "verl @ git+https://github.com/ZJU-REAL/SkillZero.git",
+  "verl @ git+https://github.com/verl-project/verl.git",
   "ray[default]>=2.40.0",
 ]
 
