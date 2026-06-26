@@ -10,24 +10,24 @@ from self_summarization_agent.prompts import (
 def test_build_system_prompt_mentions_tools() -> None:
     prompt = build_system_prompt()
     assert "search" in prompt
-    assert "get_document" in prompt
-    assert "finish" in prompt
-    assert "exactly one JSON object" in prompt
+    assert "document" in prompt
+    assert "answer" in prompt
+    assert "exactly one action tag" in prompt
     assert "Tool Budget Remaining" not in prompt
-    assert "Do not wrap the JSON in ``` fences" in prompt
-    assert "After any internal reasoning" in prompt
-    assert "Never call finish from background knowledge or a guess" in prompt
-    assert '{"tool_name": "search", "arguments": {"query": "..."}}' in prompt
-    assert '{"tool_name": "get_document", "arguments": {"doc_id": "..."}}' in prompt
-    assert '{"tool_name": "finish", "arguments": {"answer": "..."}}' in prompt
+    assert "```" not in prompt
+    assert "reasoning first" in prompt
+    assert "Never answer from background knowledge or a guess" in prompt
+    assert "<search>focused search query</search>" in prompt
+    assert "<document>returned-doc-id</document>" in prompt
+    assert "<answer>concise final answer</answer>" in prompt
 
 
 def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     prompt = build_forced_answer_system_prompt()
     assert "final-answer boundary" in prompt
     assert "Tool Budget Remaining" not in prompt
-    assert "Do not call search or get_document" in prompt
-    assert '{"tool_name": "finish", "arguments": {"answer": "..."}}' in prompt
+    assert "Do not call search or document" in prompt
+    assert "<answer>concise final answer</answer>" in prompt
 
 
 def test_build_summary_prompt_mentions_doc_ids() -> None:

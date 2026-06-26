@@ -6,7 +6,11 @@ from typing import Any, Callable, Iterable, Protocol
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCallRecord, ToolRound
-from self_summarization_agent.prompts import build_forced_answer_system_prompt, build_system_prompt
+from self_summarization_agent.prompts import (
+    build_forced_answer_system_prompt,
+    build_system_prompt,
+    format_history_round,
+)
 from self_summarization_agent.rewards import (
     apply_malformed_tool_penalty,
     apply_terminal_reward,
@@ -18,6 +22,17 @@ from self_summarization_agent.trajectory import build_training_cache_from_token_
 _JSON_DECODER = json.JSONDecoder()
 _THINK_END_RE = re.compile(r"</think\s*>", flags=re.IGNORECASE)
 _THINK_START_RE = re.compile(r"^\s*<think\b[^>]*>", flags=re.IGNORECASE)
+_ACTION_TAGS = ("search", "document", "answer")
+_ACTION_OPEN_RE = {
+    tag: re.compile(rf"<\s*{tag}\s*>", flags=re.IGNORECASE) for tag in _ACTION_TAGS
+}
+_ACTION_BLOCK_RE = {
+    tag: re.compile(rf"<\s*{tag}\s*>(.*?)<\s*/\s*{tag}\s*>", flags=re.IGNORECASE | re.DOTALL)
+    for tag in _ACTION_TAGS
+}
+_ACTION_CLOSE_RE = {
+    tag: re.compile(rf"<\s*/\s*{tag}\s*>", flags=re.IGNORECASE) for tag in _ACTION_TAGS
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +74,55 @@ def _iter_json_objects(text: str):
         yield parsed
 
 
-def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
+def _action_text(raw_output: str) -> str:
+    extracted = _extract_completed_thinking(raw_output)
+    return extracted.remainder if extracted is not None else raw_output.strip()
+
+
+def _trim_after_first_action_close(text: str) -> str:
+    first_end: int | None = None
+    for close_re in _ACTION_CLOSE_RE.values():
+        match = close_re.search(text)
+        if match is None:
+            continue
+        if first_end is None or match.end() < first_end:
+            first_end = match.end()
+    return text[:first_end] if first_end is not None else text
+
+
+def _action_tag_counts(text: str) -> dict[str, int]:
+    return {tag: len(open_re.findall(text)) for tag, open_re in _ACTION_OPEN_RE.items()}
+
+
+def _contains_action_tag(text: str) -> bool:
+    return any(_action_tag_counts(text).values())
+
+
+def _parse_tag_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
+    action_text = _action_text(raw_output)
+    counts = _action_tag_counts(action_text)
+    if not any(counts.values()):
+        return None
+    if sum(counts.values()) != 1:
+        return None
+
+    trimmed = _trim_after_first_action_close(action_text)
+    for tag, block_re in _ACTION_BLOCK_RE.items():
+        match = block_re.search(trimmed)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if tag == "search":
+            normalized = {"tool_name": "search", "arguments": {"query": value}}
+        elif tag == "document":
+            normalized = {"tool_name": "get_document", "arguments": {"doc_id": value}}
+        else:
+            normalized = {"tool_name": "finish", "arguments": {"answer": value}}
+        return normalized, json.dumps(normalized, ensure_ascii=False)
+    return None
+
+
+def _parse_json_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
     extracted = _extract_completed_thinking(raw_output)
     if extracted is None:
         return None
@@ -73,6 +136,15 @@ def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | No
             return normalized, json.dumps(normalized, ensure_ascii=False)
         return None
     return None
+
+
+def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
+    tag_result = _parse_tag_tool_call(raw_output)
+    if tag_result is not None:
+        return tag_result
+    if _contains_action_tag(_action_text(raw_output)):
+        return None
+    return _parse_json_tool_call(raw_output)
 
 
 def extract_summary_output(raw_output: str) -> SummaryExtraction:
@@ -185,18 +257,22 @@ class EpisodeRuntime:
         ]
         if state.latest_summary:
             pieces.append(self._build_transcript_block("SUMMARY", state.latest_summary))
-        for round_record in self._raw_tail_rounds(state):
-            pieces.extend(
-                [
-                    self._build_transcript_block("ASSISTANT_TOOL_CALL", round_record.assistant_message.content),
-                    self._build_transcript_block("TOOL_RESULT", round_record.tool_result.content),
-                ]
+        history = [
+            format_history_round(
+                round_record.tool_call.tool_name,
+                round_record.tool_call.arguments,
+                round_record.tool_result.content,
             )
+            for round_record in self._raw_tail_rounds(state)
+        ]
+        if history:
+            pieces.append(self._build_transcript_block("HISTORY", "\n".join(history)))
         pieces.append(
             "### NEXT_ACTION\n"
-            "Return exactly one JSON object for the next tool call. "
-            "After any thinking, the final visible action must be only the JSON object. "
-            "Do not include labels, markdown, code fences, explanations, or any text before or after the final JSON object. "
+            "Return exactly one action tag for the next step. "
+            "After any thinking, the final visible action must be only <search>...</search>, "
+            "<document>...</document>, or <answer>...</answer>. "
+            "Do not include labels, markdown, code fences, explanations, or any text after the action tag. "
             "Return one action only."
         )
         return "\n".join(pieces)
@@ -209,19 +285,22 @@ class EpisodeRuntime:
         ]
         if state.latest_summary:
             pieces.append(self._build_transcript_block("SUMMARY", state.latest_summary))
-        for round_record in self._raw_tail_rounds(state):
-            pieces.extend(
-                [
-                    self._build_transcript_block("ASSISTANT_TOOL_CALL", round_record.assistant_message.content),
-                    self._build_transcript_block("TOOL_RESULT", round_record.tool_result.content),
-                ]
+        history = [
+            format_history_round(
+                round_record.tool_call.tool_name,
+                round_record.tool_call.arguments,
+                round_record.tool_result.content,
             )
+            for round_record in self._raw_tail_rounds(state)
+        ]
+        if history:
+            pieces.append(self._build_transcript_block("HISTORY", "\n".join(history)))
         pieces.append(
             "### NEXT_ACTION\n"
-            "The search/get_document budget is exhausted. "
-            "Return exactly one JSON object using finish only. "
-            "After any thinking, the final visible action must be only the JSON object. "
-            "Do not include labels, markdown, code fences, explanations, or any text before or after the final JSON object."
+            "The search/document budget is exhausted. "
+            "Return exactly one <answer>...</answer> tag. "
+            "After any thinking, the final visible action must be only the answer tag. "
+            "Do not include labels, markdown, code fences, explanations, or any text after the action tag."
         )
         return "\n".join(pieces)
 

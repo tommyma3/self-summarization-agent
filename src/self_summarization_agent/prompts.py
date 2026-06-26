@@ -1,46 +1,64 @@
+def _tag_text(text: object) -> str:
+    return str(text).replace("</", "< /").strip()
+
+
+def format_action_tag(tool_name: str, arguments: dict[str, object]) -> str:
+    if tool_name == "search":
+        return f"<search>{_tag_text(arguments.get('query', ''))}</search>"
+    if tool_name == "get_document":
+        return f"<document>{_tag_text(arguments.get('doc_id', ''))}</document>"
+    if tool_name == "finish":
+        return f"<answer>{_tag_text(arguments.get('answer', ''))}</answer>"
+    return ""
+
+
+def format_history_round(tool_name: str, arguments: dict[str, object], tool_result: str) -> str:
+    action = format_action_tag(tool_name, arguments)
+    information = f"<information>{_tag_text(tool_result)}</information>"
+    return "\n".join(part for part in (action, information) if part)
+
+
 def build_system_prompt() -> str:
     return """You are a deep research AI agent.
 
-Your response must be exactly one JSON object for one tool call.
-After any internal reasoning, the final visible action must be only one JSON tool call.
-Do not wrap the JSON in ``` fences.
+Your response must include any reasoning first, then exactly one action tag.
+The final visible action must be one complete tag and nothing after it.
 
 Available tools:
-- search: find candidate documents for a search query. Returns objects with docid, snippet, and sometimes score. Use {"tool_name": "search", "arguments": {"query": "..."}}
-- get_document: read one retrieved document by id. Use {"tool_name": "get_document", "arguments": {"doc_id": "..."}}
-- finish: submit the final answer. Use {"tool_name": "finish", "arguments": {"answer": "..."}}
+- search: find candidate documents for a search query. Use <search>focused search query</search>
+- document: read one retrieved document by id. Use <document>returned-doc-id</document>
+- answer: submit the final answer. Use <answer>concise final answer</answer>
 
-Valid response examples:
-{"tool_name": "search", "arguments": {"query": "focused search query"}}
-{"tool_name": "get_document", "arguments": {"doc_id": "returned-doc-id"}}
-{"tool_name": "finish", "arguments": {"answer": "concise final answer"}}
+Valid final action examples:
+<search>focused search query</search>
+<document>returned-doc-id</document>
+<answer>concise final answer</answer>
 
 Tool strategy:
 - Start with search unless the answer is already fully supported by the conversation.
 - Use focused search queries with names, dates, entities, and distinguishing facts from the question.
-- Use get_document only with docid values returned by search, passed as the get_document doc_id argument.
+- Use document only with docid values returned by search.
 - If evidence is insufficient, keep searching or reading documents.
-- Never call finish from background knowledge or a guess.
-- Call finish only when the evidence is sufficient, and make the answer concise and directly responsive."""
+- Never answer from background knowledge or a guess.
+- Call answer only when the evidence is sufficient, and make the answer concise and directly responsive."""
 
 
 def build_forced_answer_system_prompt() -> str:
     return """You are a deep research AI agent at the final-answer boundary.
 
-The search/get_document tool-call budget is exhausted.
+The search/document tool-call budget is exhausted.
 
-Your response must be exactly one JSON object for the final answer.
-After any internal reasoning, the final visible action must be only one JSON object.
-Do not wrap the JSON in ``` fences.
+Your response must include any reasoning first, then exactly one answer tag.
+The final visible action must be one complete <answer>...</answer> tag and nothing after it.
 
 Available tool:
-- finish: submit the final answer. Use {"tool_name": "finish", "arguments": {"answer": "..."}}
+- answer: submit the final answer. Use <answer>concise final answer</answer>
 
 Valid response example:
-{"tool_name": "finish", "arguments": {"answer": "concise final answer"}}
+<answer>concise final answer</answer>
 
 Final-answer strategy:
-- Do not call search or get_document.
+- Do not call search or document.
 - Use only the current conversation, summary, and tool results.
 - Output the best concise answer supported by the evidence available now."""
 

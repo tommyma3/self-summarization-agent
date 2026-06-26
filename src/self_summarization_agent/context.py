@@ -1,9 +1,13 @@
-import json
 from dataclasses import dataclass
 from typing import Callable
 
-from self_summarization_agent.models import EpisodeState, ToolCallRecord
-from self_summarization_agent.prompts import build_summary_prompt, build_summary_system_prompt, build_system_prompt
+from self_summarization_agent.models import EpisodeState
+from self_summarization_agent.prompts import (
+    build_summary_prompt,
+    build_summary_system_prompt,
+    build_system_prompt,
+    format_history_round,
+)
 
 
 @dataclass(slots=True)
@@ -12,28 +16,17 @@ class ContextManager:
     max_context_tokens: int
     safety_margin_tokens: int = 256
 
-    def _serialize_tool_call(self, tool_call: ToolCallRecord) -> str:
-        return json.dumps(
-            {
-                "tool_name": tool_call.tool_name,
-                "arguments": tool_call.arguments,
-                "raw_output": tool_call.raw_output,
-                "is_valid": tool_call.is_valid,
-            },
-            sort_keys=True,
-        )
-
     def current_token_count(self, state: EpisodeState) -> int:
         pieces = [build_system_prompt(), state.user_prompt]
         if state.latest_summary:
             pieces.append(state.latest_summary)
         for round_record in state.rounds:
-            pieces.extend(
-                [
-                    round_record.assistant_message.content,
-                    self._serialize_tool_call(round_record.tool_call),
+            pieces.append(
+                format_history_round(
+                    round_record.tool_call.tool_name,
+                    round_record.tool_call.arguments,
                     round_record.tool_result.content,
-                ]
+                )
             )
         return self.token_counter("\n".join(pieces))
 
@@ -45,12 +38,12 @@ class ContextManager:
         if state.latest_summary:
             pieces.append(state.latest_summary)
         for round_record in state.rounds:
-            pieces.extend(
-                [
-                    round_record.assistant_message.content,
-                    self._serialize_tool_call(round_record.tool_call),
+            pieces.append(
+                format_history_round(
+                    round_record.tool_call.tool_name,
+                    round_record.tool_call.arguments,
                     round_record.tool_result.content,
-                ]
+                )
             )
         pieces.append(build_summary_prompt())
         return "\n".join(pieces)

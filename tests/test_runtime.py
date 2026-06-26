@@ -174,6 +174,30 @@ I should search first.
     assert normalized_output == '{"tool_name": "search", "arguments": {"query": "focused query"}}'
 
 
+def test_parse_model_tool_call_accepts_tag_actions_without_thinking() -> None:
+    parsed = parse_model_tool_call("<search>focused query</search>")
+
+    assert parsed is not None
+    payload, normalized_output = parsed
+    assert payload == {"tool_name": "search", "arguments": {"query": "focused query"}}
+    assert normalized_output == '{"tool_name": "search", "arguments": {"query": "focused query"}}'
+
+
+def test_parse_model_tool_call_normalizes_document_and_answer_tags() -> None:
+    document = parse_model_tool_call("<think>Need the full doc.</think>\n<document>doc-1</document>")
+    answer = parse_model_tool_call("<think>Enough evidence.</think>\n<answer>done</answer>")
+
+    assert document is not None
+    assert document[0] == {"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}
+    assert answer is not None
+    assert answer[0] == {"tool_name": "finish", "arguments": {"answer": "done"}}
+
+
+def test_parse_model_tool_call_rejects_mixed_or_repeated_tags() -> None:
+    assert parse_model_tool_call("<search>q</search><answer>a</answer>") is None
+    assert parse_model_tool_call("<search>q</search><search>q2</search>") is None
+
+
 def test_parse_model_tool_call_uses_first_valid_action_when_model_outputs_multiple() -> None:
     raw_output = """
 <think>
@@ -288,11 +312,11 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert "Tool Budget Remaining" not in model.prompts[0]
     assert "Tool Budget Remaining" not in model.prompts[1]
     assert "### SYSTEM" in model.prompts[1]
-    assert "exactly one JSON object" in model.prompts[1]
+    assert "exactly one action tag" in model.prompts[1]
     assert "Available tools:" in model.prompts[1]
     assert "### USER\nquestion" in model.prompts[1]
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in model.prompts[1]
-    assert '### TOOL_RESULT\n[{"docid": "doc-1", "snippet": "fact from doc-1"}]' in model.prompts[1]
+    assert "### HISTORY\n<search>q</search>" in model.prompts[1]
+    assert '<information>[{"docid": "doc-1", "snippet": "fact from doc-1"}]</information>' in model.prompts[1]
     assert "### NEXT_ACTION" in model.prompts[1]
 
 
@@ -342,14 +366,14 @@ def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> N
     assert len(model.prompts) == 4
     acting_prompt_after_summary = model.prompts[3]
     assert "### SYSTEM" in acting_prompt_after_summary
-    assert "exactly one JSON object" in acting_prompt_after_summary
+    assert "exactly one action tag" in acting_prompt_after_summary
     assert "Available tools:" in acting_prompt_after_summary
     assert "### USER\nquestion" in acting_prompt_after_summary
     assert "### SUMMARY\nsummary of old-doc only" in acting_prompt_after_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' not in acting_prompt_after_summary
-    assert '### TOOL_RESULT\n[{"docid": "old-doc", "snippet": ""}]' not in acting_prompt_after_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' in acting_prompt_after_summary
-    assert '### TOOL_RESULT\n[{"docid": "trigger-doc", "snippet": ""}]' in acting_prompt_after_summary
+    assert "<search>first</search>" not in acting_prompt_after_summary
+    assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' not in acting_prompt_after_summary
+    assert "<search>second</search>" in acting_prompt_after_summary
+    assert '<information>[{"docid": "trigger-doc", "snippet": ""}]</information>' in acting_prompt_after_summary
     assert "### NEXT_ACTION" in acting_prompt_after_summary
 
 
@@ -457,14 +481,14 @@ def test_runtime_summarizes_two_of_three_raw_rounds_and_leaves_newest_raw() -> N
     assert "Do not emit a JSON tool call" in summary_prompt
     assert "exactly one JSON object" not in summary_prompt
     assert "Available tools:" not in summary_prompt
-    assert '{"query": "first"}' in summary_prompt
-    assert '{"query": "second"}' in summary_prompt
-    assert '{"query": "third"}' not in summary_prompt
+    assert "<search>first</search>" in summary_prompt
+    assert "<search>second</search>" in summary_prompt
+    assert "<search>third</search>" not in summary_prompt
     acting_prompt_after_summary = model.prompts[4]
     assert "### SUMMARY\nsummary of first two rounds" in acting_prompt_after_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' not in acting_prompt_after_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' not in acting_prompt_after_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "third"}}' in acting_prompt_after_summary
+    assert "<search>first</search>" not in acting_prompt_after_summary
+    assert "<search>second</search>" not in acting_prompt_after_summary
+    assert "<search>third</search>" in acting_prompt_after_summary
 
 
 def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None:
@@ -490,8 +514,8 @@ def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None
     assert len(model.prompts) == 2
     acting_prompt = model.prompts[1]
     assert "### SUMMARY" not in acting_prompt
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "q"}}' in acting_prompt
-    assert '### TOOL_RESULT\n[{"docid": "doc-1", "snippet": "fact from doc-1"}]' in acting_prompt
+    assert "<search>q</search>" in acting_prompt
+    assert '<information>[{"docid": "doc-1", "snippet": "fact from doc-1"}]</information>' in acting_prompt
 
 
 def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
@@ -525,10 +549,10 @@ def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
     assert len(model.prompts) == 4
     acting_prompt_after_empty_summary = model.prompts[3]
     assert "### SUMMARY" not in acting_prompt_after_empty_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "first"}}' in acting_prompt_after_empty_summary
-    assert '### TOOL_RESULT\n[{"docid": "old-doc", "snippet": ""}]' in acting_prompt_after_empty_summary
-    assert '### ASSISTANT_TOOL_CALL\n{"tool_name": "search", "arguments": {"query": "second"}}' in acting_prompt_after_empty_summary
-    assert '### TOOL_RESULT\n[{"docid": "trigger-doc", "snippet": ""}]' in acting_prompt_after_empty_summary
+    assert "<search>first</search>" in acting_prompt_after_empty_summary
+    assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in acting_prompt_after_empty_summary
+    assert "<search>second</search>" in acting_prompt_after_empty_summary
+    assert '<information>[{"docid": "trigger-doc", "snippet": ""}]</information>' in acting_prompt_after_empty_summary
 
 
 def test_runtime_records_trainable_tool_summary_and_final_answer_turns() -> None:
@@ -649,7 +673,7 @@ def test_runtime_forces_final_answer_after_tool_limit() -> None:
     assert result.turn_records[-1]["kind"] == "final_answer"
     assert "final-answer boundary" in model.prompts[1]
     assert "Tool Budget Remaining" not in model.prompts[1]
-    assert "Do not call search or get_document" in model.prompts[1]
+    assert "Do not call search or document" in model.prompts[1]
 
 
 def test_runtime_rejects_non_finish_action_after_tool_limit() -> None:

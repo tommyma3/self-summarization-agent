@@ -45,7 +45,7 @@ class BatchRecordingGenerator:
         self.batch_sizes.append(len(prompts))
         outputs: list[str] = []
         for prompt in prompts:
-            if "### TOOL_RESULT" in prompt:
+            if "<information>" in prompt:
                 outputs.append(tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'))
             elif "question one" in prompt:
                 outputs.append(tool_output('{"tool_name": "search", "arguments": {"query": "question one"}}'))

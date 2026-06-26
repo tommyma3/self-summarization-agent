@@ -5,8 +5,8 @@ from self_summarization_agent.export import build_run_record
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel
 
 
-def _tool_output(json_text: str) -> str:
-    return f"<think>select next action</think>\n{json_text}"
+def _tool_output(action: str) -> str:
+    return f"<think>select next action</think>\n{action}"
 
 
 def build_smoke_run_record() -> dict[str, object]:
@@ -16,9 +16,9 @@ def build_smoke_run_record() -> dict[str, object]:
     )
     model = ScriptedModel(
         outputs=[
-            _tool_output('{"tool_name": "search", "arguments": {"query": "smoke question"}}'),
-            _tool_output('{"tool_name": "get_document", "arguments": {"doc_id": "smoke-doc"}}'),
-            _tool_output('{"tool_name": "finish", "arguments": {"answer": "smoke answer"}}'),
+            _tool_output("<search>smoke question</search>"),
+            _tool_output("<document>smoke-doc</document>"),
+            _tool_output("<answer>smoke answer</answer>"),
         ]
     )
     runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)

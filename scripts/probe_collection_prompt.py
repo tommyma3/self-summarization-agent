@@ -116,7 +116,7 @@ def main() -> None:
 
     print_thinking_diagnostics(generator, raw_output)
 
-    print("\n=== JSON Format Check ===")
+    print("\n=== Action Format Check ===")
     parsed_tool_call = parse_model_tool_call(raw_output)
     if parsed_tool_call is None:
         try:
@@ -124,7 +124,7 @@ def main() -> None:
         except json.JSONDecodeError as exc:
             print(f"invalid_json: {exc}")
         else:
-            print("invalid_tool_call: parsed JSON does not contain tool_name and object arguments")
+            print("invalid_tool_call: parsed action does not contain a supported tool and arguments")
         return
     parsed, normalized_output = parsed_tool_call
     if raw_output.strip() != normalized_output:
