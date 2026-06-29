@@ -77,7 +77,7 @@ judge:
   do_sample: false
 
 training:
-  backend: fsdp2_context_parallel
+  backend: verl_ray
   gpu_ids: [0, 1, 2, 3]
   fsdp_version: 2
   context_parallel_size: 1
