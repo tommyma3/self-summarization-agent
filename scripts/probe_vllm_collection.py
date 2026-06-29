@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Probe one training rollout with offline vLLM on 4 GPUs. "
-            "Runs one query until finish, malformed output, or tool budget exhaustion, "
+            "Runs one query until finish, malformed output, or tool budget exhaustion with forced answer, "
             "and writes every trainable prompt/completion sequence to the trace."
         )
     )

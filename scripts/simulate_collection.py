@@ -21,6 +21,7 @@ from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir, utc_timestamp
 from self_summarization_agent.models import EpisodeState, Message, ToolCallRecord, ToolRound
+from self_summarization_agent.prompts import build_forced_answer_system_prompt, format_history_round
 from self_summarization_agent.runtime import EpisodeRuntime, extract_summary_output, parse_model_tool_call
 
 
@@ -216,6 +217,31 @@ def _write_judge_output(
         handle.write("\n")
 
 
+def build_forced_answer_prompt(runtime: EpisodeRuntime, state: EpisodeState) -> str:
+    pieces = [
+        runtime._build_transcript_block("SYSTEM", build_forced_answer_system_prompt()),
+        runtime._build_transcript_block("USER", state.user_prompt),
+    ]
+    if state.latest_summary:
+        pieces.append(runtime._build_transcript_block("SUMMARY", state.latest_summary))
+    history = [
+        format_history_round(
+            round_record.tool_call.tool_name,
+            round_record.tool_call.arguments,
+            round_record.tool_result.content,
+        )
+        for round_record in runtime._raw_tail_rounds(state)
+    ]
+    if history:
+        pieces.append(runtime._build_transcript_block("HISTORY", "\n".join(history)))
+    pieces.append(
+        "### NEXT_ACTION\n"
+        "Search and document actions are no longer available. "
+        "Think first, then output one <answer>...</answer> tag."
+    )
+    return "\n".join(pieces)
+
+
 def trace_collection(
     *,
     runtime: EpisodeRuntime,
@@ -275,26 +301,95 @@ def trace_collection(
 
         while True:
             used_tools = sum(tool_call_counts.values())
+            round_number = len(state.rounds) + 1
+
             if runtime.max_tool_calls is not None and used_tools >= runtime.max_tool_calls:
+                # Force answer when tool budget is exhausted (mirrors EpisodeRuntime.run_many).
+                forced_prompt = build_forced_answer_prompt(runtime, state)
+                context_manager.assert_fits(forced_prompt)
                 write_prompt(
                     handle,
                     runtime=runtime,
                     generator=generator,
-                    title="Budget Exhausted Context",
-                    prompt=runtime._build_runtime_prompt(state),
+                    title=f"Round {round_number} Forced Answer Context",
+                    prompt=forced_prompt,
                     include_formatted_prompt=include_formatted_prompt,
                 )
-                write_section(handle, "Terminal Status", "status: budget_exhausted\n")
+                raw_output = runtime.model.generate(forced_prompt)
+                write_section(handle, f"Round {round_number} Forced Answer Model Output", raw_output)
+                parsed_tool_call = parse_model_tool_call(raw_output)
+                if parsed_tool_call is None:
+                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: forced answer is malformed\n")
+                    append_trainable_turn(
+                        turn_id=next_tool_turn_id(),
+                        kind="tool",
+                        prompt=forced_prompt,
+                        completion=raw_output,
+                    )
+                    write_training_sequences(
+                        handle,
+                        runtime=runtime,
+                        terminal_status="malformed_tool_call",
+                        trainable_turns=trainable_turns,
+                    )
+                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
+                    return
+
+                payload, normalized_output = parsed_tool_call
+                tool_name = payload["tool_name"]
+                arguments = payload["arguments"]
+
+                if tool_name != "finish":
+                    write_section(handle, "Terminal Status", f"status: malformed_tool_call\nreason: forced answer produced unsupported tool {tool_name!r}\n")
+                    append_trainable_turn(
+                        turn_id=next_tool_turn_id(),
+                        kind="tool",
+                        prompt=forced_prompt,
+                        completion=normalized_output,
+                    )
+                    write_training_sequences(
+                        handle,
+                        runtime=runtime,
+                        terminal_status="malformed_tool_call",
+                        trainable_turns=trainable_turns,
+                    )
+                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
+                    return
+
+                answer = arguments.get("answer") if isinstance(arguments, dict) else None
+                if not isinstance(answer, str):
+                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: forced answer finish.answer is not a string\n")
+                    append_trainable_turn(
+                        turn_id=next_tool_turn_id(),
+                        kind="tool",
+                        prompt=forced_prompt,
+                        completion=normalized_output,
+                    )
+                    write_training_sequences(
+                        handle,
+                        runtime=runtime,
+                        terminal_status="malformed_tool_call",
+                        trainable_turns=trainable_turns,
+                    )
+                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
+                    return
+
+                append_trainable_turn(
+                    turn_id="final-answer",
+                    kind="final_answer",
+                    prompt=forced_prompt,
+                    completion=raw_output,
+                )
+                write_section(handle, "Terminal Status", f"status: completed\nfinal_answer: {answer}\n")
                 write_training_sequences(
                     handle,
                     runtime=runtime,
-                    terminal_status="budget_exhausted",
+                    terminal_status="completed",
                     trainable_turns=trainable_turns,
                 )
-                _write_judge_output(handle, judge, example, "budget_exhausted", "")
+                _write_judge_output(handle, judge, example, "completed", answer)
                 return
 
-            round_number = len(state.rounds) + 1
             acting_prompt = runtime._build_runtime_prompt(state)
             context_manager.assert_fits(acting_prompt)
             write_prompt(
