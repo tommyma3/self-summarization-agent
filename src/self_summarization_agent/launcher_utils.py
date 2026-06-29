@@ -59,6 +59,7 @@ def serialize_runtime_result(
         "turn_records": list(result.turn_records),
         "retrieved_docids": list(result.retrieved_docids),
         "tool_call_counts": dict(result.tool_call_counts),
+        "token_usage": dict(result.token_usage),
         "judge": judge,
     }
     if include_rewards:
@@ -82,6 +83,7 @@ def build_runtime(
         context_threshold_tokens=runtime_config.context_threshold_tokens,
         max_context_tokens=runtime_config.max_context_tokens,
         max_tool_calls=runtime_config.tool_budget,
+        generated_token_budget=runtime_config.generated_token_budget,
         token_counter=token_counter,
         cache_policy_checkpoint_id=cache_policy_checkpoint_id,
     )

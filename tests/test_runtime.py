@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import main as cli_entrypoint
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.cli import build_smoke_run_record
+from self_summarization_agent.launcher_utils import serialize_runtime_result
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import extract_trainable_samples
 
@@ -692,6 +693,102 @@ def test_runtime_rejects_non_finish_action_after_tool_limit() -> None:
     assert result.status == "malformed_tool_call"
     assert result.tool_call_counts == {"search": 0, "get_document": 0}
     assert "final-answer boundary" in model.prompts[0]
+
+
+def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
+    search_output = tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')
+    answer_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}')
+    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={})
+    model = RecordingModel(outputs=[search_output, answer_output])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=100,
+        max_context_tokens=1024,
+        generated_token_budget=1,
+        token_counter=lambda text: 2 if text == search_output else 1,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.final_answer == "best available"
+    assert result.token_usage["reasoning_generated_tokens"] == 2
+    assert result.token_usage["forced_answer_generated_tokens"] == 1
+    assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
+    assert result.turn_records[0]["generation_kind"] == "action"
+    assert result.turn_records[1]["generation_kind"] == "forced_answer"
+    assert "Search and document actions are no longer available" in model.prompts[1]
+
+
+def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> None:
+    first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
+    second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
+    summary_output = "summary overhead tokens"
+    final_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
+
+    def count_tokens(text: str) -> int:
+        if text in {first_search, second_search, final_output}:
+            return 1
+        if text == summary_output:
+            return 50
+        return text.count("trigger-doc")
+
+    backend = FakeBackend(
+        search_index={
+            "first": ["old-doc"],
+            "second": ["trigger-doc"],
+        },
+        documents={},
+    )
+    model = RecordingModel(outputs=[first_search, second_search, summary_output, final_output])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1,
+        max_context_tokens=1024,
+        generated_token_budget=3,
+        token_counter=count_tokens,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.summary_turns == ["summary-1"]
+    assert result.token_usage["reasoning_generated_tokens"] == 3
+    assert result.token_usage["summary_generated_tokens"] == 50
+    assert result.token_usage["forced_answer_generated_tokens"] == 0
+    assert result.token_usage["forced_answer_reasons"] == []
+    assert result.token_usage["summary_count"] == 1
+    assert result.token_usage["retired_round_count"] == 1
+    assert result.turn_records[2]["generation_kind"] == "summary"
+    assert result.turn_records[3]["generation_kind"] == "action"
+
+
+def test_serialize_runtime_result_includes_token_usage() -> None:
+    backend = FakeBackend(search_index={}, documents={})
+    model = RecordingModel(outputs=[tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=100,
+        max_context_tokens=1024,
+        token_counter=lambda text: 7 if text.startswith("<think>") else 3,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+    payload = serialize_runtime_result(result, query_text="question")
+
+    assert payload["token_usage"] == result.token_usage
+    assert payload["token_usage"]["reasoning_generated_tokens"] == 7
+    assert payload["token_usage"]["prompt_tokens_by_turn"] == [
+        {
+            "turn_id": "final-answer",
+            "kind": "final_answer",
+            "generation_kind": "action",
+            "prompt_tokens": 3,
+        }
+    ]
 
 
 def test_runtime_applies_fit_check_to_full_summary_generation_prompt() -> None:

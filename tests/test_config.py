@@ -29,19 +29,26 @@ runtime:
   context_threshold_tokens: 32
   max_context_tokens: 64
   tool_budget: 4
+  generated_token_budget: 16
 """.strip(),
         encoding="utf-8",
     )
 
     config = load_run_config(
         config_path,
-        {"dataset.limit": 3, "retrieval.backend": "bm25", "runtime.tool_budget": 2},
+        {
+            "dataset.limit": 3,
+            "retrieval.backend": "bm25",
+            "runtime.tool_budget": 2,
+            "runtime.generated_token_budget": 8,
+        },
     )
 
     assert config.dataset.limit == 3
     assert config.retrieval.backend == "bm25"
     assert config.retrieval.snippet_tokenizer_path == "/models/qwen-tokenizer"
     assert config.runtime.tool_budget == 2
+    assert config.runtime.generated_token_budget == 8
 
 
 def test_load_train_config_reads_training_section(tmp_path: Path) -> None:

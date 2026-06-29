@@ -48,3 +48,4 @@ class RuntimeResult:
     retrieved_docids: list[str]
     tool_call_counts: dict[str, int] = field(default_factory=dict)
     turn_records: list[dict[str, Any]] = field(default_factory=list)
+    token_usage: dict[str, Any] = field(default_factory=dict)

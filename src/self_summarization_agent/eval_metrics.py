@@ -25,6 +25,42 @@ def _load_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _token_usage(row: dict[str, Any]) -> dict[str, Any]:
+    usage = row.get("token_usage")
+    return usage if isinstance(usage, dict) else {}
+
+
+def _tool_call_counts(row: dict[str, Any]) -> dict[str, Any]:
+    counts = row.get("tool_call_counts")
+    return counts if isinstance(counts, dict) else {}
+
+
+def _numeric_sum(rows: list[dict[str, Any]], field: str) -> float:
+    total = 0.0
+    for row in rows:
+        value = _token_usage(row).get(field, 0)
+        if isinstance(value, int | float):
+            total += float(value)
+    return total
+
+
+def _numeric_max(rows: list[dict[str, Any]], field: str) -> float:
+    maximum = 0.0
+    for row in rows:
+        value = _token_usage(row).get(field, 0)
+        if isinstance(value, int | float):
+            maximum = max(maximum, float(value))
+    return maximum
+
+
+def _average(total: float, count: int) -> float:
+    return total / count if count else 0.0
+
+
+def _per_1k(correct: int, tokens: float) -> float:
+    return correct / (tokens / 1000.0) if tokens > 0 else 0.0
+
+
 def write_eval_metrics(
     *,
     judged_rollout_path: str | Path,
@@ -55,6 +91,22 @@ def write_eval_metrics(
             parse_errors += 1
 
     total = len(rows)
+    reasoning_tokens = _numeric_sum(rows, "reasoning_generated_tokens")
+    summary_tokens = _numeric_sum(rows, "summary_generated_tokens")
+    forced_answer_tokens = _numeric_sum(rows, "forced_answer_generated_tokens")
+    total_generated_tokens = _numeric_sum(rows, "total_generated_tokens")
+    max_prompt_tokens_sum = _numeric_sum(rows, "max_prompt_tokens_seen")
+    summary_count = _numeric_sum(rows, "summary_count")
+    search_calls = sum(
+        float(_tool_call_counts(row).get("search", 0))
+        for row in rows
+        if isinstance(_tool_call_counts(row).get("search", 0), int | float)
+    )
+    document_calls = sum(
+        float(_tool_call_counts(row).get("get_document", 0))
+        for row in rows
+        if isinstance(_tool_call_counts(row).get("get_document", 0), int | float)
+    )
     record = {
         "iteration": iteration,
         "timestamp_utc": utc_timestamp(),
@@ -64,6 +116,21 @@ def write_eval_metrics(
         "eval_total": total,
         "eval_malformed": malformed,
         "eval_parse_errors": parse_errors,
+        "eval_reasoning_generated_tokens": reasoning_tokens,
+        "eval_summary_generated_tokens": summary_tokens,
+        "eval_forced_answer_generated_tokens": forced_answer_tokens,
+        "eval_total_generated_tokens": total_generated_tokens,
+        "eval_avg_reasoning_generated_tokens": _average(reasoning_tokens, total),
+        "eval_avg_summary_generated_tokens": _average(summary_tokens, total),
+        "eval_avg_forced_answer_generated_tokens": _average(forced_answer_tokens, total),
+        "eval_avg_total_generated_tokens": _average(total_generated_tokens, total),
+        "eval_avg_max_prompt_tokens_seen": _average(max_prompt_tokens_sum, total),
+        "eval_max_prompt_tokens_seen": _numeric_max(rows, "max_prompt_tokens_seen"),
+        "eval_avg_search_calls": _average(search_calls, total),
+        "eval_avg_document_calls": _average(document_calls, total),
+        "eval_avg_summary_count": _average(summary_count, total),
+        "eval_correct_per_1k_reasoning_tokens": _per_1k(correct, reasoning_tokens),
+        "eval_correct_per_1k_total_generated_tokens": _per_1k(correct, total_generated_tokens),
     }
     append_jsonl(output, record)
     return record

@@ -91,6 +91,7 @@ class RuntimeConfig:
     context_threshold_tokens: int = 24000
     max_context_tokens: int = 32768
     tool_budget: int = 16
+    generated_token_budget: int | None = None
 
 
 @dataclass(slots=True)
