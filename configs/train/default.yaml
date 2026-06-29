@@ -12,6 +12,10 @@ dataset:
   train_limit: 800
   eval_limit: 50
 
+collection:
+  train_task_count: 50
+  eval_task_count: 50
+
 retrieval:
   backend: faiss
   top_k: 5
@@ -57,6 +61,7 @@ runtime:
   context_threshold_tokens: 14000
   max_context_tokens: 18000
   tool_budget: 16
+  generated_token_budget: 32768
 
 judge:
   enabled: true
@@ -82,7 +87,6 @@ training:
   epochs: 10
   steps: 10
   group_size: 4
-  rollout_query_count: 50
   update_epochs: 2
   minibatch_size: 128
   clip_range: 0.2

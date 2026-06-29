@@ -72,6 +72,7 @@ runtime:
   context_threshold_tokens: 32
   max_context_tokens: 64
   tool_budget: 4
+  generated_token_budget: 16
 judge:
   enabled: true
   backend: vllm_offline
@@ -79,6 +80,9 @@ judge:
   gpu_ids: [4, 5]
   tensor_parallel_size: 2
   max_model_len: 8192
+collection:
+  train_task_count: 25
+  eval_task_count: 5
 training:
   backend: fsdp2_context_parallel
   gpu_ids: [0, 1, 2, 3]
@@ -98,6 +102,9 @@ training:
 
     config = load_train_config(config_path)
 
+    assert config.runtime.generated_token_budget == 16
+    assert config.collection.train_task_count == 25
+    assert config.collection.eval_task_count == 5
     assert config.training.steps == 3
     assert config.training.batch_size == 2
     assert config.training.group_size == 2

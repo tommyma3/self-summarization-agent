@@ -200,6 +200,8 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _expected_train_rollout_count(config) -> int | None:
+    if config.collection.train_task_count is not None:
+        return config.collection.train_task_count * config.training.group_size
     if config.training.rollout_query_count is not None:
         return config.training.rollout_query_count * config.training.group_size
     if config.dataset.train_limit is not None:
@@ -213,6 +215,8 @@ def _expected_train_rollout_count(config) -> int | None:
 
 
 def _expected_eval_rollout_count(config) -> int:
+    if config.collection.eval_task_count is not None:
+        return config.collection.eval_task_count
     if config.dataset.train_limit is None:
         return 0
     if config.dataset.limit is None:

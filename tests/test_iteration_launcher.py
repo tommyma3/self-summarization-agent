@@ -478,6 +478,39 @@ def test_iteration_launcher_resume_after_train_rollout_runs_judge_next(tmp_path:
     assert all("self_summarization_agent.rollout_collection" not in command for command in calls)
 
 
+def test_iteration_launcher_resume_uses_collection_train_task_count(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.limit = 5
+    config.dataset.train_limit = 5
+    config.training.group_size = 2
+    config.collection.train_task_count = 1
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=2)
+    calls = []
+
+    def runner(command):
+        calls.append(list(command))
+        if "self_summarization_agent.train_step" in command:
+            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+        resume=True,
+    )
+
+    assert "self_summarization_agent.judge_step" in calls[0]
+    assert all("self_summarization_agent.rollout_collection" not in command for command in calls)
+
+
 def test_iteration_launcher_resume_after_train_judge_runs_cache_next(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     latest_root = tmp_path / "artifacts" / "train" / "demo"
@@ -710,6 +743,54 @@ def test_iteration_launcher_resume_after_eval_rollout_runs_eval_judge_next(tmp_p
     assert "--split" in calls[0]
     assert "eval" in calls[0]
     assert "self_summarization_agent.eval_metrics" in calls[1]
+
+
+def test_iteration_launcher_resume_uses_collection_eval_task_count(tmp_path: Path, monkeypatch) -> None:
+    config = train_config(tmp_path)
+    config.dataset.limit = 5
+    config.dataset.train_limit = 2
+    config.dataset.eval_limit = 3
+    config.training.group_size = 1
+    config.collection.eval_task_count = 2
+    config.retrieval.persistent_worker = True
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
+    write_fake_checkpoint(initial_checkpoint)
+    write_fake_checkpoint(next_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=2)
+    write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.judged.jsonl", "iteration-00000", count=2)
+    write_cached_rollouts(latest_root / "rollouts" / "iteration-00001.jsonl", "iteration-00000", count=2)
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=2)
+    calls = []
+
+    def fail_if_worker_starts(**kwargs):
+        raise AssertionError("Completed eval rollout phase must not start a retrieval worker")
+
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._start_retrieval_worker",
+        fail_if_worker_starts,
+    )
+
+    def runner(command):
+        calls.append(list(command))
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+        resume=True,
+    )
+
+    assert "self_summarization_agent.judge_step" in calls[0]
+    assert "--split" in calls[0]
+    assert "eval" in calls[0]
+    assert "self_summarization_agent.rollout_collection" not in calls[0]
 
 
 def test_iteration_launcher_resume_after_eval_judge_runs_eval_metrics_next(tmp_path: Path) -> None:

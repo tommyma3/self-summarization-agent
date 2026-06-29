@@ -98,6 +98,42 @@ def _example_payload(example: QueryExample) -> dict[str, Any]:
     }
 
 
+def _configured_task_count(config, *, split: str) -> tuple[int | None, str | None]:
+    if split == "train":
+        if config.collection.train_task_count is not None:
+            return config.collection.train_task_count, "collection.train_task_count"
+        if config.training.rollout_query_count is not None:
+            return config.training.rollout_query_count, "training.rollout_query_count"
+        return None, None
+    if split == "eval":
+        if config.collection.eval_task_count is not None:
+            return config.collection.eval_task_count, "collection.eval_task_count"
+        return None, None
+    raise ValueError(f"Unsupported rollout split: {split}")
+
+
+def _select_collection_examples(
+    examples: list[QueryExample],
+    *,
+    task_count: int | None,
+    task_count_key: str | None,
+    split: str,
+    seed: int,
+) -> list[QueryExample]:
+    if task_count is None:
+        return examples
+    if task_count < 1:
+        raise ValueError(f"{task_count_key} must be at least 1, got {task_count}")
+    if task_count > len(examples):
+        raise ValueError(
+            f"{task_count_key} cannot exceed available {split} queries: "
+            f"{task_count} > {len(examples)}"
+        )
+    if split == "train":
+        return random.Random(seed).sample(examples, task_count)
+    return examples[:task_count]
+
+
 class _InProcessOverlapJudgeClient:
     def __init__(self, *, judge: Any, checkpoint_id: str) -> None:
         self.judge = judge
@@ -275,17 +311,15 @@ def collect_rollouts(
     else:
         raise ValueError(f"Unsupported rollout split: {split}")
 
-    rollout_query_count = config.training.rollout_query_count if split == "train" else None
-    if rollout_query_count is not None:
-        if rollout_query_count < 1:
-            raise ValueError(f"training.rollout_query_count must be at least 1, got {rollout_query_count}")
-        if rollout_query_count > len(selected_examples):
-            raise ValueError(
-                "training.rollout_query_count cannot exceed available training queries: "
-                f"{rollout_query_count} > {len(selected_examples)}"
-            )
-        seed = config.experiment.seed if sample_seed is None else sample_seed
-        selected_examples = random.Random(seed).sample(selected_examples, rollout_query_count)
+    task_count, task_count_key = _configured_task_count(config, split=split)
+    seed = config.experiment.seed if sample_seed is None else sample_seed
+    selected_examples = _select_collection_examples(
+        selected_examples,
+        task_count=task_count,
+        task_count_key=task_count_key,
+        split=split,
+        seed=seed,
+    )
     if not selected_examples:
         raise ValueError(f"No {split} queries available for rollout collection")
 

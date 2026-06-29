@@ -95,6 +95,12 @@ class RuntimeConfig:
 
 
 @dataclass(slots=True)
+class CollectionConfig:
+    train_task_count: int | None = None
+    eval_task_count: int | None = None
+
+
+@dataclass(slots=True)
 class JudgeConfig:
     enabled: bool = True
     backend: str | None = None
@@ -168,6 +174,7 @@ class TrainConfig:
     runtime: RuntimeConfig
     judge: JudgeConfig
     training: TrainingConfig
+    collection: CollectionConfig = field(default_factory=CollectionConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
 
 
@@ -273,6 +280,7 @@ def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None)
         runtime=RuntimeConfig(**_require_section(raw, "runtime")),
         judge=JudgeConfig(**_require_section(raw, "judge")),
         training=training,
+        collection=CollectionConfig(**_require_section(raw, "collection")),
         rollout=_derive_rollout_config(raw, training),
     )
 

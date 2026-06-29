@@ -274,6 +274,63 @@ def test_collect_rollouts_samples_configured_training_query_count(tmp_path: Path
     assert [row["query_id"] for row in rows] == [example.query_id for example in expected_examples]
 
 
+def test_collect_rollouts_prefers_collection_train_task_count(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.train_limit = 5
+    config.training.group_size = 1
+    config.training.rollout_query_count = 4
+    config.collection.train_task_count = 2
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    examples = [
+        QueryExample(query_id=f"q{index}", query=f"question {index}", answer="done")
+        for index in range(5)
+    ]
+    output_path = tmp_path / "rollouts.jsonl"
+
+    collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=output_path,
+        examples=examples,
+        backend=FakeBackend(search_index={}, documents={}),
+        generator=FinishingGenerator(),
+        sample_seed=123,
+    )
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    expected_examples = random.Random(123).sample(examples, 2)
+    assert [row["query_id"] for row in rows] == [example.query_id for example in expected_examples]
+
+
+def test_collect_rollouts_uses_collection_eval_task_count(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.train_limit = 2
+    config.dataset.eval_limit = 3
+    config.training.group_size = 1
+    config.collection.eval_task_count = 2
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    examples = [
+        QueryExample(query_id=f"q{index}", query=f"question {index}", answer="done")
+        for index in range(5)
+    ]
+    output_path = tmp_path / "eval-rollouts.jsonl"
+
+    collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=output_path,
+        examples=examples,
+        backend=FakeBackend(search_index={}, documents={}),
+        generator=FinishingGenerator(),
+        split="eval",
+    )
+
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["query_id"] for row in rows] == ["q2", "q3"]
+
+
 def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     config.dataset.train_limit = 2
