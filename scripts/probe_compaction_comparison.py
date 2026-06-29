@@ -107,6 +107,9 @@ def build_rollout_model_config(config: Any, args: argparse.Namespace) -> Any:
         backend="vllm",
         tensor_parallel_size=args.tensor_parallel_size,
         attention_backend=args.attention_backend,
+        max_model_len=config.rollout.max_model_len
+        if config.rollout.max_model_len is not None
+        else config.model.max_model_len,
         max_new_tokens=args.max_new_tokens
         if args.max_new_tokens is not None
         else (config.rollout.max_new_tokens if config.rollout.max_new_tokens is not None else config.model.max_new_tokens),
@@ -179,6 +182,41 @@ def _default_output_dir(comparison: dict[str, Any], config: Any) -> Path:
     return ensure_dir(Path(config.experiment.output_root) / "artifacts" / "compaction_comparison_probe" / config.experiment.name)
 
 
+def _max_optional_int(values: list[int | None]) -> int | None:
+    concrete_values = [value for value in values if value is not None]
+    return max(concrete_values) if concrete_values else None
+
+
+def _load_condition_configs(
+    *,
+    base_config_path: Path,
+    conditions: dict[str, Any],
+    common_overrides: dict[str, Any],
+) -> dict[str, Any]:
+    condition_configs: dict[str, Any] = {}
+    for condition_name, condition_config in conditions.items():
+        if not isinstance(condition_config, dict):
+            raise ValueError(f"Condition {condition_name!r} must be a mapping")
+        condition_overrides = dict(common_overrides)
+        condition_cfg_overrides = condition_config.get("overrides", {})
+        if isinstance(condition_cfg_overrides, dict):
+            condition_overrides.update(condition_cfg_overrides)
+        condition_configs[str(condition_name)] = load_train_config(base_config_path, condition_overrides)
+    return condition_configs
+
+
+def _shared_probe_config(base_train_config: Any, condition_configs: dict[str, Any]) -> Any:
+    max_model_len = _max_optional_int(
+        [
+            config.rollout.max_model_len
+            if config.rollout.max_model_len is not None
+            else config.model.max_model_len
+            for config in condition_configs.values()
+        ]
+    )
+    return replace(base_train_config, rollout=replace(base_train_config.rollout, max_model_len=max_model_len))
+
+
 def main() -> None:
     args = parse_args()
     if args.attention_backend:
@@ -221,10 +259,16 @@ def main() -> None:
         seed=seed,
     )
 
+    condition_train_configs = _load_condition_configs(
+        base_config_path=base_config_path,
+        conditions=conditions,
+        common_overrides=merged_common_overrides,
+    )
+
     backend = build_backend(base_train_config.experiment.bc_plus_root, base_train_config.retrieval)
     if args.vllm_gpus:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.vllm_gpus
-    rollout_model_config = build_rollout_model_config(base_train_config, args)
+    rollout_model_config = build_rollout_model_config(_shared_probe_config(base_train_config, condition_train_configs), args)
     generator = build_generator(rollout_model_config)
     judge = build_judge(base_train_config, rollout_model_config, generator)
 
@@ -232,17 +276,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_query_id = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in example.query_id)
 
-    for condition_name, condition_config in conditions.items():
+    for condition_name in conditions:
         print(f"\n--- Probing condition: {condition_name} ---")
-        if not isinstance(condition_config, dict):
-            raise ValueError(f"Condition {condition_name!r} must be a mapping")
-
-        condition_overrides = dict(merged_common_overrides)
-        condition_cfg_overrides = condition_config.get("overrides", {})
-        if isinstance(condition_cfg_overrides, dict):
-            condition_overrides.update(condition_cfg_overrides)
-
-        condition_train_config = load_train_config(base_config_path, condition_overrides)
+        condition_train_config = condition_train_configs[str(condition_name)]
         runtime = build_runtime(generator, backend, condition_train_config.runtime)
 
         condition_dir = output_dir / str(condition_name)

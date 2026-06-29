@@ -261,6 +261,8 @@ def trace_collection(
     tool_call_counts = {"search": 0, "get_document": 0}
     retrieved_docids: list[str] = []
     trainable_turns: list[dict[str, str]] = []
+    reasoning_generated_tokens = 0
+    forced_answer_generated_tokens = 0
 
     def append_trainable_turn(
         *,
@@ -296,15 +298,25 @@ def trace_collection(
                 "context_threshold_tokens": runtime.context_threshold_tokens,
                 "max_context_tokens": runtime.max_context_tokens,
                 "tool_budget": runtime.max_tool_calls,
+                "generated_token_budget": runtime.generated_token_budget,
+                "generator_max_model_len": getattr(generator, "max_model_len", None),
             },
         )
 
         while True:
             used_tools = sum(tool_call_counts.values())
             round_number = len(state.rounds) + 1
-
+            forced_reasons: list[str] = []
             if runtime.max_tool_calls is not None and used_tools >= runtime.max_tool_calls:
-                # Force answer when tool budget is exhausted (mirrors EpisodeRuntime.run_many).
+                forced_reasons.append("tool_budget")
+            if (
+                runtime.generated_token_budget is not None
+                and reasoning_generated_tokens >= runtime.generated_token_budget
+            ):
+                forced_reasons.append("generated_token_budget")
+
+            if forced_reasons:
+                # Force answer when runtime budgets are exhausted (mirrors EpisodeRuntime.run_many).
                 forced_prompt = build_forced_answer_prompt(runtime, state)
                 context_manager.assert_fits(forced_prompt)
                 write_prompt(
@@ -315,7 +327,23 @@ def trace_collection(
                     prompt=forced_prompt,
                     include_formatted_prompt=include_formatted_prompt,
                 )
+                write_section(
+                    handle,
+                    f"Round {round_number} Forced Answer Reasons",
+                    json.dumps(
+                        {
+                            "forced_answer_reasons": forced_reasons,
+                            "reasoning_generated_tokens": reasoning_generated_tokens,
+                            "generated_token_budget": runtime.generated_token_budget,
+                            "used_tools": used_tools,
+                            "tool_budget": runtime.max_tool_calls,
+                        },
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
+                )
                 raw_output = runtime.model.generate(forced_prompt)
+                forced_answer_generated_tokens += runtime._completion_token_count(raw_output)
                 write_section(handle, f"Round {round_number} Forced Answer Model Output", raw_output)
                 parsed_tool_call = parse_model_tool_call(raw_output)
                 if parsed_tool_call is None:
@@ -402,6 +430,7 @@ def trace_collection(
             )
 
             raw_output = runtime.model.generate(acting_prompt)
+            reasoning_generated_tokens += runtime._completion_token_count(raw_output)
             write_section(handle, f"Round {round_number} Model Output", raw_output)
             parsed_tool_call = parse_model_tool_call(raw_output)
             if parsed_tool_call is None:
@@ -582,6 +611,9 @@ def trace_collection(
                         "context_threshold_tokens": state.context_threshold_tokens,
                         "should_summarize": context_manager.should_summarize(compacted_state),
                         "raw_tail_round_count": len(runtime._raw_tail_rounds(state)),
+                        "reasoning_generated_tokens": reasoning_generated_tokens,
+                        "forced_answer_generated_tokens": forced_answer_generated_tokens,
+                        "generated_token_budget": runtime.generated_token_budget,
                     },
                     indent=2,
                     ensure_ascii=False,
