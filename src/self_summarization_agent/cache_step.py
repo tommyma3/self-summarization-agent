@@ -107,23 +107,38 @@ def _attach_training_caches(
     return cached_row
 
 
+def _cache_training_config(config):
+    if config.training.backend != "verl_ray":
+        return config.training
+    worker_backend = config.training.verl.worker_backend
+    if worker_backend != "transformers":
+        raise NotImplementedError(
+            "training.backend='verl_ray' cache scoring currently supports only "
+            "training.verl.worker_backend='transformers'. "
+            f"Got {worker_backend!r}."
+        )
+    return replace(config.training, backend=worker_backend)
+
+
 def build_cache_scorer(config, *, checkpoint_path: str | Path):
     checkpoint = Path(checkpoint_path).resolve()
     model_config = replace(config.model, model_path=str(checkpoint))
-    if config.training.backend == "fsdp2_context_parallel":
+    training_config = _cache_training_config(config)
+    if training_config.backend == "fsdp2_context_parallel":
         if os.environ.get("RANK") is None:
             warnings.warn(
                 "training.backend='fsdp2_context_parallel' requires accelerate launch. "
                 "Falling back to 'transformers' backend for single-process cache scoring.",
                 stacklevel=2,
             )
-            return TransformersPolicyTrainer(model_config, config.training)
-        return FSDP2ContextParallelPolicyTrainer(model_config, config.training)
-    if config.training.backend == "transformers":
-        return TransformersPolicyTrainer(model_config, config.training)
+            return TransformersPolicyTrainer(model_config, replace(training_config, backend="transformers"))
+        return FSDP2ContextParallelPolicyTrainer(model_config, training_config)
+    if training_config.backend == "transformers":
+        return TransformersPolicyTrainer(model_config, training_config)
     raise NotImplementedError(
         "The local environment cannot execute backend="
-        f"{config.training.backend!r}. Supported backends are 'transformers' and 'fsdp2_context_parallel'."
+        f"{config.training.backend!r}. Supported backends are 'transformers', "
+        "'fsdp2_context_parallel', and 'verl_ray'."
     )
 
 

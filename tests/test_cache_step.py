@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from self_summarization_agent.cache_step import run_cache_step
+from self_summarization_agent.cache_step import build_cache_scorer, run_cache_step
 from self_summarization_agent.config import (
     DatasetConfig,
     ExperimentConfig,
@@ -161,3 +161,42 @@ def test_cache_step_rejects_raw_unjudged_rows(tmp_path: Path) -> None:
         assert "missing turn_rewards" in str(exc)
     else:
         raise AssertionError("Expected raw rows to be rejected")
+
+
+def test_build_cache_scorer_accepts_verl_ray_with_transformers_worker(tmp_path: Path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    config = train_config(tmp_path)
+    config.training.backend = "verl_ray"
+    config.training.verl.worker_backend = "transformers"
+    created = {}
+
+    class FakeTransformersPolicyTrainer:
+        def __init__(self, model_config, training_config) -> None:
+            created["model_path"] = model_config.model_path
+            created["backend"] = training_config.backend
+
+    monkeypatch.setattr(
+        "self_summarization_agent.cache_step.TransformersPolicyTrainer",
+        FakeTransformersPolicyTrainer,
+    )
+
+    scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
+
+    assert isinstance(scorer, FakeTransformersPolicyTrainer)
+    assert created == {"model_path": str(checkpoint.resolve()), "backend": "transformers"}
+
+
+def test_build_cache_scorer_rejects_unsupported_verl_worker_backend(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    config = train_config(tmp_path)
+    config.training.backend = "verl_ray"
+    config.training.verl.worker_backend = "fsdp2_context_parallel"
+
+    try:
+        build_cache_scorer(config, checkpoint_path=checkpoint)
+    except NotImplementedError as exc:
+        assert "training.verl.worker_backend='transformers'" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported verl worker backend to be rejected")
