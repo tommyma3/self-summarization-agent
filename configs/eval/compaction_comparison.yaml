@@ -1,0 +1,28 @@
+base_config: ../train/default.yaml
+
+comparison:
+  name: compaction-comparison
+  output_root: /124090467/self-summarization-agent/artifacts/eval/compaction-comparison
+  iteration: 0
+  split: eval
+  resume: true
+
+common_overrides:
+  training.group_size: 1
+  runtime.tool_budget: 16
+  runtime.generated_token_budget: 32768
+  rollout.overlap_judge: true
+
+conditions:
+  no_compact_32k:
+    description: No runtime summarization, large active context.
+    overrides:
+      runtime.context_threshold_tokens: 1000000000
+      runtime.max_context_tokens: 32768
+      rollout.max_model_len: 40960
+  compact_8k:
+    description: Runtime summarization triggered around an 8k active-context threshold.
+    overrides:
+      runtime.context_threshold_tokens: 8000
+      runtime.max_context_tokens: 18000
+      rollout.max_model_len: 27000
