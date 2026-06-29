@@ -20,6 +20,7 @@ dependencies = [
   "transformers>=4.57.0",
   "vllm>=0.17.0",
   "accelerate>=1.13.0",
+  "flash-attn>=2.8.3.post1",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,9 @@ verl = [
   "verl @ git+https://github.com/verl-project/verl.git",
   "ray[default]>=2.40.0",
 ]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }]
 
 [dependency-groups]
 dev = [
