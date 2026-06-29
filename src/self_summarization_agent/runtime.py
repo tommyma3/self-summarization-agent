@@ -174,6 +174,7 @@ class _TokenUsage:
     reasoning_generated_tokens: int = 0
     summary_generated_tokens: int = 0
     forced_answer_generated_tokens: int = 0
+    tool_result_tokens: int = 0
     max_prompt_tokens_seen: int = 0
     retired_round_count: int = 0
     forced_answer_reasons: list[str] = field(default_factory=list)
@@ -188,6 +189,7 @@ class _TokenUsage:
             "reasoning_generated_tokens": self.reasoning_generated_tokens,
             "summary_generated_tokens": self.summary_generated_tokens,
             "forced_answer_generated_tokens": self.forced_answer_generated_tokens,
+            "tool_result_tokens": self.tool_result_tokens,
             "total_generated_tokens": total_generated_tokens,
             "prompt_tokens_by_turn": [
                 {
@@ -660,6 +662,9 @@ class EpisodeRuntime:
         active = action.active
         state = active.state
         query_id = state.query_id
+        tool_result_tokens = self._completion_token_count(tool_result)
+        active.token_usage.tool_result_tokens += tool_result_tokens
+        active.token_usage.reasoning_generated_tokens += tool_result_tokens
 
         tool_turn_id = self._next_tool_turn_id(state)
         turn_record: dict[str, Any] = {

@@ -145,6 +145,7 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
     reasoning_tokens = 0.0
     summary_tokens = 0.0
     forced_answer_tokens = 0.0
+    tool_result_tokens = 0.0
     total_generated_tokens = 0.0
     max_prompt_sum = 0.0
     max_prompt_max = 0.0
@@ -180,6 +181,7 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
         reasoning_tokens += _number(token_usage.get("reasoning_generated_tokens"))
         summary_tokens += _number(token_usage.get("summary_generated_tokens"))
         forced_answer_tokens += _number(token_usage.get("forced_answer_generated_tokens"))
+        tool_result_tokens += _number(token_usage.get("tool_result_tokens"))
         total_generated_tokens += _number(token_usage.get("total_generated_tokens"))
         max_prompt = _number(token_usage.get("max_prompt_tokens_seen"))
         max_prompt_sum += max_prompt
@@ -225,10 +227,12 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
         "reasoning_generated_tokens": reasoning_tokens,
         "summary_generated_tokens": summary_tokens,
         "forced_answer_generated_tokens": forced_answer_tokens,
+        "tool_result_tokens": tool_result_tokens,
         "total_generated_tokens": total_generated_tokens,
         "avg_reasoning_generated_tokens": _average(reasoning_tokens, total),
         "avg_summary_generated_tokens": _average(summary_tokens, total),
         "avg_forced_answer_generated_tokens": _average(forced_answer_tokens, total),
+        "avg_tool_result_tokens": _average(tool_result_tokens, total),
         "avg_total_generated_tokens": _average(total_generated_tokens, total),
         "avg_max_prompt_tokens_seen": _average(max_prompt_sum, total),
         "max_prompt_tokens_seen": max_prompt_max,
@@ -338,13 +342,14 @@ def _condition_overrides(
 def _render_markdown(summary: dict[str, Any]) -> str:
     condition_summaries = summary["conditions"]
     rows = [
-        "| condition | accuracy | correct/total | avg reasoning tok | avg summary tok | avg total tok | avg CoT tok/episode | avg prompt max | avg search | avg doc | forced answer |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| condition | accuracy | correct/total | avg reasoning tok | avg tool tok | avg summary tok | avg total tok | avg CoT tok/episode | avg prompt max | avg search | avg doc | forced answer |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for item in condition_summaries:
         rows.append(
             "| {condition} | {accuracy:.4f} | {correct}/{rollout_count} | "
-            "{avg_reasoning_generated_tokens:.1f} | {avg_summary_generated_tokens:.1f} | "
+            "{avg_reasoning_generated_tokens:.1f} | {avg_tool_result_tokens:.1f} | "
+            "{avg_summary_generated_tokens:.1f} | "
             "{avg_total_generated_tokens:.1f} | {avg_cot_tokens_per_episode:.1f} | "
             "{avg_max_prompt_tokens_seen:.1f} | {avg_search_calls:.2f} | "
             "{avg_document_calls:.2f} | {forced_answer_episode_count} |".format(**item)
@@ -366,6 +371,7 @@ def _numeric_deltas(condition_summaries: list[dict[str, Any]]) -> dict[str, floa
     keys = [
         "accuracy",
         "avg_reasoning_generated_tokens",
+        "avg_tool_result_tokens",
         "avg_summary_generated_tokens",
         "avg_total_generated_tokens",
         "avg_cot_tokens_per_episode",

@@ -713,7 +713,8 @@ def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
 
     assert result.status == "completed"
     assert result.final_answer == "best available"
-    assert result.token_usage["reasoning_generated_tokens"] == 2
+    assert result.token_usage["reasoning_generated_tokens"] == 3
+    assert result.token_usage["tool_result_tokens"] == 1
     assert result.token_usage["forced_answer_generated_tokens"] == 1
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.turn_records[0]["generation_kind"] == "action"
@@ -756,13 +757,46 @@ def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> 
     assert result.status == "completed"
     assert result.summary_turns == ["summary-1"]
     assert result.token_usage["reasoning_generated_tokens"] == 3
+    assert result.token_usage["tool_result_tokens"] == 1
     assert result.token_usage["summary_generated_tokens"] == 50
-    assert result.token_usage["forced_answer_generated_tokens"] == 0
-    assert result.token_usage["forced_answer_reasons"] == []
+    assert result.token_usage["forced_answer_generated_tokens"] == 1
+    assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.token_usage["summary_count"] == 1
     assert result.token_usage["retired_round_count"] == 1
     assert result.turn_records[2]["generation_kind"] == "summary"
-    assert result.turn_records[3]["generation_kind"] == "action"
+    assert result.turn_records[3]["generation_kind"] == "forced_answer"
+
+
+def test_runtime_counts_tool_result_tokens_toward_generated_token_budget() -> None:
+    search_output = tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')
+    answer_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}')
+    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "large tool result"})
+    model = RecordingModel(outputs=[search_output, answer_output])
+
+    def count_tokens(text: str) -> int:
+        if text == search_output or text == answer_output:
+            return 1
+        if "large tool result" in text:
+            return 10
+        return 1
+
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=100,
+        max_context_tokens=1024,
+        generated_token_budget=5,
+        token_counter=count_tokens,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.final_answer == "best available"
+    assert result.token_usage["reasoning_generated_tokens"] == 11
+    assert result.token_usage["tool_result_tokens"] == 10
+    assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
+    assert result.turn_records[1]["generation_kind"] == "forced_answer"
 
 
 def test_serialize_runtime_result_includes_token_usage() -> None:

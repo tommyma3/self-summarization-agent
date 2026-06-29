@@ -94,6 +94,7 @@ def write_eval_metrics(
     reasoning_tokens = _numeric_sum(rows, "reasoning_generated_tokens")
     summary_tokens = _numeric_sum(rows, "summary_generated_tokens")
     forced_answer_tokens = _numeric_sum(rows, "forced_answer_generated_tokens")
+    tool_result_tokens = _numeric_sum(rows, "tool_result_tokens")
     total_generated_tokens = _numeric_sum(rows, "total_generated_tokens")
     max_prompt_tokens_sum = _numeric_sum(rows, "max_prompt_tokens_seen")
     summary_count = _numeric_sum(rows, "summary_count")
@@ -119,10 +120,12 @@ def write_eval_metrics(
         "eval_reasoning_generated_tokens": reasoning_tokens,
         "eval_summary_generated_tokens": summary_tokens,
         "eval_forced_answer_generated_tokens": forced_answer_tokens,
+        "eval_tool_result_tokens": tool_result_tokens,
         "eval_total_generated_tokens": total_generated_tokens,
         "eval_avg_reasoning_generated_tokens": _average(reasoning_tokens, total),
         "eval_avg_summary_generated_tokens": _average(summary_tokens, total),
         "eval_avg_forced_answer_generated_tokens": _average(forced_answer_tokens, total),
+        "eval_avg_tool_result_tokens": _average(tool_result_tokens, total),
         "eval_avg_total_generated_tokens": _average(total_generated_tokens, total),
         "eval_avg_max_prompt_tokens_seen": _average(max_prompt_tokens_sum, total),
         "eval_max_prompt_tokens_seen": _numeric_max(rows, "max_prompt_tokens_seen"),

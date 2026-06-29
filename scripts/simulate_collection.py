@@ -263,6 +263,7 @@ def trace_collection(
     trainable_turns: list[dict[str, str]] = []
     reasoning_generated_tokens = 0
     forced_answer_generated_tokens = 0
+    tool_result_tokens = 0
 
     def append_trainable_turn(
         *,
@@ -334,6 +335,7 @@ def trace_collection(
                         {
                             "forced_answer_reasons": forced_reasons,
                             "reasoning_generated_tokens": reasoning_generated_tokens,
+                            "tool_result_tokens": tool_result_tokens,
                             "generated_token_budget": runtime.generated_token_budget,
                             "used_tools": used_tools,
                             "tool_budget": runtime.max_tool_calls,
@@ -581,6 +583,9 @@ def trace_collection(
                 + "\n\n"
                 + tool_result,
             )
+            current_tool_result_tokens = runtime._completion_token_count(tool_result)
+            tool_result_tokens += current_tool_result_tokens
+            reasoning_generated_tokens += current_tool_result_tokens
 
             state.rounds.append(
                 ToolRound(
@@ -613,6 +618,7 @@ def trace_collection(
                         "raw_tail_round_count": len(runtime._raw_tail_rounds(state)),
                         "reasoning_generated_tokens": reasoning_generated_tokens,
                         "forced_answer_generated_tokens": forced_answer_generated_tokens,
+                        "tool_result_tokens": tool_result_tokens,
                         "generated_token_budget": runtime.generated_token_budget,
                     },
                     indent=2,

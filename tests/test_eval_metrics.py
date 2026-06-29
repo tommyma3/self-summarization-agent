@@ -14,6 +14,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "reasoning_generated_tokens": 100,
                 "summary_generated_tokens": 20,
                 "forced_answer_generated_tokens": 5,
+                "tool_result_tokens": 30,
                 "total_generated_tokens": 125,
                 "max_prompt_tokens_seen": 8000,
                 "summary_count": 1,
@@ -26,6 +27,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "reasoning_generated_tokens": 50,
                 "summary_generated_tokens": 0,
                 "forced_answer_generated_tokens": 0,
+                "tool_result_tokens": 10,
                 "total_generated_tokens": 50,
                 "max_prompt_tokens_seen": 4000,
                 "summary_count": 0,
@@ -38,6 +40,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "reasoning_generated_tokens": 25,
                 "summary_generated_tokens": 10,
                 "forced_answer_generated_tokens": 0,
+                "tool_result_tokens": 0,
                 "total_generated_tokens": 35,
                 "max_prompt_tokens_seen": 6000,
                 "summary_count": 1,
@@ -67,10 +70,12 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
     assert record["eval_reasoning_generated_tokens"] == 175
     assert record["eval_summary_generated_tokens"] == 30
     assert record["eval_forced_answer_generated_tokens"] == 5
+    assert record["eval_tool_result_tokens"] == 40
     assert record["eval_total_generated_tokens"] == 210
     assert record["eval_avg_reasoning_generated_tokens"] == 175 / 3
     assert record["eval_avg_summary_generated_tokens"] == 10
     assert record["eval_avg_forced_answer_generated_tokens"] == 5 / 3
+    assert record["eval_avg_tool_result_tokens"] == 40 / 3
     assert record["eval_avg_total_generated_tokens"] == 70
     assert record["eval_avg_max_prompt_tokens_seen"] == 6000
     assert record["eval_max_prompt_tokens_seen"] == 8000

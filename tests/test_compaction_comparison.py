@@ -42,6 +42,7 @@ def _row(*, outcome: str, reasoning: int, summary: int, prompt: int, answer: str
             "reasoning_generated_tokens": reasoning,
             "summary_generated_tokens": summary,
             "forced_answer_generated_tokens": 0,
+            "tool_result_tokens": 10,
             "total_generated_tokens": reasoning + summary,
             "max_prompt_tokens_seen": prompt,
             "summary_count": 1 if summary else 0,
@@ -66,6 +67,7 @@ def test_summarize_judged_rollouts_reports_behavior_metrics(tmp_path: Path) -> N
     assert summary["rollout_count"] == 2
     assert summary["accuracy"] == 0.5
     assert summary["avg_reasoning_generated_tokens"] == 75
+    assert summary["avg_tool_result_tokens"] == 10
     assert summary["avg_summary_generated_tokens"] == 12.5
     assert summary["summary_overhead_ratio"] == 25 / 175
     assert summary["avg_search_calls"] == 2
