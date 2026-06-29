@@ -13,7 +13,7 @@ from self_summarization_agent.config import (
     TrainingConfig,
 )
 from self_summarization_agent.dataset import QueryExample
-from self_summarization_agent.judge import RewardJudge
+from self_summarization_agent.judge import RewardJudge, create_judge_prompt
 from self_summarization_agent.judge_step import judge_rollouts
 
 
@@ -30,6 +30,22 @@ class BatchJudgeGenerator:
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
+
+
+def test_create_judge_prompt_is_minimal() -> None:
+    prompt = create_judge_prompt(
+        question="question",
+        response="candidate answer",
+        correct_answer="gold answer",
+    )
+
+    assert "question" in prompt
+    assert "candidate answer" in prompt
+    assert "gold answer" in prompt
+    assert "correct: yes" in prompt
+    assert "correct: no" in prompt
+    assert "reasoning:" not in prompt
+    assert "extracted_final_answer:" not in prompt
 
 
 def train_config(tmp_path: Path) -> TrainConfig:

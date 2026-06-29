@@ -8,20 +8,18 @@ from self_summarization_agent.generation import TextGenerator
 
 
 GRADER_TEMPLATE = """
-Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
+Judge whether the answer is correct.
 
-[question]: {question}
+Question: {question}
 
-[response]: {response}
+Answer: {response}
 
-[correct_answer]: {correct_answer}
+Correct answer: {correct_answer}
 
-Your judgement must be in the format and criteria specified below:
-
-extracted_final_answer: The final exact answer extracted from the [response].
-[correct_answer]: Repeat the [correct_answer] given above.
-reasoning: Explain why the extracted_final_answer is correct or incorrect based on [correct_answer].
-correct: Answer 'yes' if extracted_final_answer matches the [correct_answer] or is within a small numerical margin. Answer 'no' otherwise.
+Output only one line:
+correct: yes
+or
+correct: no
 """.strip()
 
 
