@@ -1,6 +1,6 @@
 experiment:
   name: qwen-bcplus-train
-  seed: 7
+  seed: 0
   output_root: /124090467/self-summarization-agent/
   bc_plus_root: /124090467/self-summarization-agent/bc-plus
 
@@ -10,7 +10,7 @@ dataset:
   limit:
   shuffle: false
   train_limit: 800
-  eval_limit: 30
+  eval_limit: 50
 
 retrieval:
   backend: faiss
@@ -61,7 +61,7 @@ runtime:
 judge:
   enabled: true
   backend: vllm_offline
-  model_path: /124090467/Qwen/Qwen3.5-9B
+  model_path: /124090467/Qwen/Qwen3.5-35B-A3B
   gpu_ids: [1]
   tensor_parallel_size: 1
   attention_backend: TORCH_SDPA

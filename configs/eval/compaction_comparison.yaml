@@ -6,6 +6,7 @@ comparison:
   iteration: 0
   split: eval
   resume: true
+  checkpoint: /124090467/Qwen/Qwen3.5-9B
 
 common_overrides:
   training.group_size: 1
