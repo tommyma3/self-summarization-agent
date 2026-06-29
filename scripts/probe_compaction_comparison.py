@@ -51,8 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=2, help="vLLM tensor parallel size.")
     parser.add_argument(
         "--attention-backend",
-        default="TORCH_SDPA",
-        help="vLLM attention backend. Defaults to TORCH_SDPA to avoid flash-attn.",
+        default=None,
+        help="Optional vLLM attention backend override, e.g. FLASH_ATTN. Defaults to vLLM backend selection.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override rollout max_new_tokens.")
     parser.add_argument("--temperature", type=float, default=None, help="Override rollout temperature.")

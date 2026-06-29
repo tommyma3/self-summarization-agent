@@ -45,7 +45,7 @@ def _tool_output(json_text: str, thinking: str = "thinking") -> str:
 def test_probe_rollout_model_config_uses_rollout_max_model_len() -> None:
     args = argparse.Namespace(
         tensor_parallel_size=2,
-        attention_backend="TORCH_SDPA",
+        attention_backend=None,
         max_new_tokens=None,
         temperature=None,
         top_p=None,

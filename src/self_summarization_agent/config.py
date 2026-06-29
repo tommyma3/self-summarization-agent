@@ -76,7 +76,7 @@ class RolloutConfig:
     backend: str = "transformers"
     gpu_ids: list[int] = field(default_factory=lambda: [2, 3])
     tensor_parallel_size: int = 2
-    attention_backend: str | None = "TORCH_SDPA"
+    attention_backend: str | None = None
     max_model_len: int | None = None
     max_concurrent_episodes: int = 32
     overlap_judge: bool = True

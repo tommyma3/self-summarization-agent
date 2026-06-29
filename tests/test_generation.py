@@ -53,7 +53,7 @@ def test_build_generator_accepts_vllm_offline_backend(monkeypatch) -> None:
             backend="vllm_offline",
             model_path="/models/demo",
             tensor_parallel_size=2,
-            attention_backend="TORCH_SDPA",
+            attention_backend="FLASH_ATTN",
         )
     )
 
@@ -80,7 +80,7 @@ def test_build_generator_uses_judge_backend_overrides(monkeypatch) -> None:
             backend="vllm_offline",
             model_path="/models/judge",
             tensor_parallel_size=2,
-            attention_backend="TORCH_SDPA",
+            attention_backend="FLASH_ATTN",
             max_model_len=8192,
         ),
     )
@@ -88,7 +88,7 @@ def test_build_generator_uses_judge_backend_overrides(monkeypatch) -> None:
     assert isinstance(generator, VLLMGenerator)
     assert generator.model_path == "/models/judge"
     assert generator.tensor_parallel_size == 2
-    assert generator.attention_backend == "TORCH_SDPA"
+    assert generator.attention_backend == "FLASH_ATTN"
     assert generator.max_model_len == 8192
 
 
