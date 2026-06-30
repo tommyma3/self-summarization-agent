@@ -101,7 +101,11 @@ training:
     namespace: self-summarization-agent
     num_cpus:
     num_gpus_per_worker:
-    runtime_env: {}
+    runtime_env:
+      excludes:
+        - "pyproject.toml"
+        - ".python-version"
+        - "uv.lock"
     worker_backend: transformers
     ignore_reinit_error: true
     log_to_driver: true
