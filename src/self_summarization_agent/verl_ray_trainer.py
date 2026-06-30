@@ -189,7 +189,7 @@ class VerlRayPolicyTrainer:
             init_kwargs["address"] = self.training_config.verl.address
         if self.training_config.verl.namespace:
             init_kwargs["namespace"] = self.training_config.verl.namespace
-        if self.training_config.verl.runtime_env:
+        if self.training_config.verl.runtime_env is not None:
             init_kwargs["runtime_env"] = self.training_config.verl.runtime_env
         if self.training_config.verl.address is None and self.training_config.verl.num_cpus is not None:
             init_kwargs["num_cpus"] = self.training_config.verl.num_cpus

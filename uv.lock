@@ -5042,18 +5042,15 @@ dependencies = [
     { name = "flash-attn" },
     { name = "peft" },
     { name = "pyserini" },
+    { name = "pytest" },
     { name = "pyyaml" },
     { name = "qwen-omni-utils" },
+    { name = "ray", extra = ["default"] },
     { name = "tevatron" },
     { name = "torch" },
     { name = "transformers" },
-    { name = "vllm" },
-]
-
-[package.optional-dependencies]
-verl = [
-    { name = "ray", extra = ["default"] },
     { name = "verl" },
+    { name = "vllm" },
 ]
 
 [package.dev-dependencies]
@@ -5069,16 +5066,16 @@ requires-dist = [
     { name = "flash-attn", specifier = ">=2.8.3.post1" },
     { name = "peft", specifier = ">=0.19.1" },
     { name = "pyserini", specifier = ">=2.0.0" },
+    { name = "pytest", specifier = ">=9.0.3" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "qwen-omni-utils", specifier = ">=0.0.9" },
-    { name = "ray", extras = ["default"], marker = "extra == 'verl'", specifier = ">=2.40.0" },
+    { name = "ray", extras = ["default"], specifier = ">=2.40.0" },
     { name = "tevatron", git = "https://github.com/texttron/tevatron.git?rev=main" },
     { name = "torch", specifier = ">=2.7.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "transformers", specifier = ">=4.57.0" },
-    { name = "verl", marker = "extra == 'verl'", git = "https://github.com/verl-project/verl.git" },
+    { name = "verl", git = "https://github.com/verl-project/verl.git" },
     { name = "vllm", specifier = ">=0.17.0" },
 ]
-provides-extras = ["verl"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.4.0" }]

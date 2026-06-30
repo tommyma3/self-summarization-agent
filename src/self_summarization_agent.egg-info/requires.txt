@@ -10,7 +10,6 @@ transformers>=4.57.0
 vllm>=0.17.0
 accelerate>=1.13.0
 flash-attn>=2.8.3.post1
-
-[verl]
 verl @ git+https://github.com/verl-project/verl.git
 ray[default]>=2.40.0
+pytest>=9.0.3

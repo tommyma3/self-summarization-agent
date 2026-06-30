@@ -9,7 +9,7 @@ dataset:
   offset: 0
   limit:
   shuffle: false
-  train_limit: 800
+  train_limit: 780
   eval_limit: 50
 
 collection:
