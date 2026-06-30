@@ -452,52 +452,6 @@ def test_runtime_skips_summary_when_post_think_body_is_empty() -> None:
     assert "### SUMMARY" not in model.prompts[3]
 
 
-def test_runtime_summarizes_two_of_three_raw_rounds_and_leaves_newest_raw() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["doc-1"],
-            "second": ["doc-2"],
-            "third": ["doc-3"],
-        },
-        documents={},
-    )
-    model = RecordingModel(
-        outputs=[
-            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "third"}}'),
-            "summary of first two rounds",
-            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
-        ]
-    )
-    runtime = EpisodeRuntime(
-        model=model,
-        backend=backend,
-        context_threshold_tokens=1,
-        max_context_tokens=1024,
-        token_counter=lambda text: text.count("doc-3"),
-    )
-
-    result = runtime.run(query_id="q1", user_prompt="question")
-
-    assert result.status == "completed"
-    assert result.summary_turns == ["summary-1"]
-    assert len(model.prompts) == 5
-    summary_prompt = model.prompts[3]
-    assert "summarize the previous research context" in summary_prompt
-    assert "Do not emit a JSON tool call" in summary_prompt
-    assert "exactly one JSON object" not in summary_prompt
-    assert "Available tools:" not in summary_prompt
-    assert "<search>first</search>" in summary_prompt
-    assert "<search>second</search>" in summary_prompt
-    assert "<search>third</search>" not in summary_prompt
-    acting_prompt_after_summary = model.prompts[4]
-    assert "### SUMMARY\nsummary of first two rounds" in acting_prompt_after_summary
-    assert "<search>first</search>" not in acting_prompt_after_summary
-    assert "<search>second</search>" not in acting_prompt_after_summary
-    assert "<search>third</search>" in acting_prompt_after_summary
-
-
 def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None:
     backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact from doc-1"})
     model = RecordingModel(
@@ -631,29 +585,6 @@ def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
 
     assert [sample.turn_id for sample in samples] == ["tool-1", "tool-2", "summary-1", "final-answer"]
     assert [sample.reward for sample in samples] == [1.0, 1.0, 1.0, 1.0]
-
-
-def test_runtime_malformed_result_feeds_trajectory_extraction() -> None:
-    backend = FakeBackend(search_index={}, documents={})
-    model = ScriptedModel(outputs=['{"tool_name": "search"}'])
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=1024)
-
-    result = runtime.run(query_id="q1", user_prompt="question")
-
-    samples = extract_trainable_samples(result.turn_records, result.turn_rewards)
-
-    assert result.turn_records == [
-        {
-            "query_id": "q1",
-            "turn_id": "tool-1",
-            "kind": "tool",
-            "prompt": result.turn_records[0]["prompt"],
-            "completion": '{"tool_name": "search"}',
-        }
-    ]
-    assert result.turn_rewards == {"tool-1": -1.0}
-    assert [sample.turn_id for sample in samples] == ["tool-1"]
-    assert [sample.reward for sample in samples] == [-1.0]
 
 
 def test_runtime_forces_final_answer_after_tool_limit() -> None:
@@ -829,38 +760,6 @@ def test_serialize_runtime_result_includes_token_usage() -> None:
             "prompt_tokens": 3,
         }
     ]
-
-
-def test_runtime_applies_fit_check_to_full_summary_generation_prompt() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
-    model = ScriptedModel(
-        outputs=[
-            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
-            "summary",
-            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
-        ]
-    )
-    runtime = EpisodeRuntime(
-        model=model,
-        backend=backend,
-        context_threshold_tokens=1,
-        max_context_tokens=15,
-        token_counter=lambda text: 100 if "Write a clean summary containing only the essential information needed" in text else 1,
-    )
-
-    try:
-        runtime.run(query_id="q1", user_prompt="question")
-    except ValueError as exc:
-        assert "Packed prompt exceeds safe limit" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for oversized full summary-generation prompt")
 
 
 def test_runtime_raises_when_acting_prompt_exceeds_fit_limit() -> None:

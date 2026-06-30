@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import sys
 from pathlib import Path
 
 from self_summarization_agent.backend import FakeBackend
@@ -9,17 +10,19 @@ from self_summarization_agent.launcher_utils import build_runtime
 from self_summarization_agent.runtime import ScriptedModel
 
 
-PROBE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "probe_compaction_comparison.py"
-PROBE_SPEC = importlib.util.spec_from_file_location("probe_compaction_comparison", PROBE_SCRIPT)
-probe_comparison = importlib.util.module_from_spec(PROBE_SPEC)
-assert PROBE_SPEC.loader is not None
-PROBE_SPEC.loader.exec_module(probe_comparison)
-
 SIMULATE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "simulate_collection.py"
 SIMULATE_SPEC = importlib.util.spec_from_file_location("simulate_collection", SIMULATE_SCRIPT)
 simulate_collection = importlib.util.module_from_spec(SIMULATE_SPEC)
+sys.modules["simulate_collection"] = simulate_collection
 assert SIMULATE_SPEC.loader is not None
 SIMULATE_SPEC.loader.exec_module(simulate_collection)
+
+PROBE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "probe_compaction_comparison.py"
+PROBE_SPEC = importlib.util.spec_from_file_location("probe_compaction_comparison", PROBE_SCRIPT)
+probe_comparison = importlib.util.module_from_spec(PROBE_SPEC)
+sys.modules["probe_compaction_comparison"] = probe_comparison
+assert PROBE_SPEC.loader is not None
+PROBE_SPEC.loader.exec_module(probe_comparison)
 
 
 class ConfigForProbe:

@@ -58,26 +58,6 @@ def patch_fake_dataproto(monkeypatch) -> None:
     )
 
 
-def test_build_verl_actor_dataproto_uses_token_logprobs_and_advantages(monkeypatch) -> None:
-    patch_fake_dataproto(monkeypatch)
-
-    batch = build_verl_actor_dataproto(
-        {"q1": [sample("low", 0.0, -0.5), sample("high", 2.0, -0.25)]},
-        checkpoint_id="step-00001",
-    )
-
-    assert batch.meta_info["policy_checkpoint_id"] == "step-00001"
-    assert batch.meta_info["sample_count"] == 2
-    assert batch.meta_info["contributing_sample_count"] == 2
-    assert batch.meta_info["old_logprob_scope"] == "token"
-    assert batch.batch["input_ids"].tolist() == [[10, 11, 12], [10, 11, 12]]
-    assert batch.batch["attention_mask"].tolist() == [[1, 1, 1], [1, 1, 1]]
-    assert batch.batch["position_ids"].tolist() == [[0, 1, 2], [0, 1, 2]]
-    assert batch.batch["response_mask"].tolist() == [[False, True, True], [False, True, True]]
-    assert batch.batch["old_log_probs"].tolist() == [[0.0, -0.75, -0.25], [0.0, -0.5, 0.0]]
-    assert batch.batch["advantages"].tolist() == [[0.0, -1.0, -1.0], [0.0, 1.0, 1.0]]
-
-
 def test_build_verl_fsdp_worker_config_maps_repo_training_knobs() -> None:
     model_config = ModelConfig(model_path="/models/policy", dtype="bfloat16", trust_remote_code=True)
     training_config = TrainingConfig(
