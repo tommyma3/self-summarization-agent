@@ -161,7 +161,21 @@ training:
     runtime_env:
       env_vars:
         TOKENIZERS_PARALLELISM: "true"
-    worker_backend: transformers
+    worker_backend: verl_fsdp
+    fsdp:
+      strategy: fsdp2
+      ppo_micro_batch_size_per_gpu: 2
+      ppo_max_token_len_per_gpu: 32768
+      log_prob_micro_batch_size_per_gpu: 2
+      log_prob_max_token_len_per_gpu: 32768
+      use_dynamic_bsz: false
+      use_remove_padding: true
+      use_torch_compile: false
+      ulysses_sequence_parallel_size: 2
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: 4
+      save_hf_model: true
     ignore_reinit_error: false
     log_to_driver: false
     shutdown_ray: false
@@ -177,7 +191,18 @@ training:
     assert config.training.verl.num_cpus == 8
     assert config.training.verl.num_gpus_per_worker == 4
     assert config.training.verl.runtime_env == {"env_vars": {"TOKENIZERS_PARALLELISM": "true"}}
-    assert config.training.verl.worker_backend == "transformers"
+    assert config.training.verl.worker_backend == "verl_fsdp"
+    assert config.training.verl.fsdp.strategy == "fsdp2"
+    assert config.training.verl.fsdp.ppo_micro_batch_size_per_gpu == 2
+    assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 32768
+    assert config.training.verl.fsdp.log_prob_micro_batch_size_per_gpu == 2
+    assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 32768
+    assert config.training.verl.fsdp.use_torch_compile is False
+    assert config.training.verl.fsdp.ulysses_sequence_parallel_size == 2
+    assert config.training.verl.fsdp.param_offload is True
+    assert config.training.verl.fsdp.optimizer_offload is True
+    assert config.training.verl.fsdp.fsdp_size == 4
+    assert config.training.verl.fsdp.save_hf_model is True
     assert config.training.verl.ignore_reinit_error is False
     assert config.training.verl.log_to_driver is False
     assert config.training.verl.shutdown_ray is False

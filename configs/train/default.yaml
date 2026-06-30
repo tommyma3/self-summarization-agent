@@ -107,6 +107,20 @@ training:
         - ".python-version"
         - "uv.lock"
     worker_backend: transformers
+    fsdp:
+      strategy: fsdp
+      ppo_micro_batch_size_per_gpu: 1
+      ppo_max_token_len_per_gpu:
+      log_prob_micro_batch_size_per_gpu: 1
+      log_prob_max_token_len_per_gpu:
+      use_dynamic_bsz: false
+      use_remove_padding: true
+      use_torch_compile: true
+      ulysses_sequence_parallel_size: 1
+      param_offload: false
+      optimizer_offload: false
+      fsdp_size: -1
+      save_hf_model: true
     ignore_reinit_error: true
     log_to_driver: true
     shutdown_ray: true

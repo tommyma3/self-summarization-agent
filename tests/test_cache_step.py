@@ -187,6 +187,30 @@ def test_build_cache_scorer_accepts_verl_ray_with_transformers_worker(tmp_path: 
     assert created == {"model_path": str(checkpoint.resolve()), "backend": "transformers"}
 
 
+def test_build_cache_scorer_accepts_verl_fsdp_worker_with_transformers_cache(tmp_path: Path, monkeypatch) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    config = train_config(tmp_path)
+    config.training.backend = "verl_ray"
+    config.training.verl.worker_backend = "verl_fsdp"
+    created = {}
+
+    class FakeTransformersPolicyTrainer:
+        def __init__(self, model_config, training_config) -> None:
+            created["model_path"] = model_config.model_path
+            created["backend"] = training_config.backend
+
+    monkeypatch.setattr(
+        "self_summarization_agent.cache_step.TransformersPolicyTrainer",
+        FakeTransformersPolicyTrainer,
+    )
+
+    scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
+
+    assert isinstance(scorer, FakeTransformersPolicyTrainer)
+    assert created == {"model_path": str(checkpoint.resolve()), "backend": "transformers"}
+
+
 def test_build_cache_scorer_rejects_unsupported_verl_worker_backend(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
@@ -197,6 +221,6 @@ def test_build_cache_scorer_rejects_unsupported_verl_worker_backend(tmp_path: Pa
     try:
         build_cache_scorer(config, checkpoint_path=checkpoint)
     except NotImplementedError as exc:
-        assert "training.verl.worker_backend='transformers'" in str(exc)
+        assert "training.verl.worker_backend='transformers' or 'verl_fsdp'" in str(exc)
     else:
         raise AssertionError("Expected unsupported verl worker backend to be rejected")

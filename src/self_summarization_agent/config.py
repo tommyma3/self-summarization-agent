@@ -116,6 +116,23 @@ class JudgeConfig:
 
 
 @dataclass(slots=True)
+class VerlFSDPConfig:
+    strategy: str = "fsdp"
+    ppo_micro_batch_size_per_gpu: int = 1
+    ppo_max_token_len_per_gpu: int | None = None
+    log_prob_micro_batch_size_per_gpu: int = 1
+    log_prob_max_token_len_per_gpu: int | None = None
+    use_dynamic_bsz: bool = False
+    use_remove_padding: bool = True
+    use_torch_compile: bool = True
+    ulysses_sequence_parallel_size: int = 1
+    param_offload: bool = False
+    optimizer_offload: bool = False
+    fsdp_size: int = -1
+    save_hf_model: bool = True
+
+
+@dataclass(slots=True)
 class VerlRayConfig:
     address: str | None = None
     namespace: str = "self-summarization-agent"
@@ -123,6 +140,7 @@ class VerlRayConfig:
     num_gpus_per_worker: float | None = None
     runtime_env: dict[str, Any] = field(default_factory=dict)
     worker_backend: str = "transformers"
+    fsdp: VerlFSDPConfig = field(default_factory=VerlFSDPConfig)
     ignore_reinit_error: bool = True
     log_to_driver: bool = True
     shutdown_ray: bool = True
@@ -261,9 +279,13 @@ def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     verl_section = training_section.pop("verl", {})
     if not isinstance(verl_section, dict):
         raise ValueError("Config section 'training.verl' must be a mapping")
+    verl_section = dict(verl_section)
+    fsdp_section = verl_section.pop("fsdp", {})
+    if not isinstance(fsdp_section, dict):
+        raise ValueError("Config section 'training.verl.fsdp' must be a mapping")
     return TrainingConfig(
         **training_section,
-        verl=VerlRayConfig(**verl_section),
+        verl=VerlRayConfig(**verl_section, fsdp=VerlFSDPConfig(**fsdp_section)),
     )
 
 

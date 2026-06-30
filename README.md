@@ -271,19 +271,20 @@ For the intended GPU run:
 
 ### Optional verl/Ray training backend
 
-The `training.backend: verl_ray` path is an optional infrastructure pilot for running the policy update inside a Ray worker while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray actor, runs the current clipped GRPO update in the actor, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
+The `training.backend: verl_ray` path is an optional infrastructure path for running the policy update through Ray while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray worker, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
 
 Example override:
 
 ```powershell
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.num_gpus_per_worker=4
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.worker_backend=verl_fsdp --set training.verl.num_gpus_per_worker=4
 ```
 
 Useful `training.verl` knobs:
 
 - `address`: connect to an existing Ray cluster; leave unset for local Ray initialization inside the remote training job.
 - `num_gpus_per_worker`: GPU resources requested by the training actor; defaults to `len(training.gpu_ids)` or `training.data_parallel_size`.
-- `worker_backend`: currently `transformers`; this keeps the first verl/Ray path runnable without changing rollout artifacts.
+- `worker_backend`: `transformers` runs the compatibility Ray actor around the existing trainer; `verl_fsdp` uses official verl's Ray WorkerGroup plus `ActorRolloutRefWorker` for the policy update.
+- `fsdp`: native verl/FSDP knobs such as `strategy`, per-GPU microbatch/token limits, remove-padding, torch compile, Ulysses sequence parallelism, and CPU offload.
 - `shutdown_ray`: shuts down Ray after checkpoint save when the train step owns Ray initialization.
 
 Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel` or `transformers`.

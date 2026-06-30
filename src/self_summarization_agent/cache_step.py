@@ -111,13 +111,15 @@ def _cache_training_config(config):
     if config.training.backend != "verl_ray":
         return config.training
     worker_backend = config.training.verl.worker_backend
-    if worker_backend != "transformers":
-        raise NotImplementedError(
-            "training.backend='verl_ray' cache scoring currently supports only "
-            "training.verl.worker_backend='transformers'. "
-            f"Got {worker_backend!r}."
-        )
-    return replace(config.training, backend=worker_backend)
+    if worker_backend == "transformers":
+        return replace(config.training, backend=worker_backend)
+    if worker_backend == "verl_fsdp":
+        return replace(config.training, backend="transformers")
+    raise NotImplementedError(
+        "training.backend='verl_ray' cache scoring currently supports only "
+        "training.verl.worker_backend='transformers' or 'verl_fsdp'. "
+        f"Got {worker_backend!r}."
+    )
 
 
 def build_cache_scorer(config, *, checkpoint_path: str | Path):
