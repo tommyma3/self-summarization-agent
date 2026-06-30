@@ -332,6 +332,13 @@ class TransformersPolicyTrainer:
             device_map=self.model_config.device_map,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+        if self.training_config.activation_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model._set_gradient_checkpointing(
+                enable=True,
+                gradient_checkpointing_func=functools.partial(
+                    torch.utils.checkpoint.checkpoint, use_reentrant=False
+                ),
+            )
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.training_config.learning_rate)
         self.model.train()
 
@@ -494,6 +501,9 @@ class TransformersPolicyTrainer:
                     reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
                     reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
                 reference_logprobs = torch.cat(reference_logprob_chunks)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         detached_losses: list[float] = []
         detached_kls: list[float] = []
