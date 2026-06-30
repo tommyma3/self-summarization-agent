@@ -262,10 +262,10 @@ For the intended GPU run:
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
 - rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` loads the rollout checkpoint, writes tokenized trainable turns and frozen reference logprobs, and supports `--resume` for partially cached artifacts
+- `cache_step` loads the rollout checkpoint and writes v2 training caches with tokenized trainable turns, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v2 rows are preserved and old v1 cached rows are regenerated as v2
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
-- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over the collected batch
+- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over completion tokens using token-level reference logprobs when present
 - evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 

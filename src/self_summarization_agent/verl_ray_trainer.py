@@ -160,10 +160,21 @@ def build_verl_actor_dataproto(grouped_samples: dict[str, list[RLSample]], *, ch
     for index, (sample, advantage) in enumerate(contributing):
         mask = completion_mask[index]
         advantages[index, mask] = float(advantage)
-        old_log_probs[index, mask] = float(sample.reference_logprob)
+        if sample.reference_logprobs is not None:
+            old_log_probs[index, : len(sample.reference_logprobs)] = torch.tensor(
+                sample.reference_logprobs,
+                dtype=torch.float32,
+            )
+        else:
+            old_log_probs[index, mask] = float(sample.reference_logprob)
     responses = input_ids.masked_fill(~completion_mask, 0)
     total_tokens = int(sequence_lengths.sum().item()) if samples else 0
     train_tokens = int(completion_mask.sum().item()) if samples else 0
+    old_logprob_scope = (
+        "token"
+        if all(sample.reference_logprobs is not None for sample in samples)
+        else "sequence_mean_broadcast_to_completion_tokens"
+    )
     non_tensors = {
         "query_ids": np.array([sample.query_id for sample in samples], dtype=object),
         "turn_ids": np.array([sample.turn_id for sample in samples], dtype=object),
@@ -191,7 +202,7 @@ def build_verl_actor_dataproto(grouped_samples: dict[str, list[RLSample]], *, ch
             "total_tokens": total_tokens,
             "train_tokens": train_tokens,
             "max_sequence_length": max((len(sample.input_ids or []) for sample in samples), default=0),
-            "old_logprob_scope": "sequence_mean_broadcast_to_completion_tokens",
+            "old_logprob_scope": old_logprob_scope,
             "mini_batch_size": None,
             "epochs": 1,
             "seed": 42,

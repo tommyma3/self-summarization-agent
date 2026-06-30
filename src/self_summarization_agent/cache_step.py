@@ -12,7 +12,7 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
-from self_summarization_agent.trajectory import TOKEN_CACHE_FIELD, extract_trainable_samples
+from self_summarization_agent.trajectory import TOKEN_CACHE_FIELD, extract_trainable_samples, is_training_cache_v2
 
 
 def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -66,18 +66,45 @@ def _validate_cached_row(row: dict[str, Any], *, index: int, expected_checkpoint
         )
 
 
-def _completed_cached_keys(path: Path, *, expected_checkpoint_id: str) -> set[tuple[str, int]]:
+def _row_has_v2_training_cache(row: dict[str, Any]) -> bool:
+    if row.get("trainable_sample_count") == 0:
+        return True
+    rewards = row.get("turn_rewards")
+    if not isinstance(rewards, dict):
+        return False
+    samples = extract_trainable_samples(row["turn_records"], rewards)
+    sample_turn_ids = {sample.turn_id for sample in samples}
+    cached_turn_ids = {
+        turn.get("turn_id")
+        for turn in row["turn_records"]
+        if isinstance(turn, dict)
+        and isinstance(turn.get("turn_id"), str)
+        and turn.get("turn_id") in sample_turn_ids
+        and is_training_cache_v2(turn.get(TOKEN_CACHE_FIELD))
+    }
+    return sample_turn_ids <= cached_turn_ids
+
+
+def _completed_cached_rows(path: Path, *, expected_checkpoint_id: str) -> dict[tuple[str, int], dict[str, Any]]:
     if not path.exists():
-        return set()
+        return {}
     rows = _load_rollout_rows(path)
-    keys: set[tuple[str, int]] = set()
+    completed: dict[tuple[str, int], dict[str, Any]] = {}
     for index, row in enumerate(rows, start=1):
         _validate_cached_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
         key = _rollout_key(row, index=index)
-        if key in keys:
+        if key in completed:
             raise ValueError(f"Cached rollout row {index} duplicates rollout key {key!r}")
-        keys.add(key)
-    return keys
+        if _row_has_v2_training_cache(row):
+            completed[key] = row
+    return completed
+
+
+def _write_cached_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    if path.exists():
+        path.unlink()
+    for row in rows:
+        append_jsonl(path, row)
 
 
 def _attach_training_caches(
@@ -178,11 +205,18 @@ def run_cache_step(
     ensure_dir(output.parent)
     completed_keys: set[tuple[str, int]] = set()
     if resume:
-        completed_keys = _completed_cached_keys(output, expected_checkpoint_id=checkpoint_id)
+        completed_rows = _completed_cached_rows(output, expected_checkpoint_id=checkpoint_id)
+        completed_keys = set(completed_rows)
         expected_keys = {_rollout_key(row, index=index) for index, row in enumerate(rows, start=1)}
         unexpected_keys = sorted(completed_keys - expected_keys)
         if unexpected_keys:
             raise ValueError(f"Cached output contains unexpected rollout keys: {unexpected_keys!r}")
+        ordered_completed_rows = [
+            completed_rows[key]
+            for index, row in enumerate(rows, start=1)
+            if (key := _rollout_key(row, index=index)) in completed_rows
+        ]
+        _write_cached_rows(output, ordered_completed_rows)
     elif output.exists():
         output.unlink()
 

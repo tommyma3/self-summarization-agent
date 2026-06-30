@@ -1,7 +1,11 @@
 import torch
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
-from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
+from self_summarization_agent.trainer import (
+    FSDP2ContextParallelPolicyTrainer,
+    TransformersPolicyTrainer,
+    _clipped_grpo_token_losses,
+)
 from self_summarization_agent.trajectory import RLSample
 
 
@@ -109,10 +113,10 @@ def test_transformers_trainer_reuses_batch_for_clipped_grpo_updates() -> None:
     batch_sizes = []
 
     class FakeBatchedTrainer(TransformersPolicyTrainer):
-        def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+        def _sequence_token_logprobs_and_mask(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor]:
             batch_sizes.append(len(samples))
             features = torch.tensor([[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32)
-            return self.model(features).squeeze(-1)
+            return self.model(features), torch.ones((len(samples), 1), dtype=torch.bool)
 
         def _model_device(self) -> torch.device:
             return torch.device("cpu")
@@ -156,10 +160,10 @@ def test_transformers_trainer_accumulates_microbatches_within_minibatch() -> Non
     batch_sizes = []
 
     class FakeBatchedTrainer(TransformersPolicyTrainer):
-        def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+        def _sequence_token_logprobs_and_mask(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor]:
             batch_sizes.append(len(samples))
             features = torch.tensor([[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32)
-            return self.model(features).squeeze(-1)
+            return self.model(features), torch.ones((len(samples), 1), dtype=torch.bool)
 
         def _model_device(self) -> torch.device:
             return torch.device("cpu")
@@ -201,10 +205,10 @@ def test_transformers_trainer_uses_cached_reference_logprobs() -> None:
     batch_sizes = []
 
     class FakeBatchedTrainer(TransformersPolicyTrainer):
-        def _sequence_logprobs(self, samples: list[RLSample]) -> torch.Tensor:
+        def _sequence_token_logprobs_and_mask(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor]:
             batch_sizes.append(len(samples))
             features = torch.tensor([[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32)
-            return self.model(features).squeeze(-1)
+            return self.model(features), torch.ones((len(samples), 1), dtype=torch.bool)
 
         def _model_device(self) -> torch.device:
             return torch.device("cpu")
@@ -234,3 +238,31 @@ def test_transformers_trainer_uses_cached_reference_logprobs() -> None:
     assert metrics.sample_count == 4
     assert metrics.optimizer_step_count == 6
     assert batch_sizes == [2, 2, 2, 2, 2, 2]
+
+
+def test_token_grpo_loss_aligns_reference_logprobs_to_microbatch_length() -> None:
+    logprobs = torch.tensor([[-0.1, -0.2, -0.3]], dtype=torch.float32)
+    short_reference = torch.tensor([[-0.1, -0.2]], dtype=torch.float32)
+    long_reference = torch.tensor([[-0.1, -0.2, -0.3, -9.0]], dtype=torch.float32)
+    advantages = torch.tensor([1.0], dtype=torch.float32)
+    completion_mask = torch.tensor([[True, True, True]])
+
+    short_losses, _, _, short_mask = _clipped_grpo_token_losses(
+        logprobs,
+        short_reference,
+        advantages,
+        completion_mask,
+        clip_range=0.2,
+    )
+    long_losses, _, _, long_mask = _clipped_grpo_token_losses(
+        logprobs,
+        long_reference,
+        advantages,
+        completion_mask,
+        clip_range=0.2,
+    )
+
+    assert short_losses.shape == logprobs.shape
+    assert long_losses.shape == logprobs.shape
+    assert short_mask.shape == logprobs.shape
+    assert long_mask.shape == logprobs.shape

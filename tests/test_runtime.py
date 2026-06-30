@@ -17,6 +17,7 @@ class MetadataOutput:
     prompt_token_ids: list[int] | None = None
     completion_token_ids: list[int] | None = None
     cumulative_logprob: float | None = None
+    token_logprobs: list[float] | None = None
 
 
 class RecordingModel(ScriptedModel):
@@ -113,12 +114,14 @@ def test_runtime_attaches_training_cache_from_generation_metadata() -> None:
                 prompt_token_ids=[10, 11],
                 completion_token_ids=[12, 13],
                 cumulative_logprob=-2.0,
+                token_logprobs=[-0.75, -1.25],
             ),
             MetadataOutput(
                 text=tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
                 prompt_token_ids=[20],
                 completion_token_ids=[21],
                 cumulative_logprob=-0.5,
+                token_logprobs=[-0.5],
             ),
         ]
     )
@@ -134,15 +137,18 @@ def test_runtime_attaches_training_cache_from_generation_metadata() -> None:
 
     tool_cache = result.turn_records[0]["training_cache"]
     assert tool_cache["policy_checkpoint_id"] == "step-00001"
+    assert tool_cache["version"] == 2
     assert tool_cache["input_ids"] == [10, 11, 12]
     assert tool_cache["labels"] == [11, 12, 13]
     assert tool_cache["completion_mask"] == [False, True, True]
     assert tool_cache["reference_logprob"] == -1.0
+    assert tool_cache["reference_logprobs"] == [0.0, -0.75, -1.25]
     final_cache = result.turn_records[1]["training_cache"]
     assert final_cache["input_ids"] == [20]
     assert final_cache["labels"] == [21]
     assert final_cache["completion_mask"] == [True]
     assert final_cache["reference_logprob"] == -0.5
+    assert final_cache["reference_logprobs"] == [-0.5]
 
 
 def test_runtime_stops_on_malformed_tool_call() -> None:

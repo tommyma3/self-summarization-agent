@@ -18,7 +18,7 @@ from self_summarization_agent.checkpoints import (
 )
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir, utc_timestamp
-from self_summarization_agent.trajectory import extract_trainable_samples
+from self_summarization_agent.trajectory import TOKEN_CACHE_FIELD, extract_trainable_samples, is_training_cache_v2
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -322,6 +322,20 @@ def _has_complete_cached_rollouts(
                 f"Cannot resume from {path}: row {index} has uncached trainable samples: "
                 f"{', '.join(missing_cache_turn_ids)}"
             )
+        trainable_turn_ids = {
+            sample.turn_id
+            for sample in extract_trainable_samples(turn_records, turn_rewards)
+        }
+        v2_cache_turn_ids = {
+            turn.get("turn_id")
+            for turn in turn_records
+            if isinstance(turn, dict)
+            and isinstance(turn.get("turn_id"), str)
+            and turn.get("turn_id") in trainable_turn_ids
+            and is_training_cache_v2(turn.get(TOKEN_CACHE_FIELD))
+        }
+        if not trainable_turn_ids <= v2_cache_turn_ids:
+            return False
     return True
 
 
@@ -354,6 +368,17 @@ def _has_inline_cached_rollouts(
         if not samples:
             return False
         if any(not sample.has_training_cache for sample in samples):
+            return False
+        trainable_turn_ids = {sample.turn_id for sample in samples}
+        v2_cache_turn_ids = {
+            turn.get("turn_id")
+            for turn in turn_records
+            if isinstance(turn, dict)
+            and isinstance(turn.get("turn_id"), str)
+            and turn.get("turn_id") in trainable_turn_ids
+            and is_training_cache_v2(turn.get(TOKEN_CACHE_FIELD))
+        }
+        if not trainable_turn_ids <= v2_cache_turn_ids:
             return False
     return True
 

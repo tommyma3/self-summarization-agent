@@ -4,7 +4,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-TOKEN_CACHE_VERSION = 1
+TOKEN_CACHE_VERSION = 2
+LEGACY_TOKEN_CACHE_VERSION = 1
 TOKEN_CACHE_FIELD = "training_cache"
 
 
@@ -20,6 +21,7 @@ class RLSample:
     labels: list[int] | None = None
     completion_mask: list[bool] | None = None
     reference_logprob: float | None = None
+    reference_logprobs: list[float] | None = None
 
     @property
     def has_training_cache(self) -> bool:
@@ -30,18 +32,28 @@ class RLSample:
             and self.reference_logprob is not None
         )
 
+    @property
+    def has_token_reference_logprobs(self) -> bool:
+        return self.has_training_cache and self.reference_logprobs is not None
+
 
 def build_training_cache_from_token_ids(
     *,
     prompt_token_ids: list[int],
     completion_token_ids: list[int],
     cumulative_logprob: float | None,
+    token_logprobs: list[float] | None = None,
     policy_checkpoint_id: str | None = None,
 ) -> dict[str, Any] | None:
     if not completion_token_ids or cumulative_logprob is None:
         return None
     if not math.isfinite(float(cumulative_logprob)):
         return None
+    if token_logprobs is not None:
+        if len(token_logprobs) != len(completion_token_ids):
+            return None
+        if any(not math.isfinite(float(value)) for value in token_logprobs):
+            return None
     full_ids = list(prompt_token_ids) + list(completion_token_ids)
     if len(full_ids) <= 1:
         return None
@@ -51,12 +63,21 @@ def build_training_cache_from_token_ids(
     completion_start = max(len(prompt_token_ids) - 1, 0)
     for index in range(completion_start, len(completion_mask)):
         completion_mask[index] = True
+    reference_logprob = float(cumulative_logprob) / len(completion_token_ids)
+    reference_logprobs = [0.0] * len(labels)
+    if token_logprobs is None:
+        token_logprobs = [reference_logprob] * len(completion_token_ids)
+    for offset, value in enumerate(token_logprobs):
+        target_index = completion_start + offset
+        if target_index < len(reference_logprobs):
+            reference_logprobs[target_index] = float(value)
     payload: dict[str, Any] = {
         "version": TOKEN_CACHE_VERSION,
         "input_ids": input_ids,
         "labels": labels,
         "completion_mask": completion_mask,
-        "reference_logprob": float(cumulative_logprob) / len(completion_token_ids),
+        "reference_logprob": reference_logprob,
+        "reference_logprobs": reference_logprobs,
     }
     if policy_checkpoint_id is not None:
         payload["policy_checkpoint_id"] = policy_checkpoint_id
@@ -85,18 +106,35 @@ def _validate_bool_list(value: Any, *, field_name: str, turn_id: str) -> list[bo
     return output
 
 
+def _validate_float_list(value: Any, *, field_name: str, turn_id: str) -> list[float]:
+    if not isinstance(value, list):
+        raise ValueError(f"Trainable turn_id {turn_id} has non-list {field_name}")
+    output: list[float] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, (int, float)) or isinstance(item, bool):
+            raise ValueError(f"Trainable turn_id {turn_id} has invalid {field_name}[{index}]")
+        if not math.isfinite(float(item)):
+            raise ValueError(f"Trainable turn_id {turn_id} has non-finite {field_name}[{index}]")
+        output.append(float(item))
+    return output
+
+
+def is_training_cache_v2(cache: object) -> bool:
+    return isinstance(cache, Mapping) and cache.get("version") == TOKEN_CACHE_VERSION and "reference_logprobs" in cache
+
+
 def _extract_training_cache(
     turn: Mapping[str, object],
     *,
     turn_id: str,
-) -> tuple[list[int] | None, list[int] | None, list[bool] | None, float | None]:
+) -> tuple[list[int] | None, list[int] | None, list[bool] | None, float | None, list[float] | None]:
     cache = turn.get(TOKEN_CACHE_FIELD)
     if cache is None:
-        return None, None, None, None
+        return None, None, None, None, None
     if not isinstance(cache, Mapping):
         raise ValueError(f"Trainable turn_id {turn_id} has non-object {TOKEN_CACHE_FIELD}")
     version = cache.get("version")
-    if version != TOKEN_CACHE_VERSION:
+    if version not in {LEGACY_TOKEN_CACHE_VERSION, TOKEN_CACHE_VERSION}:
         raise ValueError(
             f"Trainable turn_id {turn_id} has unsupported training cache version: {version!r}"
         )
@@ -114,7 +152,16 @@ def _extract_training_cache(
         raise ValueError(f"Trainable turn_id {turn_id} has non-numeric reference_logprob")
     if not math.isfinite(float(reference_logprob)):
         raise ValueError(f"Trainable turn_id {turn_id} has non-finite reference_logprob")
-    return input_ids, labels, completion_mask, float(reference_logprob)
+    reference_logprobs = None
+    if version == TOKEN_CACHE_VERSION:
+        reference_logprobs = _validate_float_list(
+            cache.get("reference_logprobs"),
+            field_name="reference_logprobs",
+            turn_id=turn_id,
+        )
+        if len(reference_logprobs) != len(completion_mask):
+            raise ValueError(f"Trainable turn_id {turn_id} has mismatched cached logprob length")
+    return input_ids, labels, completion_mask, float(reference_logprob), reference_logprobs
 
 
 def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[str, float]) -> list[RLSample]:
@@ -160,7 +207,7 @@ def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[s
             raise ValueError(f"Trainable turn_id {turn_id} has non-numeric reward")
         if not math.isfinite(float(reward)):
             raise ValueError(f"Trainable turn_id {turn_id} has non-finite reward")
-        input_ids, labels, completion_mask, reference_logprob = _extract_training_cache(
+        input_ids, labels, completion_mask, reference_logprob, reference_logprobs = _extract_training_cache(
             turn,
             turn_id=turn_id,
         )
@@ -176,6 +223,7 @@ def extract_trainable_samples(turns: list[Mapping[str, object]], rewards: dict[s
                 labels=labels,
                 completion_mask=completion_mask,
                 reference_logprob=reference_logprob,
+                reference_logprobs=reference_logprobs,
             )
         )
     unknown_reward_ids = sorted(set(rewards) - seen_turn_ids)

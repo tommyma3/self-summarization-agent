@@ -454,12 +454,14 @@ class EpisodeRuntime:
         prompt_token_ids = getattr(result, "prompt_token_ids", None)
         completion_token_ids = getattr(result, "completion_token_ids", None)
         cumulative_logprob = getattr(result, "cumulative_logprob", None)
+        token_logprobs = getattr(result, "token_logprobs", None)
         if prompt_token_ids is None or completion_token_ids is None:
             return None
         return build_training_cache_from_token_ids(
             prompt_token_ids=list(prompt_token_ids),
             completion_token_ids=list(completion_token_ids),
             cumulative_logprob=cumulative_logprob,
+            token_logprobs=list(token_logprobs) if token_logprobs is not None else None,
             policy_checkpoint_id=self.cache_policy_checkpoint_id,
         )
 

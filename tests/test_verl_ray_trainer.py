@@ -46,6 +46,7 @@ def sample(turn_id: str, reward: float, reference_logprob: float) -> RLSample:
         labels=[11, 12, 13],
         completion_mask=[False, True, True],
         reference_logprob=reference_logprob,
+        reference_logprobs=[0.0, reference_logprob - 0.25, reference_logprob + 0.25],
     )
 
 
@@ -57,7 +58,7 @@ def patch_fake_dataproto(monkeypatch) -> None:
     )
 
 
-def test_build_verl_actor_dataproto_broadcasts_sequence_logprob_and_advantages(monkeypatch) -> None:
+def test_build_verl_actor_dataproto_uses_token_logprobs_and_advantages(monkeypatch) -> None:
     patch_fake_dataproto(monkeypatch)
 
     batch = build_verl_actor_dataproto(
@@ -68,12 +69,12 @@ def test_build_verl_actor_dataproto_broadcasts_sequence_logprob_and_advantages(m
     assert batch.meta_info["policy_checkpoint_id"] == "step-00001"
     assert batch.meta_info["sample_count"] == 2
     assert batch.meta_info["contributing_sample_count"] == 2
-    assert batch.meta_info["old_logprob_scope"] == "sequence_mean_broadcast_to_completion_tokens"
+    assert batch.meta_info["old_logprob_scope"] == "token"
     assert batch.batch["input_ids"].tolist() == [[10, 11, 12], [10, 11, 12]]
     assert batch.batch["attention_mask"].tolist() == [[1, 1, 1], [1, 1, 1]]
     assert batch.batch["position_ids"].tolist() == [[0, 1, 2], [0, 1, 2]]
     assert batch.batch["response_mask"].tolist() == [[False, True, True], [False, True, True]]
-    assert batch.batch["old_log_probs"].tolist() == [[0.0, -0.5, -0.5], [0.0, -0.25, -0.25]]
+    assert batch.batch["old_log_probs"].tolist() == [[0.0, -0.75, -0.25], [0.0, -0.5, 0.0]]
     assert batch.batch["advantages"].tolist() == [[0.0, -1.0, -1.0], [0.0, 1.0, 1.0]]
 
 

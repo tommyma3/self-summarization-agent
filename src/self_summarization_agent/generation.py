@@ -31,6 +31,7 @@ class GenerationResult:
     prompt_token_ids: list[int] | None = None
     completion_token_ids: list[int] | None = None
     cumulative_logprob: float | None = None
+    token_logprobs: list[float] | None = None
 
 
 def _resolve_torch_dtype(dtype_name: str):
@@ -262,6 +263,7 @@ class VLLMGenerator:
             prompt_token_ids = getattr(output, "prompt_token_ids", None)
             completion_token_ids = getattr(completion, "token_ids", None)
             cumulative_logprob = getattr(completion, "cumulative_logprob", None)
+            token_logprobs = _extract_completion_token_logprobs(completion)
             completions.append(
                 GenerationResult(
                     text=completion.text or "",
@@ -270,9 +272,37 @@ class VLLMGenerator:
                     cumulative_logprob=float(cumulative_logprob)
                     if cumulative_logprob is not None
                     else None,
+                    token_logprobs=token_logprobs,
                 )
             )
         return completions
+
+
+def _extract_completion_token_logprobs(completion: Any) -> list[float] | None:
+    token_ids = getattr(completion, "token_ids", None)
+    raw_logprobs = getattr(completion, "logprobs", None)
+    if token_ids is None or raw_logprobs is None:
+        return None
+    token_ids = list(token_ids)
+    raw_logprobs = list(raw_logprobs)
+    if len(token_ids) != len(raw_logprobs):
+        return None
+    values: list[float] = []
+    for token_id, candidates in zip(token_ids, raw_logprobs):
+        candidate = None
+        if isinstance(candidates, dict):
+            candidate = candidates.get(token_id)
+            if candidate is None:
+                candidate = candidates.get(str(token_id))
+            if candidate is None and len(candidates) == 1:
+                candidate = next(iter(candidates.values()))
+        else:
+            candidate = candidates
+        logprob = getattr(candidate, "logprob", candidate)
+        if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
+            return None
+        values.append(float(logprob))
+    return values
 
 
 def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | None = None) -> TextGenerator:

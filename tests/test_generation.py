@@ -11,6 +11,11 @@ class FakeSamplingParams:
         self.kwargs = kwargs
 
 
+class FakeLogprob:
+    def __init__(self, logprob: float) -> None:
+        self.logprob = logprob
+
+
 class FakeCompletion:
     def __init__(
         self,
@@ -21,6 +26,7 @@ class FakeCompletion:
         self.text = text
         self.token_ids = token_ids
         self.cumulative_logprob = cumulative_logprob
+        self.logprobs = [{11: FakeLogprob(-0.75)}, {12: FakeLogprob(-1.25)}] if token_ids == [11, 12] else None
 
 
 class FakeRequestOutput:
@@ -142,6 +148,7 @@ def test_vllm_generator_can_return_generation_metadata(monkeypatch) -> None:
     assert outputs[0].prompt_token_ids == [1, 2]
     assert outputs[0].completion_token_ids == [11, 12]
     assert outputs[0].cumulative_logprob == -2.0
+    assert outputs[0].token_logprobs == [-0.75, -1.25]
     assert generator.llm.params.kwargs == {
         "max_tokens": 16,
         "temperature": 0.7,

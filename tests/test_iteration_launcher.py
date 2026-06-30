@@ -13,7 +13,7 @@ from self_summarization_agent.config import (
     TrainConfig,
     TrainingConfig,
 )
-from self_summarization_agent.iteration_launcher import run_training_iteration
+from self_summarization_agent.iteration_launcher import _has_complete_cached_rollouts, run_training_iteration
 
 
 def write_fake_checkpoint(path: Path) -> None:
@@ -53,17 +53,22 @@ def write_judged_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def training_cache() -> dict:
-    return {
-        "version": 1,
+def training_cache(*, version: int = 2) -> dict:
+    cache = {
+        "version": 2,
         "input_ids": [1],
         "labels": [2],
         "completion_mask": [True],
         "reference_logprob": -0.1,
+        "reference_logprobs": [-0.1],
     }
+    if version == 1:
+        cache["version"] = 1
+        del cache["reference_logprobs"]
+    return cache
 
 
-def write_cached_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
+def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = 2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
         {
@@ -77,7 +82,7 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
                     "kind": "final_answer",
                     "prompt": "prompt",
                     "completion": "completion",
-                    "training_cache": training_cache(),
+                    "training_cache": training_cache(version=cache_version),
                 }
             ],
             "turn_rewards": {"final-answer": 1.0},
@@ -87,6 +92,17 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
         for index in range(count)
     ]
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def test_complete_cached_rollouts_requires_v2_training_cache(tmp_path: Path) -> None:
+    cached_path = tmp_path / "cached.jsonl"
+    write_cached_rollouts(cached_path, "iteration-00000", count=1, cache_version=1)
+
+    assert not _has_complete_cached_rollouts(
+        cached_path,
+        checkpoint_id="iteration-00000",
+        expected_count=1,
+    )
 
 
 def write_eval_metric(path: Path, iteration: int, checkpoint_id: str) -> None:

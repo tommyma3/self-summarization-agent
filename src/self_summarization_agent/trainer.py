@@ -191,7 +191,7 @@ def _clipped_grpo_losses(
     return losses, approx_kls, clipped
 
 
-def _pad_1d_tensors(items: list[torch.Tensor], *, pad_value: int) -> torch.Tensor:
+def _pad_1d_tensors(items: list[torch.Tensor], *, pad_value: int | float) -> torch.Tensor:
     if not items:
         raise ValueError("Cannot pad an empty tensor list")
     max_length = max(tensor.shape[0] for tensor in items)
@@ -204,6 +204,25 @@ def _pad_1d_tensors(items: list[torch.Tensor], *, pad_value: int) -> torch.Tenso
     for index, tensor in enumerate(items):
         padded[index, : tensor.shape[0]] = tensor
     return padded
+
+
+def _fit_reference_logprobs_to_shape(reference_logprobs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if reference_logprobs.shape == target.shape:
+        return reference_logprobs
+    if reference_logprobs.shape[0] != target.shape[0]:
+        raise ValueError(
+            "Reference logprob batch size does not match current policy logprob batch size: "
+            f"{reference_logprobs.shape[0]} != {target.shape[0]}"
+        )
+    if reference_logprobs.shape[1] > target.shape[1]:
+        return reference_logprobs[:, : target.shape[1]]
+    pad_width = target.shape[1] - reference_logprobs.shape[1]
+    pad = torch.zeros(
+        (reference_logprobs.shape[0], pad_width),
+        dtype=reference_logprobs.dtype,
+        device=reference_logprobs.device,
+    )
+    return torch.cat([reference_logprobs, pad], dim=1)
 
 
 def _pad_bool_tensors(items: list[torch.Tensor]) -> torch.Tensor:
@@ -281,6 +300,7 @@ def _training_cache_payload(
     labels: torch.Tensor,
     completion_mask: torch.Tensor,
     reference_logprob: float,
+    reference_logprobs: torch.Tensor,
 ) -> dict[str, Any]:
     return {
         "version": TOKEN_CACHE_VERSION,
@@ -288,10 +308,11 @@ def _training_cache_payload(
         "labels": [int(token_id) for token_id in labels.detach().cpu().tolist()],
         "completion_mask": [bool(value) for value in completion_mask.detach().cpu().tolist()],
         "reference_logprob": float(reference_logprob),
+        "reference_logprobs": [float(value) for value in reference_logprobs.detach().cpu().tolist()],
     }
 
 
-def _mean_masked_logprobs(
+def _masked_token_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
     completion_mask: torch.Tensor,
@@ -301,14 +322,56 @@ def _mean_masked_logprobs(
         labels.reshape(-1),
         reduction="none",
     ).reshape_as(labels)
-    mask = completion_mask.to(token_losses.dtype)
+    return -token_losses * completion_mask.to(token_losses.dtype)
+
+
+def _mean_masked_logprobs(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    completion_mask: torch.Tensor,
+) -> torch.Tensor:
+    token_logprobs = _masked_token_logprobs(logits, labels, completion_mask)
+    mask = completion_mask.to(token_logprobs.dtype)
     token_counts = mask.sum(dim=1)
-    logprob_sums = -(token_losses * mask).sum(dim=1)
+    logprob_sums = token_logprobs.sum(dim=1)
     return torch.where(
         token_counts > 0,
         logprob_sums / token_counts.clamp_min(1),
         torch.zeros_like(logprob_sums),
     )
+
+
+def _mean_from_token_logprobs(token_logprobs: torch.Tensor, completion_mask: torch.Tensor) -> torch.Tensor:
+    mask = completion_mask.to(token_logprobs.dtype)
+    token_counts = mask.sum(dim=1)
+    logprob_sums = (token_logprobs * mask).sum(dim=1)
+    return torch.where(
+        token_counts > 0,
+        logprob_sums / token_counts.clamp_min(1),
+        torch.zeros_like(logprob_sums),
+    )
+
+
+def _clipped_grpo_token_losses(
+    logprobs: torch.Tensor,
+    reference_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    completion_mask: torch.Tensor,
+    *,
+    clip_range: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    reference_logprobs = reference_logprobs.to(device=logprobs.device, dtype=logprobs.dtype)
+    reference_logprobs = _fit_reference_logprobs_to_shape(reference_logprobs, logprobs)
+    advantages = advantages.to(device=logprobs.device, dtype=logprobs.dtype).unsqueeze(-1)
+    mask = completion_mask.to(device=logprobs.device, dtype=logprobs.dtype)
+    ratio = torch.exp(logprobs - reference_logprobs)
+    clipped_ratio = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
+    unclipped_objective = ratio * advantages
+    clipped_objective = clipped_ratio * advantages
+    token_losses = -torch.minimum(unclipped_objective, clipped_objective) * mask
+    approx_kls = (reference_logprobs - logprobs.detach()) * mask
+    clipped = (torch.abs(ratio.detach() - 1.0) > clip_range).to(logprobs.dtype) * mask
+    return token_losses, approx_kls, clipped, mask
 
 
 @dataclass(slots=True)
@@ -441,14 +504,26 @@ class TransformersPolicyTrainer:
         outputs = self.model(input_ids=input_ids)
         return _mean_masked_logprobs(outputs.logits, labels, completion_mask)
 
-    def _cached_reference_logprobs(self, samples: list[RLSample]) -> torch.Tensor | None:
+    def _sequence_token_logprobs_and_mask(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor]:
+        input_ids, labels, completion_mask = self._encode_shifted_samples(samples)
+        outputs = self.model(input_ids=input_ids)
+        return _masked_token_logprobs(outputs.logits, labels, completion_mask), completion_mask
+
+    def _cached_reference_token_logprobs(self, samples: list[RLSample]) -> torch.Tensor | None:
         if not _all_samples_have_training_cache(samples):
             return None
-        return torch.tensor(
-            [float(sample.reference_logprob) for sample in samples],
-            dtype=torch.float32,
-            device=self._model_device(),
-        )
+        device = self._model_device()
+        tensors: list[torch.Tensor] = []
+        for sample in samples:
+            if sample.reference_logprobs is not None:
+                values = sample.reference_logprobs
+            else:
+                values = [
+                    float(sample.reference_logprob) if is_completion else 0.0
+                    for is_completion in (sample.completion_mask or [])
+                ]
+            tensors.append(torch.tensor(values, dtype=torch.float32, device=device))
+        return _pad_1d_tensors(tensors, pad_value=0.0)
 
     def cache_samples(self, samples: list[RLSample]) -> list[dict[str, Any]]:
         if not samples:
@@ -464,15 +539,22 @@ class TransformersPolicyTrainer:
             )
             for sample in samples
         ]
-        reference_logprobs = self._sequence_logprobs(samples).detach().cpu().tolist()
+        token_logprobs, completion_mask = self._sequence_token_logprobs_and_mask(samples)
+        reference_logprobs = _mean_from_token_logprobs(token_logprobs, completion_mask).detach().cpu().tolist()
+        reference_token_logprobs = token_logprobs.detach().cpu()
         return [
             _training_cache_payload(
                 input_ids=input_ids,
                 labels=labels,
                 completion_mask=completion_mask,
                 reference_logprob=float(reference_logprob),
+                reference_logprobs=token_reference_logprobs[: input_ids.numel()],
             )
-            for (input_ids, labels, completion_mask), reference_logprob in zip(encoded, reference_logprobs)
+            for (input_ids, labels, completion_mask), reference_logprob, token_reference_logprobs in zip(
+                encoded,
+                reference_logprobs,
+                reference_token_logprobs,
+            )
         ]
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
@@ -494,13 +576,14 @@ class TransformersPolicyTrainer:
             )
         with torch.no_grad():
             contributing_samples = [sample for sample, _advantage in batch.contributing]
-            reference_logprobs = self._cached_reference_logprobs(contributing_samples)
-            if reference_logprobs is None:
-                reference_logprob_chunks = []
+            reference_token_logprobs = self._cached_reference_token_logprobs(contributing_samples)
+            if reference_token_logprobs is None:
+                reference_logprob_rows = []
                 for start, end in _minibatch_ranges(len(batch.contributing), microbatch_size):
                     reference_samples = [sample for sample, _advantage in batch.contributing[start:end]]
-                    reference_logprob_chunks.append(self._sequence_logprobs(reference_samples).detach())
-                reference_logprobs = torch.cat(reference_logprob_chunks)
+                    token_logprobs, _completion_mask = self._sequence_token_logprobs_and_mask(reference_samples)
+                    reference_logprob_rows.extend(token_logprobs.detach())
+                reference_token_logprobs = _pad_1d_tensors(reference_logprob_rows, pad_value=0.0)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -520,27 +603,30 @@ class TransformersPolicyTrainer:
                 minibatch_kl_count = 0
                 for micro_start, micro_end in _microbatch_ranges(start, end, microbatch_size):
                     microbatch = batch.contributing[micro_start:micro_end]
-                    microbatch_reference_logprobs = reference_logprobs[micro_start:micro_end]
+                    microbatch_reference_logprobs = reference_token_logprobs[micro_start:micro_end]
                     samples = [sample for sample, _advantage in microbatch]
                     advantages = torch.tensor(
                         [advantage for _sample, advantage in microbatch],
                         dtype=torch.float32,
                         device=self._model_device(),
                     )
-                    logprobs = self._sequence_logprobs(samples)
-                    losses, approx_kls, clipped = _clipped_grpo_losses(
+                    logprobs, completion_mask = self._sequence_token_logprobs_and_mask(samples)
+                    losses, approx_kls, clipped, loss_mask = _clipped_grpo_token_losses(
                         logprobs,
                         microbatch_reference_logprobs,
                         advantages,
+                        completion_mask,
                         clip_range=clip_range,
                     )
-                    detached_losses.extend(losses.detach().cpu().tolist())
-                    detached_kls.extend(approx_kls.detach().cpu().tolist())
-                    detached_clipped.extend(clipped.detach().cpu().tolist())
-                    if approx_kls.numel():
+                    valid_mask = loss_mask > 0
+                    if valid_mask.any():
+                        detached_losses.extend(losses.detach()[valid_mask].cpu().tolist())
+                        detached_kls.extend(approx_kls.detach()[valid_mask].cpu().tolist())
+                        detached_clipped.extend(clipped.detach()[valid_mask].cpu().tolist())
                         minibatch_kl_sum += float(approx_kls.detach().sum().cpu())
-                        minibatch_kl_count += int(approx_kls.numel())
-                    (losses.sum() / minibatch_size_actual).backward()
+                        minibatch_kl_count += int(valid_mask.sum().item())
+                    loss_denominator = loss_mask.sum().clamp_min(1.0)
+                    (losses.sum() / loss_denominator).backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
                 self.optimizer.step()
                 optimizer_step_count += 1
@@ -794,6 +880,11 @@ class FSDP2ContextParallelPolicyTrainer:
                 labels=labels,
                 completion_mask=completion_mask,
                 reference_logprob=float(reference_logprob),
+                reference_logprobs=torch.where(
+                    completion_mask,
+                    torch.full_like(completion_mask, float(reference_logprob), dtype=torch.float32),
+                    torch.zeros_like(completion_mask, dtype=torch.float32),
+                ),
             )
             for (input_ids, labels, completion_mask), reference_logprob in zip(encoded, reference_logprobs)
         ]
