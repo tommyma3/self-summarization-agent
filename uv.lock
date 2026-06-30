@@ -3085,7 +3085,7 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.13.0" },
     { name = "datasets", specifier = ">=4.0.0" },
     { name = "faiss-cpu", specifier = ">=1.13.2" },
-    { name = "flash-attn", specifier = ">=2.8.3.post1" },
+    { name = "flash-attn" },
     { name = "peft", specifier = ">=0.19.1" },
     { name = "pyserini", specifier = ">=1.4.0" },
     { name = "pytest", specifier = ">=9.0.3" },
@@ -3093,11 +3093,11 @@ requires-dist = [
     { name = "qwen-omni-utils", specifier = ">=0.0.9" },
     { name = "ray", extras = ["default"], specifier = ">=2.40.0" },
     { name = "tevatron", git = "https://github.com/texttron/tevatron.git?rev=main" },
-    { name = "torch", specifier = ">=2.7.0", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "torchvision", specifier = ">=0.25.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torch", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torchvision", index = "https://download.pytorch.org/whl/cu128" },
     { name = "transformers", specifier = ">=5.3" },
     { name = "verl", git = "https://github.com/verl-project/verl.git" },
-    { name = "vllm", specifier = "==0.19.1" },
+    { name = "vllm", git = "https://github.com/vllm-project/vllm.git?tag=v0.19.1" },
 ]
 
 [[package]]
@@ -3635,8 +3635,8 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.19.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.19.1+cu128"
+source = { git = "https://github.com/vllm-project/vllm.git?tag=v0.19.1#b1388b1fbf5aaef47937fabe98931211684666a6" }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
@@ -3703,11 +3703,6 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
     { name = "xgrammar", marker = "platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 's390x' or platform_machine == 'x86_64'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a8/49/60a2a962ecbf780c8fbfd0d5548b208d654d5c4267df94d8d93883641431/vllm-0.19.1.tar.gz", hash = "sha256:9fb88ce6b50991eba41d183584f65f51d7f6015d86a42cdabf79c1c8bd5d66fa", size = 31105401, upload-time = "2026-04-18T05:50:15.143Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/4c/26c426103c58ac8d98435fe63c7758a2f289b5481a08be19e9c9fe29a4c2/vllm-0.19.1-cp38-abi3-manylinux_2_31_aarch64.whl", hash = "sha256:c8dde3c9af20f00a644e64a50ebe43948f2921bab3ffd5407d634c15836cb181", size = 385252556, upload-time = "2026-04-18T05:49:16.101Z" },
-    { url = "https://files.pythonhosted.org/packages/78/20/f41216b79c87372a9d03175f36fa1411ee61059ce8c557d2691722ea4aae/vllm-0.19.1-cp38-abi3-manylinux_2_31_x86_64.whl", hash = "sha256:71a87f46cafab4489c69a5c5c83b870d0235e5694d8222303d460576293dc719", size = 433132101, upload-time = "2026-04-18T05:49:54.202Z" },
 ]
 
 [[package]]

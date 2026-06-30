@@ -16,15 +16,15 @@ dependencies = [
   "PyYAML>=6.0.2",
   "qwen-omni-utils>=0.0.9",
   "tevatron>=0.0.1",
-  "torch>=2.7.0",
+  "torch",
   "transformers>=5.3",
   "accelerate>=1.13.0",
-  "flash-attn>=2.8.3.post1",
+  "flash-attn",
   "verl @ https://github.com/verl-project/verl.git",
   "ray[default]>=2.40.0",
   "pytest>=9.0.3",
-  "vllm==0.19.1",
-  "torchvision>=0.25.0",
+  "torchvision",
+  "vllm>=0.19.1",
 ]
 
 [tool.uv]
@@ -51,6 +51,7 @@ torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
+vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.19.1" }
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]

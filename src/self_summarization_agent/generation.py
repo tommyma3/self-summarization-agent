@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import inspect
 import os
+import sys
 from typing import Any, Protocol
 
 import torch
@@ -118,6 +119,36 @@ class TransformersGenerator:
         return [self.generate(prompt) for prompt in prompts]
 
 
+def _apply_vllm_subprocess_fix() -> None:
+    """Work around a vLLM 0.19.1 import-order bug that causes a SIGSEGV
+    during model architecture inspection in subprocesses.
+
+    The model-inspection subprocess imports
+    ``vllm.model_executor.models.registry`` which triggers native extension
+    loading in an order that crashes unless ``vllm.config.vllm`` has been
+    loaded first.  We replace the subprocess command so that it pre-imports
+    the missing module before entering the registry's ``_run()`` entry point.
+    """
+    try:
+        import vllm.model_executor.models.registry as _vllm_reg
+    except ImportError:
+        return
+
+    _cmd = getattr(_vllm_reg, "_SUBPROCESS_COMMAND", None)
+    if _cmd is None or len(_cmd) < 2:
+        return
+
+    _fix_code = (
+        "import vllm.config.vllm;"
+        "import runpy;"
+        "runpy.run_module('vllm.model_executor.models.registry', "
+        "run_name='__main__', alter_sys=True)"
+    )
+    _fixed_cmd = [sys.executable, "-c", _fix_code]
+    if _cmd != _fixed_cmd:
+        _vllm_reg._SUBPROCESS_COMMAND = _fixed_cmd  # type: ignore[attr-defined]
+
+
 @dataclass(slots=True)
 class VLLMGenerator:
     model_path: str
@@ -144,6 +175,7 @@ class VLLMGenerator:
             raise ImportError(
                 "vLLM is not installed. Install it in the remote environment to use backend='vllm' or 'vllm_offline'."
             ) from exc
+        _apply_vllm_subprocess_fix()
         self._sampling_params_cls = SamplingParams
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path,

@@ -11,15 +11,15 @@ Requires-Dist: pyserini>=1.4.0
 Requires-Dist: PyYAML>=6.0.2
 Requires-Dist: qwen-omni-utils>=0.0.9
 Requires-Dist: tevatron>=0.0.1
-Requires-Dist: torch>=2.7.0
+Requires-Dist: torch
 Requires-Dist: transformers>=5.3
 Requires-Dist: accelerate>=1.13.0
-Requires-Dist: flash-attn>=2.8.3.post1
+Requires-Dist: flash-attn
 Requires-Dist: verl @ https://github.com/verl-project/verl.git
 Requires-Dist: ray[default]>=2.40.0
 Requires-Dist: pytest>=9.0.3
-Requires-Dist: vllm==0.19.1
-Requires-Dist: torchvision>=0.25.0
+Requires-Dist: torchvision
+Requires-Dist: vllm>=0.19.1
 
 # Self-Summarization Agent
 
