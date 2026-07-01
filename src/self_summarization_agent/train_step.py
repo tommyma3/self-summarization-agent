@@ -78,6 +78,20 @@ def run_train_step(
         if config.training.backend == "verl_ray":
             from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
 
+            # Shutdown any stale Ray instance from a previous failed run
+            # so orphaned actors don't hold GPU memory.
+            try:
+                import ray  # type: ignore[import-untyped]
+                if ray.is_initialized():
+                    ray.shutdown()
+            except ImportError:
+                pass
+
+            if config.training.gpu_ids:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(gpu_id) for gpu_id in config.training.gpu_ids
+                )
+
             trainer = VerlRayPolicyTrainer(
                 model_config,
                 config.training,
