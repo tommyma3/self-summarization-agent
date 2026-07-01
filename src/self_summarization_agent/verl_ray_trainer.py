@@ -37,6 +37,7 @@ def _require_verl_ray():
 
 def _require_verl_worker_group():
     try:
+        import ray
         from omegaconf import OmegaConf
         from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
         from verl.workers.engine_workers import ActorRolloutRefWorker
@@ -45,7 +46,7 @@ def _require_verl_worker_group():
             "training.verl.worker_backend='verl_fsdp' requires official verl worker-group dependencies. "
             "Install them in the remote GPU environment with `uv sync --extra verl --group dev`."
         ) from exc
-    return OmegaConf, RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ActorRolloutRefWorker
+    return OmegaConf, RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ActorRolloutRefWorker, ray
 
 
 def _coerce_scalar(value: Any) -> float:
@@ -371,7 +372,7 @@ def _extract_worker_metrics(worker_output: Any) -> dict[str, Any]:
 
 class VerlFSDPWorkerGroup:
     def __init__(self, model_config: ModelConfig, training_config: TrainingConfig):
-        OmegaConf, RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ActorRolloutRefWorker = _require_verl_worker_group()
+        OmegaConf, RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ActorRolloutRefWorker, ray = _require_verl_worker_group()
         self.training_config = training_config
         self.config = OmegaConf.create(build_verl_fsdp_worker_config(model_config, training_config))
         world_size = int(training_config.verl.num_gpus_per_worker or len(training_config.gpu_ids) or training_config.data_parallel_size or 1)
@@ -380,7 +381,7 @@ class VerlFSDPWorkerGroup:
             use_gpu=True,
             name_prefix=f"{training_config.verl.namespace}-actor-",
         )
-        worker_cls = RayClassWithInitArgs(ActorRolloutRefWorker, config=self.config, role="actor")
+        worker_cls = RayClassWithInitArgs(ray.remote(ActorRolloutRefWorker), config=self.config, role="actor")
         self.worker_group = RayWorkerGroup(
             resource_pool=resource_pool,
             ray_cls_with_init=worker_cls,
