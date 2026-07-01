@@ -604,6 +604,7 @@ class VerlRayPolicyTrainer:
                 grouped_samples, checkpoint_id=self.checkpoint_id, max_contributing=max_contributing,
             )
             batch.meta_info["mini_batch_size"] = global_mini_batch or max_contributing
+            batch.meta_info["global_batch_size"] = max_contributing
             batch.meta_info["epochs"] = self.training_config.update_epochs
             batch.meta_info["seed"] = 42
             self._last_batch_meta = dict(batch.meta_info)
