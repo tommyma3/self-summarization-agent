@@ -317,6 +317,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
                 "_target_": "verl.workers.config.FSDPEngineConfig",
                 "strategy": fsdp_config.strategy,
                 "dtype": _verl_dtype(model_config),
+                "model_dtype": _verl_dtype(model_config),
                 "param_offload": fsdp_config.param_offload,
                 "optimizer_offload": fsdp_config.optimizer_offload,
                 "fsdp_size": fsdp_config.fsdp_size,
