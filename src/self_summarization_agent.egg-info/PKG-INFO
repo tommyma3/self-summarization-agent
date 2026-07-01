@@ -20,6 +20,7 @@ Requires-Dist: ray[default]>=2.40.0
 Requires-Dist: pytest>=9.0.3
 Requires-Dist: torchvision
 Requires-Dist: vllm>=0.19.1
+Requires-Dist: tensordict>=0.10
 
 # Self-Summarization Agent
 
@@ -285,28 +286,29 @@ For the intended GPU run:
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
 - rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` loads the rollout checkpoint, writes tokenized trainable turns and frozen reference logprobs, and supports `--resume` for partially cached artifacts
+- `cache_step` loads the rollout checkpoint and writes v2 training caches with tokenized trainable turns, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v2 rows are preserved and old v1 cached rows are regenerated as v2
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
-- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over the collected batch
+- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over completion tokens using token-level reference logprobs when present
 - evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 ### Optional verl/Ray training backend
 
-The `training.backend: verl_ray` path is an optional infrastructure pilot for running the policy update inside a Ray worker while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray actor, runs the current clipped GRPO update in the actor, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
+The `training.backend: verl_ray` path is an optional infrastructure path for running the policy update through Ray while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray worker, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
 
 Example override:
 
 ```powershell
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.num_gpus_per_worker=4
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.worker_backend=verl_fsdp --set training.verl.num_gpus_per_worker=4
 ```
 
 Useful `training.verl` knobs:
 
 - `address`: connect to an existing Ray cluster; leave unset for local Ray initialization inside the remote training job.
 - `num_gpus_per_worker`: GPU resources requested by the training actor; defaults to `len(training.gpu_ids)` or `training.data_parallel_size`.
-- `worker_backend`: currently `transformers`; this keeps the first verl/Ray path runnable without changing rollout artifacts.
+- `worker_backend`: `transformers` runs the compatibility Ray actor around the existing trainer; `verl_fsdp` uses official verl's Ray WorkerGroup plus `ActorRolloutRefWorker` for the policy update.
+- `fsdp`: native verl/FSDP knobs such as `strategy`, per-GPU microbatch/token limits, remove-padding, torch compile, Ulysses sequence parallelism, and CPU offload.
 - `shutdown_ray`: shuts down Ray after checkpoint save when the train step owns Ray initialization.
 
 Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel` or `transformers`.

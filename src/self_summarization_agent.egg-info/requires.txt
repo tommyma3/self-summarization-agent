@@ -14,3 +14,4 @@ ray[default]>=2.40.0
 pytest>=9.0.3
 torchvision
 vllm>=0.19.1
+tensordict>=0.10

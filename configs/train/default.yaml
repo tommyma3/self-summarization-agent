@@ -60,7 +60,7 @@ rollout:
 runtime:
   context_threshold_tokens: 8000
   max_context_tokens: 18000
-  tool_budget: 16
+  tool_budget: 99999
   generated_token_budget: 32768
 
 judge:
@@ -91,7 +91,7 @@ training:
   minibatch_size: 128
   clip_range: 0.2
   target_kl: 0.03
-  gradient_accumulation_microbatch_size: 1
+  gradient_accumulation_microbatch_size: 2
   learning_rate: 1.0e-6
   checkpoint_interval: 5
   eval_interval: 0
@@ -106,7 +106,7 @@ training:
         - "pyproject.toml"
         - ".python-version"
         - "uv.lock"
-    worker_backend: transformers
+    worker_backend: verl_fsdp
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1

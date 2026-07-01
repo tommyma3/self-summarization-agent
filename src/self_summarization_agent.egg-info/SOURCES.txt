@@ -55,3 +55,4 @@ tests/test_rollout_collection.py
 tests/test_runtime.py
 tests/test_train_step.py
 tests/test_trainer.py
+tests/test_verl_ray_trainer.py
