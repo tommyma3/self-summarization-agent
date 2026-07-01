@@ -396,11 +396,21 @@ class VerlFSDPWorkerGroup:
             batch_td = batch.to_tensordict()
         else:
             batch_td = getattr(batch, "batch", batch)
-        # Trim the batch to be evenly divisible across all data-parallel workers.
-        # verl's dispatch splits the batch with chunk_tensordict, which requires
-        # len(td) % dp_size == 0.
+        # Trim the batch to be evenly divisible across data-parallel workers
+        # AND across per-gpu mini-batches.  verl's dispatch splits the batch
+        # with chunk_tensordict (requires len(td) % dp_size == 0), then each
+        # worker's TrainingWorker.train_mini_batch requires its local shard
+        # to be divisible by mini_batch_size_per_gpu.  Using the global
+        # mini_batch_size (when set) satisfies both: it is already a multiple
+        # of dp_size by assertion in train_mini_batch.
+        import math
+
+        from verl.utils.tensordict_utils import get_non_tensor_data
+
+        mini_batch_size = get_non_tensor_data(batch_td, "mini_batch_size", None)
+        step_size = math.lcm(self._world_size, mini_batch_size) if mini_batch_size else self._world_size
         batch_len = len(batch_td)
-        trimmed_len = (batch_len // self._world_size) * self._world_size
+        trimmed_len = (batch_len // step_size) * step_size
         if trimmed_len != batch_len:
             batch_td = batch_td[:trimmed_len]
         output = self.worker_group.update_actor(batch_td)
