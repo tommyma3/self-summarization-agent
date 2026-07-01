@@ -393,6 +393,7 @@ def collect_rollouts(
         max_model_len=config.rollout.max_model_len
         if config.rollout.max_model_len is not None
         else config.model.max_model_len,
+        language_model_only=True,
     )
     generator = generator or build_generator(rollout_model_config)
     if judge_inline:
