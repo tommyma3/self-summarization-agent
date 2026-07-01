@@ -141,6 +141,15 @@ def _position_ids(attention_mask: torch.Tensor) -> torch.Tensor:
     return torch.clamp(attention_mask.long().cumsum(dim=-1) - 1, min=0)
 
 
+def _padded_to_nested(padded_2d: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+    """Convert a padded 2D tensor (batch, max_seq_len) to a NestedTensor with
+    jagged layout, using the per-sample ``lengths`` to trim each row."""
+    if padded_2d.dim() != 2:
+        raise ValueError(f"Expected 2D padded tensor, got shape {padded_2d.shape}")
+    tensors = [padded_2d[i, : int(lengths[i].item())] for i in range(len(lengths))]
+    return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+
+
 def build_verl_actor_dataproto(grouped_samples: dict[str, list[RLSample]], *, checkpoint_id: str):
     np, _ray, DataProto = _require_verl_ray()
     policy_batch = _prepare_policy_batch(grouped_samples)
@@ -183,14 +192,14 @@ def build_verl_actor_dataproto(grouped_samples: dict[str, list[RLSample]], *, ch
     }
     return DataProto.from_single_dict(
         {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": _position_ids(attention_mask),
-            "responses": responses,
-            "response_mask": completion_mask,
-            "loss_mask": completion_mask,
-            "old_log_probs": old_log_probs,
-            "advantages": advantages,
+            "input_ids": _padded_to_nested(input_ids, sequence_lengths),
+            "attention_mask": _padded_to_nested(attention_mask, sequence_lengths),
+            "position_ids": _padded_to_nested(_position_ids(attention_mask), sequence_lengths),
+            "responses": _padded_to_nested(responses, sequence_lengths),
+            "response_mask": _padded_to_nested(completion_mask, sequence_lengths),
+            "loss_mask": _padded_to_nested(completion_mask, sequence_lengths),
+            "old_log_probs": _padded_to_nested(old_log_probs, sequence_lengths),
+            "advantages": _padded_to_nested(advantages, sequence_lengths),
             "rewards": tensors["rewards"],
             "sequence_lengths": sequence_lengths,
             **non_tensors,
