@@ -377,6 +377,7 @@ class VerlFSDPWorkerGroup:
         self.training_config = training_config
         self.config = OmegaConf.create(build_verl_fsdp_worker_config(model_config, training_config))
         world_size = int(training_config.verl.num_gpus_per_worker or len(training_config.gpu_ids) or training_config.data_parallel_size or 1)
+        self._world_size = world_size
         resource_pool = RayResourcePool(
             process_on_nodes=[world_size],
             use_gpu=True,
@@ -395,6 +396,13 @@ class VerlFSDPWorkerGroup:
             batch_td = batch.to_tensordict()
         else:
             batch_td = getattr(batch, "batch", batch)
+        # Trim the batch to be evenly divisible across all data-parallel workers.
+        # verl's dispatch splits the batch with chunk_tensordict, which requires
+        # len(td) % dp_size == 0.
+        batch_len = len(batch_td)
+        trimmed_len = (batch_len // self._world_size) * self._world_size
+        if trimmed_len != batch_len:
+            batch_td = batch_td[:trimmed_len]
         output = self.worker_group.update_actor(batch_td)
         return _extract_worker_metrics(output)
 
