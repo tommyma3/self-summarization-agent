@@ -206,6 +206,7 @@ def build_verl_actor_dataproto(
             "advantages": _padded_to_nested(advantages, sequence_lengths),
             "rewards": tensors["rewards"],
             "sequence_lengths": sequence_lengths,
+            "temperature": torch.full((len(samples),), 1.0, dtype=torch.float32),
             **non_tensors,
         },
         meta_info={
