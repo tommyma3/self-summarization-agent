@@ -150,13 +150,17 @@ def _padded_to_nested(padded_2d: torch.Tensor, lengths: torch.Tensor) -> torch.T
     return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
 
 
-def build_verl_actor_dataproto(grouped_samples: dict[str, list[RLSample]], *, checkpoint_id: str):
+def build_verl_actor_dataproto(
+    grouped_samples: dict[str, list[RLSample]], *, checkpoint_id: str, max_contributing: int | None = None
+):
     np, _ray, DataProto = _require_verl_ray()
     policy_batch = _prepare_policy_batch(grouped_samples)
     for sample in policy_batch.flat_samples:
         if not sample.has_training_cache:
             raise ValueError(f"Sample {sample.turn_id} is missing training cache")
     contributing = policy_batch.contributing
+    if max_contributing is not None and len(contributing) > max_contributing:
+        contributing = contributing[:max_contributing]
     samples = [sample for sample, _advantage in contributing]
     tensors = _pad_cached_sequences(samples)
     input_ids = tensors["input_ids"]
@@ -400,28 +404,24 @@ class VerlFSDPWorkerGroup:
         )
         self.worker_group.init_model()
 
+    @property
+    def alignment_step(self) -> int:
+        """Minimum batch-size granularity required by the verl dispatch + mini-batch
+        pipeline.  The total number of (post-trim) samples must be a multiple of this
+        value so that ``chunk_tensordict`` (dp split) and ``make_iterator`` (per-gpu
+        mini-batch) both receive evenly-divisible lengths."""
+        import math
+
+        mini_batch_size = self.training_config.minibatch_size
+        if mini_batch_size is not None:
+            return math.lcm(self._world_size, mini_batch_size)
+        return self._world_size
+
     def update_actor(self, batch: Any) -> dict[str, Any]:
         if hasattr(batch, "to_tensordict"):
             batch_td = batch.to_tensordict()
         else:
             batch_td = getattr(batch, "batch", batch)
-        # Trim the batch to be evenly divisible across data-parallel workers
-        # AND across per-gpu mini-batches.  verl's dispatch splits the batch
-        # with chunk_tensordict (requires len(td) % dp_size == 0), then each
-        # worker's TrainingWorker.train_mini_batch requires its local shard
-        # to be divisible by mini_batch_size_per_gpu.  Using the global
-        # mini_batch_size (when set) satisfies both: it is already a multiple
-        # of dp_size by assertion in train_mini_batch.
-        import math
-
-        from verl.utils.tensordict_utils import get_non_tensor_data
-
-        mini_batch_size = get_non_tensor_data(batch_td, "mini_batch_size", None)
-        step_size = math.lcm(self._world_size, mini_batch_size) if mini_batch_size else self._world_size
-        batch_len = len(batch_td)
-        trimmed_len = (batch_len // step_size) * step_size
-        if trimmed_len != batch_len:
-            batch_td = batch_td[:trimmed_len]
         output = self.worker_group.update_actor(batch_td)
         return _extract_worker_metrics(output)
 
@@ -527,8 +527,18 @@ class VerlRayPolicyTrainer:
             policy_batch = _prepare_policy_batch(grouped_samples)
             if not policy_batch.flat_samples or not policy_batch.contributing:
                 return _metrics_without_update(policy_batch)
-            batch = build_verl_actor_dataproto(grouped_samples, checkpoint_id=self.checkpoint_id)
-            batch.meta_info["mini_batch_size"] = self.training_config.minibatch_size or len(policy_batch.contributing)
+            # Trim contributing samples to a count that is evenly divisible
+            # by both data-parallel world_size and per-gpu mini_batch_size.
+            # This must happen *before* building the DataProto because
+            # NestedTensors do not support dim-0 slicing.
+            assert self._worker_group is not None
+            step_size = self._worker_group.alignment_step
+            max_contributing = (len(policy_batch.contributing) // step_size) * step_size
+            global_mini_batch = self.training_config.minibatch_size
+            batch = build_verl_actor_dataproto(
+                grouped_samples, checkpoint_id=self.checkpoint_id, max_contributing=max_contributing,
+            )
+            batch.meta_info["mini_batch_size"] = global_mini_batch or max_contributing
             batch.meta_info["epochs"] = self.training_config.update_epochs
             batch.meta_info["seed"] = 42
             self._last_batch_meta = dict(batch.meta_info)
@@ -536,6 +546,8 @@ class VerlRayPolicyTrainer:
             assert self._worker_group is not None
             worker_metrics = self._worker_group.update_actor(batch)
             update_seconds = time.monotonic() - started
+            batch_sample_count = int(self._last_batch_meta.get("contributing_sample_count", len(policy_batch.contributing)))
+            batch_minibatch = self.training_config.minibatch_size or batch_sample_count
             metrics = UpdateMetrics(
                 sample_count=int(self._last_batch_meta.get("sample_count", 0)),
                 mean_reward=sum(sample.reward for sample in policy_batch.flat_samples) / len(policy_batch.flat_samples),
@@ -543,15 +555,7 @@ class VerlRayPolicyTrainer:
                 loss=_mean_metric(worker_metrics, "loss", "actor/pg_loss"),
                 optimizer_step_count=int(
                     self.training_config.update_epochs
-                    * max(
-                        1,
-                        (
-                            len(policy_batch.contributing)
-                            + (self.training_config.minibatch_size or len(policy_batch.contributing))
-                            - 1
-                        )
-                        // (self.training_config.minibatch_size or len(policy_batch.contributing)),
-                    )
+                    * max(1, (batch_sample_count + batch_minibatch - 1) // batch_minibatch)
                 ),
                 mean_policy_kl=_mean_metric(worker_metrics, "actor/ppo_kl"),
                 clip_fraction=_mean_metric(worker_metrics, "actor/pg_clipfrac", "actor/clipfrac"),
