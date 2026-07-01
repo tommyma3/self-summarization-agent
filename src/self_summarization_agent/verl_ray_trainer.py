@@ -378,7 +378,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
             "entropy_coeff": 0.0,
             "calculate_entropy": False,
             "use_kl_loss": False,
-            "use_torch_compile": fsdp_config.use_torch_compile,
+            "use_torch_compile": False,  # disabled: hangs with FSDP + Qwen3.5-9B
             "ulysses_sequence_parallel_size": fsdp_config.ulysses_sequence_parallel_size,
             "use_remove_padding": fsdp_config.use_remove_padding,
             "rollout_n": training_config.group_size,
@@ -399,7 +399,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
                 "param_offload": fsdp_config.param_offload,
                 "optimizer_offload": fsdp_config.optimizer_offload,
                 "fsdp_size": fsdp_config.fsdp_size,
-                "use_torch_compile": fsdp_config.use_torch_compile,
+                "use_torch_compile": False,  # disabled: hangs with FSDP + Qwen3.5-9B
                 "ulysses_sequence_parallel_size": fsdp_config.ulysses_sequence_parallel_size,
             },
             "checkpoint": {
