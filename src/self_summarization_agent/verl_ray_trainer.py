@@ -166,24 +166,87 @@ def build_verl_actor_dataproto(
     input_ids = tensors["input_ids"]
     completion_mask = tensors["completion_mask"]
     sequence_lengths = tensors["sequence_lengths"]
+    batch_size = len(samples)
+    if batch_size == 0:
+        # Return an empty DataProto — caller should guard against this.
+        return DataProto.from_single_dict(
+            {
+                "input_ids": torch.empty((0, 0), dtype=torch.long),
+                "attention_mask": torch.empty((0, 0), dtype=torch.long),
+                "position_ids": torch.empty((0, 0), dtype=torch.long),
+                "prompts": torch.empty((0, 0), dtype=torch.long),
+                "responses": torch.empty((0, 0), dtype=torch.long),
+                "response_mask": torch.empty((0, 0), dtype=torch.bool),
+                "loss_mask": torch.empty((0, 0), dtype=torch.bool),
+                "old_log_probs": torch.empty((0, 0), dtype=torch.float32),
+                "advantages": torch.empty((0, 0), dtype=torch.float32),
+                "rewards": torch.empty((0,), dtype=torch.float32),
+                "sequence_lengths": torch.empty((0,), dtype=torch.long),
+                "temperature": torch.empty((0,), dtype=torch.float32),
+            },
+            meta_info={
+                "policy_checkpoint_id": checkpoint_id,
+                "query_count": len(grouped_samples),
+                "sample_count": len(policy_batch.flat_samples),
+                "contributing_sample_count": 0,
+                "total_tokens": 0,
+                "train_tokens": 0,
+                "max_sequence_length": 0,
+                "old_logprob_scope": "token",
+                "mini_batch_size": None,
+                "epochs": 1,
+                "seed": 42,
+            },
+        )
+
+    # Build full-sequence tensors (prompt + response)
     attention_mask = torch.zeros_like(input_ids, dtype=torch.long)
     for index, length in enumerate(sequence_lengths.tolist()):
         attention_mask[index, : int(length)] = 1
-    advantages = torch.zeros_like(input_ids, dtype=torch.float32)
-    old_log_probs = torch.zeros_like(input_ids, dtype=torch.float32)
+
+    # Split each sample into prompt-only and response-only sub-sequences.
+    # completion_mask is True for response tokens, False for prompt/padding.
+    prompt_tensors: list[torch.Tensor] = []
+    response_tensors: list[torch.Tensor] = []
+    response_mask_tensors: list[torch.Tensor] = []
+    old_log_probs_tensors: list[torch.Tensor] = []
+    advantages_tensors: list[torch.Tensor] = []
+
     for index, (sample, advantage) in enumerate(contributing):
-        mask = completion_mask[index]
-        advantages[index, mask] = float(advantage)
+        length = int(sequence_lengths[index].item())
+        is_completion = completion_mask[index, :length].bool()
+
+        # prompt tokens (where completion_mask is False)
+        prompt_tokens = input_ids[index, :length][~is_completion]
+        prompt_tensors.append(prompt_tokens if len(prompt_tokens) > 0 else torch.tensor([], dtype=torch.long))
+
+        # response tokens (where completion_mask is True)
+        response_tokens = input_ids[index, :length][is_completion]
+        response_tensors.append(response_tokens if len(response_tokens) > 0 else torch.tensor([], dtype=torch.long))
+        response_mask_tensors.append(torch.ones(len(response_tokens), dtype=torch.bool))
+
+        # old_log_probs for response tokens
         if sample.reference_logprobs is not None:
-            old_log_probs[index, : len(sample.reference_logprobs)] = torch.tensor(
-                sample.reference_logprobs,
-                dtype=torch.float32,
-            )
+            ref_logprobs = torch.tensor(sample.reference_logprobs, dtype=torch.float32)
+            if len(ref_logprobs) > len(response_tokens):
+                ref_logprobs = ref_logprobs[: len(response_tokens)]
+            elif len(ref_logprobs) < len(response_tokens):
+                ref_logprobs = torch.nn.functional.pad(ref_logprobs, (0, len(response_tokens) - len(ref_logprobs)))
         else:
-            old_log_probs[index, mask] = float(sample.reference_logprob)
-    responses = input_ids.masked_fill(~completion_mask, 0)
-    total_tokens = int(sequence_lengths.sum().item()) if samples else 0
-    train_tokens = int(completion_mask.sum().item()) if samples else 0
+            ref_logprobs = torch.full((len(response_tokens),), float(sample.reference_logprob), dtype=torch.float32)
+        old_log_probs_tensors.append(ref_logprobs)
+
+        # advantage broadcast to each response token
+        advantages_tensors.append(torch.full((len(response_tokens),), float(advantage), dtype=torch.float32))
+
+    prompts = torch.nested.as_nested_tensor(prompt_tensors, layout=torch.jagged)
+    responses = torch.nested.as_nested_tensor(response_tensors, layout=torch.jagged)
+    response_mask = torch.nested.as_nested_tensor(response_mask_tensors, layout=torch.jagged)
+    old_log_probs = torch.nested.as_nested_tensor(old_log_probs_tensors, layout=torch.jagged)
+    advantages = torch.nested.as_nested_tensor(advantages_tensors, layout=torch.jagged)
+
+    total_tokens = int(sequence_lengths.sum().item())
+    train_tokens = responses.offsets().diff().sum().item() if batch_size > 0 else 0
     old_logprob_scope = (
         "token"
         if all(sample.reference_logprobs is not None for sample in samples)
@@ -199,14 +262,15 @@ def build_verl_actor_dataproto(
             "input_ids": _padded_to_nested(input_ids, sequence_lengths),
             "attention_mask": _padded_to_nested(attention_mask, sequence_lengths),
             "position_ids": _padded_to_nested(_position_ids(attention_mask), sequence_lengths),
-            "responses": _padded_to_nested(responses, sequence_lengths),
-            "response_mask": _padded_to_nested(completion_mask, sequence_lengths),
-            "loss_mask": _padded_to_nested(completion_mask, sequence_lengths),
-            "old_log_probs": _padded_to_nested(old_log_probs, sequence_lengths),
-            "advantages": _padded_to_nested(advantages, sequence_lengths),
+            "prompts": prompts,
+            "responses": responses,
+            "response_mask": response_mask,
+            "loss_mask": response_mask,
+            "old_log_probs": old_log_probs,
+            "advantages": advantages,
             "rewards": tensors["rewards"],
             "sequence_lengths": sequence_lengths,
-            "temperature": torch.full((len(samples),), 1.0, dtype=torch.float32),
+            "temperature": torch.full((batch_size,), 1.0, dtype=torch.float32),
             **non_tensors,
         },
         meta_info={
