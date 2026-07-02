@@ -103,6 +103,10 @@ training:
     num_cpus:
     num_gpus_per_worker:
     runtime_env:
+      env_vars:
+        VIRTUAL_ENV: "/124090467/self-summarization-agent/.venv"
+        PATH: "/root/.local/bin:/124090467/self-summarization-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
       excludes:
         - "pyproject.toml"
         - ".python-version"
