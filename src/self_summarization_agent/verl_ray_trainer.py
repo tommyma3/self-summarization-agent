@@ -67,7 +67,10 @@ def _mean_metric(metrics: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
-def _pad_cached_sequences(samples: list[RLSample]) -> dict[str, torch.Tensor]:
+def _pad_cached_sequences(
+    samples: list[RLSample],
+    max_sequence_length: int | None = None,
+) -> dict[str, torch.Tensor]:
     if not samples:
         return {
             "input_ids": torch.empty((0, 0), dtype=torch.long),
@@ -77,6 +80,16 @@ def _pad_cached_sequences(samples: list[RLSample]) -> dict[str, torch.Tensor]:
             "rewards": torch.empty((0,), dtype=torch.float32),
             "sequence_lengths": torch.empty((0,), dtype=torch.long),
         }
+    # Left-truncate samples that exceed max_sequence_length, matching the
+    # truncation semantics of _encode_shifted_sample_from_text (trainer.py).
+    if max_sequence_length is not None:
+        for sample in samples:
+            sample_len = len(sample.input_ids or [])
+            if sample_len > max_sequence_length:
+                drop = sample_len - max_sequence_length
+                sample.input_ids = sample.input_ids[drop:]
+                sample.labels = sample.labels[drop:]
+                sample.completion_mask = sample.completion_mask[drop:]
     lengths = [len(sample.input_ids or []) for sample in samples]
     max_length = max(lengths)
     input_ids = torch.zeros((len(samples), max_length), dtype=torch.long)
@@ -109,13 +122,18 @@ def _flatten_grouped_samples(grouped_samples: dict[str, list[RLSample]]) -> list
     return flat_samples
 
 
-def build_verl_dataproto(grouped_samples: dict[str, list[RLSample]], *, checkpoint_id: str):
+def build_verl_dataproto(
+    grouped_samples: dict[str, list[RLSample]],
+    *,
+    checkpoint_id: str,
+    max_sequence_length: int | None = None,
+):
     np, _ray, DataProto = _require_verl_ray()
     flat_samples = _flatten_grouped_samples(grouped_samples)
     for sample in flat_samples:
         if not sample.has_training_cache:
             raise ValueError(f"Sample {sample.turn_id} is missing training cache")
-    tensors = _pad_cached_sequences(flat_samples)
+    tensors = _pad_cached_sequences(flat_samples, max_sequence_length=max_sequence_length)
     total_tokens = int(tensors["sequence_lengths"].sum().item()) if flat_samples else 0
     non_tensors = {
         "query_ids": np.array([sample.query_id for sample in flat_samples], dtype=object),
@@ -151,7 +169,11 @@ def _padded_to_nested(padded_2d: torch.Tensor, lengths: torch.Tensor) -> torch.T
 
 
 def build_verl_actor_dataproto(
-    grouped_samples: dict[str, list[RLSample]], *, checkpoint_id: str, max_contributing: int | None = None
+    grouped_samples: dict[str, list[RLSample]],
+    *,
+    checkpoint_id: str,
+    max_contributing: int | None = None,
+    max_sequence_length: int | None = None,
 ):
     np, _ray, DataProto = _require_verl_ray()
     policy_batch = _prepare_policy_batch(grouped_samples)
@@ -162,7 +184,7 @@ def build_verl_actor_dataproto(
     if max_contributing is not None and len(contributing) > max_contributing:
         contributing = contributing[:max_contributing]
     samples = [sample for sample, _advantage in contributing]
-    tensors = _pad_cached_sequences(samples)
+    tensors = _pad_cached_sequences(samples, max_sequence_length=max_sequence_length)
     input_ids = tensors["input_ids"]
     completion_mask = tensors["completion_mask"]
     sequence_lengths = tensors["sequence_lengths"]
@@ -601,7 +623,10 @@ class VerlRayPolicyTrainer:
             max_contributing = (len(policy_batch.contributing) // step_size) * step_size
             global_mini_batch = self.training_config.minibatch_size
             batch = build_verl_actor_dataproto(
-                grouped_samples, checkpoint_id=self.checkpoint_id, max_contributing=max_contributing,
+                grouped_samples,
+                checkpoint_id=self.checkpoint_id,
+                max_contributing=max_contributing,
+                max_sequence_length=self.training_config.max_sequence_length,
             )
             batch.meta_info["mini_batch_size"] = global_mini_batch or max_contributing
             batch.meta_info["global_batch_size"] = max_contributing
@@ -649,7 +674,11 @@ class VerlRayPolicyTrainer:
                 metrics.extra_metrics[f"verl_fsdp/raw/{key}"] = value
             return metrics
 
-        batch = build_verl_dataproto(grouped_samples, checkpoint_id=self.checkpoint_id)
+        batch = build_verl_dataproto(
+            grouped_samples,
+            checkpoint_id=self.checkpoint_id,
+            max_sequence_length=self.training_config.max_sequence_length,
+        )
         self._last_batch_meta = dict(batch.meta_info)
         started = time.monotonic()
         metrics_payload = self._ray.get(self._actor.step.remote(batch))

@@ -1,7 +1,10 @@
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol
+
+LOGGER = logging.getLogger(__name__)
 
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
@@ -709,7 +712,11 @@ class EpisodeRuntime:
                 continue
             doc_id = str(action.arguments["doc_id"])
             self._record_retrieved_docids(action.active.retrieved_docids, [doc_id])
-            tool_result = self.backend.get_document(doc_id)
+            try:
+                tool_result = self.backend.get_document(doc_id)
+            except Exception:
+                LOGGER.warning("Failed to retrieve document %s", doc_id, exc_info=True)
+                tool_result = f"Error: Document '{doc_id}' not found in retrieval index."
             action.active.tool_call_counts["get_document"] += 1
             self._apply_tool_result(action, tool_result)
 

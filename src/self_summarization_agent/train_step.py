@@ -92,6 +92,13 @@ def run_train_step(
                     str(gpu_id) for gpu_id in config.training.gpu_ids
                 )
 
+            # Release fragmented GPU memory from prior phases (FAISS
+            # embedding model, cache step, etc.) before the memory-
+            # intensive FSDP training phase begins.
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             trainer = VerlRayPolicyTrainer(
                 model_config,
                 config.training,
@@ -163,6 +170,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_train_config(args.config, parse_cli_overrides(args.overrides))
+
+    # Reduce CUDA memory fragmentation: tells PyTorch's caching allocator to
+    # release memory in expandable segments, avoiding the "reserved but
+    # unallocated" fragmentation that can cause OOM during loss.backward().
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
     output_checkpoint = run_train_step(
         config,
         checkpoint_path=args.checkpoint,
