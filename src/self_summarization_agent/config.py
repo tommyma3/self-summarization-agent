@@ -124,6 +124,8 @@ class VerlFSDPConfig:
     log_prob_max_token_len_per_gpu: int | None = None
     use_dynamic_bsz: bool = False
     use_remove_padding: bool = True
+    use_fused_kernels: bool = False
+    fused_kernels_backend: str = "torch"
     use_torch_compile: bool = True
     ulysses_sequence_parallel_size: int = 1
     param_offload: bool = False

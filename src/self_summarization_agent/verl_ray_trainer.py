@@ -383,6 +383,10 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
             "trust_remote_code": model_config.trust_remote_code,
             "enable_gradient_checkpointing": training_config.activation_checkpointing,
             "use_remove_padding": fsdp_config.use_remove_padding,
+            "use_fused_kernels": fsdp_config.use_fused_kernels,
+            "fused_kernel_options": {
+                "impl_backend": fsdp_config.fused_kernels_backend,
+            },
         },
         "actor": {
             "_target_": "verl.workers.config.FSDPActorConfig",

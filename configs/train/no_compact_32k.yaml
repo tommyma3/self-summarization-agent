@@ -87,7 +87,7 @@ training:
   data_parallel_size: 4
   activation_checkpointing: true
   # Preserve the full 40,960-token prompt plus up to 8,192 generated tokens.
-  max_sequence_length: 49152
+  max_sequence_length: 40000
   epochs: 10
   steps: 10
   group_size: 4
@@ -110,6 +110,7 @@ training:
         VIRTUAL_ENV: "/124090467/self-summarization-agent/.venv"
         PATH: "/root/.local/bin:/124090467/self-summarization-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+        PYTORCH_ALLOC_CONF: "expandable_segments:True"
       excludes:
         - "pyproject.toml"
         - ".python-version"
@@ -118,16 +119,18 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 49152
+      ppo_max_token_len_per_gpu: 40000
       log_prob_micro_batch_size_per_gpu: 1
-      log_prob_max_token_len_per_gpu: 49152
+      log_prob_max_token_len_per_gpu: 
       use_dynamic_bsz: true
       use_remove_padding: true
+      use_fused_kernels: true
+      fused_kernels_backend: torch
       use_torch_compile: true
       # Ulysses splits long-sequence activation work across all four ranks.
       ulysses_sequence_parallel_size: 4
       param_offload: false
-      optimizer_offload: false
+      optimizer_offload: true
       fsdp_size: -1
       save_hf_model: true
     ignore_reinit_error: true
