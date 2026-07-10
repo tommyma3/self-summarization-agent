@@ -1,0 +1,135 @@
+experiment:
+  name: qwen-bcplus-no-compact-32k-train
+  seed: 0
+  output_root: /124090467/self-summarization-agent/
+  bc_plus_root: /124090467/self-summarization-agent/bc-plus
+
+dataset:
+  decrypted_path: /124090467/self-summarization-agent/bc-plus/data/browsecomp_plus_decrypted.jsonl
+  offset: 0
+  limit:
+  shuffle: false
+  train_limit: 780
+  eval_limit: 50
+
+collection:
+  train_task_count: 50
+  eval_task_count: 50
+
+retrieval:
+  backend: faiss
+  top_k: 5
+  snippet_max_tokens: 512
+  document_max_tokens: 8192
+  snippet_tokenizer_path: /124090467/Qwen/Qwen3.5-9B
+  persistent_worker: true
+  worker_startup_timeout_seconds: 600
+  index_path: /124090467/self-summarization-agent/bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
+  model_name: /124090467/Qwen/Qwen3-Embedding-8B
+  normalize: true
+  pooling: eos
+  torch_dtype: bfloat16
+  dataset_name: /124090467/hf_datasets/Tevatron/browsecomp-plus-corpus
+  max_length: 16384
+
+model:
+  backend: transformers
+  model_path: /124090467/Qwen/Qwen3.5-9B
+  dtype: bfloat16
+  device_map: auto
+  max_new_tokens: 8192
+  temperature: 0.7
+  top_p: 0.95
+  do_sample: true
+  trust_remote_code: false
+  enable_thinking: true
+
+rollout:
+  backend: vllm_offline
+  gpu_ids: [2, 3]
+  tensor_parallel_size: 2
+  attention_backend:
+  max_model_len: 49152
+  # Limit 49k-token KV-cache residency on the two rollout GPUs.
+  max_concurrent_episodes: 8
+  overlap_judge: true
+  max_new_tokens: 8192
+  temperature: 0.7
+  top_p: 0.95
+  do_sample: true
+
+runtime:
+  # Effectively disable runtime summarization for the no-compaction baseline.
+  context_threshold_tokens: 1000000000
+  max_context_tokens: 40960
+  tool_budget: 99999
+  generated_token_budget: 32768
+
+judge:
+  enabled: true
+  backend: vllm_offline
+  model_path: /124090467/Qwen/Qwen3.5-35B-A3B
+  gpu_ids: [1]
+  tensor_parallel_size: 1
+  attention_backend:
+  max_model_len: 18000
+  max_new_tokens: 12000
+  temperature: 0.0
+  top_p: 1.0
+  do_sample: false
+
+training:
+  backend: verl_ray
+  gpu_ids: [0, 1, 2, 3]
+  fsdp_version: 2
+  context_parallel_size: 1
+  tensor_parallel_size: 1
+  data_parallel_size: 4
+  activation_checkpointing: true
+  # Preserve the full 40,960-token prompt plus up to 8,192 generated tokens.
+  max_sequence_length: 49152
+  epochs: 10
+  steps: 10
+  group_size: 4
+  update_epochs: 2
+  minibatch_size: 128
+  clip_range: 0.2
+  target_kl: 0.03
+  gradient_accumulation_microbatch_size: 2
+  learning_rate: 1.0e-6
+  checkpoint_interval: 5
+  eval_interval: 0
+  max_grad_norm: 1.0
+  verl:
+    address:
+    namespace: self-summarization-agent
+    num_cpus:
+    num_gpus_per_worker:
+    runtime_env:
+      env_vars:
+        VIRTUAL_ENV: "/124090467/self-summarization-agent/.venv"
+        PATH: "/root/.local/bin:/124090467/self-summarization-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+      excludes:
+        - "pyproject.toml"
+        - ".python-version"
+        - "uv.lock"
+    worker_backend: verl_fsdp
+    fsdp:
+      strategy: fsdp
+      ppo_micro_batch_size_per_gpu: 1
+      ppo_max_token_len_per_gpu: 49152
+      log_prob_micro_batch_size_per_gpu: 1
+      log_prob_max_token_len_per_gpu: 49152
+      use_dynamic_bsz: true
+      use_remove_padding: true
+      use_torch_compile: true
+      # Ulysses splits long-sequence activation work across all four ranks.
+      ulysses_sequence_parallel_size: 4
+      param_offload: false
+      optimizer_offload: false
+      fsdp_size: -1
+      save_hf_model: true
+    ignore_reinit_error: true
+    log_to_driver: true
+    shutdown_ray: true

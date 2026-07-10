@@ -206,3 +206,22 @@ training:
     assert config.training.verl.ignore_reinit_error is False
     assert config.training.verl.log_to_driver is False
     assert config.training.verl.shutdown_ray is False
+
+
+def test_load_no_compact_32k_training_preset() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "no_compact_32k.yaml"
+
+    config = load_train_config(config_path)
+
+    assert config.experiment.name == "qwen-bcplus-no-compact-32k-train"
+    assert config.runtime.context_threshold_tokens == 1_000_000_000
+    assert config.runtime.max_context_tokens == 40_960
+    assert config.runtime.generated_token_budget == 32_768
+    assert config.rollout.max_model_len == 49_152
+    assert config.rollout.max_concurrent_episodes == 8
+    assert config.training.backend == "verl_ray"
+    assert config.training.verl.worker_backend == "verl_fsdp"
+    assert config.training.max_sequence_length == 49_152
+    assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 49_152
+    assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 49_152
+    assert config.training.verl.fsdp.ulysses_sequence_parallel_size == 4
