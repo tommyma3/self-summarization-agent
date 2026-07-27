@@ -13,8 +13,8 @@ from self_summarization_agent.config import (
     TrainingConfig,
 )
 from self_summarization_agent.dataset import QueryExample
-from self_summarization_agent.judge import RewardJudge, create_judge_prompt
-from self_summarization_agent.judge_step import judge_rollouts
+from self_summarization_agent.judge import JudgeDecision, RewardJudge, create_judge_prompt
+from self_summarization_agent.judge_step import apply_decision_to_rollout_row, judge_rollouts
 
 
 class BatchJudgeGenerator:
@@ -30,6 +30,26 @@ class BatchJudgeGenerator:
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
+
+
+def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
+    row = {
+        "status": "summary_length_exceeded",
+        "rollout_index": 0,
+        "turn_records": [
+            {"query_id": "q1", "turn_id": "tool-1", "kind": "tool", "prompt": "p", "completion": "c"},
+            {"query_id": "q1", "turn_id": "summary-1", "kind": "summary", "prompt": "p", "completion": "c"},
+        ],
+    }
+
+    judged = apply_decision_to_rollout_row(
+        row,
+        JudgeDecision(outcome="correct_answer", judge_prompt="unused", judge_response="unused", parse_error=False),
+    )
+
+    assert judged["judge"]["outcome"] == "summary_length_exceeded"
+    assert judged["turn_rewards"] == {"tool-1": -1.0, "summary-1": -1.0}
+    assert judged["trainable_sample_count"] == 2
 
 
 def test_create_judge_prompt_is_minimal() -> None:

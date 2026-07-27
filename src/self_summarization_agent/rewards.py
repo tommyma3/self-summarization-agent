@@ -4,6 +4,11 @@ from typing import Literal
 
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted"]
 TRAINABLE_TURN_KINDS = {"tool", "summary", "final_answer"}
+PENALIZED_RUNTIME_STATUSES = frozenset({"malformed_tool_call", "summary_length_exceeded"})
+
+
+def is_penalized_runtime_status(status: object) -> bool:
+    return isinstance(status, str) and status in PENALIZED_RUNTIME_STATUSES
 
 
 def trainable_turn_ids_from_records(turn_records: Iterable[Mapping[str, object]]) -> list[str]:

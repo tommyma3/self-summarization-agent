@@ -162,6 +162,54 @@ def test_runtime_stops_on_malformed_tool_call() -> None:
     assert result.turn_rewards == {"tool-1": -1.0}
 
 
+def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
+    first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
+    second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
+    overlong_summary = "one two three"
+    backend = FakeBackend(search_index={"first": ["doc-1"], "second": ["doc-2"]}, documents={})
+    model = RecordingModel(outputs=[first_search, second_search, overlong_summary])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1,
+        max_context_tokens=1024,
+        max_summary_tokens=2,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "summary_length_exceeded"
+    assert result.final_answer is None
+    assert result.summary_turns == []
+    assert [record["kind"] for record in result.turn_records] == ["tool", "tool", "summary"]
+    assert result.turn_rewards == {"tool-1": -1.0, "tool-2": -1.0, "summary-1": -1.0}
+    summary_record = result.turn_records[-1]
+    assert summary_record["summary_tokens"] == 3
+    assert summary_record["max_summary_tokens"] == 2
+    assert "at most 2 tokens" in model.prompts[-1]
+
+
+def test_runtime_accepts_summary_at_maximum_length() -> None:
+    first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
+    second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
+    summary = "one two"
+    final_answer = tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
+    backend = FakeBackend(search_index={"first": ["doc-1"], "second": ["doc-2"]}, documents={})
+    runtime = EpisodeRuntime(
+        model=ScriptedModel(outputs=[first_search, second_search, summary, final_answer]),
+        backend=backend,
+        context_threshold_tokens=1,
+        max_context_tokens=1024,
+        max_summary_tokens=2,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.summary_turns == ["summary-1"]
+    assert result.turn_records[2]["summary_tokens"] == 2
+
+
 def test_parse_model_tool_call_accepts_thinking_and_fenced_json() -> None:
     raw_output = """
 <think>

@@ -24,6 +24,7 @@ from self_summarization_agent.launcher_utils import (
 from self_summarization_agent.rewards import (
     apply_malformed_tool_penalty,
     apply_terminal_reward,
+    is_penalized_runtime_status,
     trainable_turn_ids_from_records,
 )
 from self_summarization_agent.train_grpo import group_samples_by_query
@@ -77,9 +78,9 @@ def _merge_launcher_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 def _apply_judged_rewards(result, example: QueryExample, judge: RewardJudge) -> dict[str, Any]:
     trainable_turn_ids = trainable_turn_ids_from_records(result.turn_records)
-    if result.status == "malformed_tool_call":
+    if is_penalized_runtime_status(result.status):
         result.turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
-        return {"outcome": "malformed_tool_call", "judge_prompt": None, "judge_response": None, "parse_error": False}
+        return {"outcome": result.status, "judge_prompt": None, "judge_response": None, "parse_error": False}
     decision = judge.evaluate(example, result.status, result.final_answer or "")
     result.turn_rewards = apply_terminal_reward(
         outcome=decision.outcome,
@@ -128,7 +129,7 @@ def _evaluate_accuracy(
             judge_payload = _apply_judged_rewards(result, example, judge)
             if judge_payload["outcome"] == "correct_answer":
                 correct += 1
-            if judge_payload["outcome"] == "malformed_tool_call":
+            if is_penalized_runtime_status(judge_payload["outcome"]):
                 malformed += 1
             if judge_payload["parse_error"]:
                 parse_errors += 1
@@ -207,7 +208,7 @@ def train_experiment(
             results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
             for (example, rollout_index), result in zip(request_batch, results):
                 judge_payload = _apply_judged_rewards(result, example, judge)
-                if judge_payload["outcome"] == "malformed_tool_call":
+                if is_penalized_runtime_status(judge_payload["outcome"]):
                     malformed_count += 1
                 else:
                     judged_count += 1

@@ -16,6 +16,7 @@ from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.rewards import (
     apply_malformed_tool_penalty,
     apply_terminal_reward,
+    is_penalized_runtime_status,
     trainable_turn_ids_from_records,
 )
 from self_summarization_agent.trajectory import extract_trainable_samples
@@ -102,12 +103,12 @@ def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) 
     status = row.get("status")
     judged_row = dict(row)
     trainable_turn_ids = trainable_turn_ids_from_records(row["turn_records"])
-    if status == "malformed_tool_call":
+    if is_penalized_runtime_status(status):
         turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
         judged_row["turn_rewards"] = turn_rewards
         judged_row["trainable_sample_count"] = len(extract_trainable_samples(row["turn_records"], turn_rewards))
         judged_row["judge"] = {
-            "outcome": "malformed_tool_call",
+            "outcome": status,
             "judge_prompt": None,
             "judge_response": None,
             "parse_error": False,
@@ -145,7 +146,7 @@ def judge_rollout_rows(
     judge_row_indices: list[int] = []
     decisions_by_row_index: dict[int, JudgeDecision] = {}
     for index, row in enumerate(rows):
-        if row.get("status") == "malformed_tool_call":
+        if is_penalized_runtime_status(row.get("status")):
             decisions_by_row_index[index] = JudgeDecision(
                 outcome="wrong_answer",
                 judge_prompt=None,

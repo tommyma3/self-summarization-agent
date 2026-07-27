@@ -82,6 +82,7 @@ def build_runtime(
         backend=backend,
         context_threshold_tokens=runtime_config.context_threshold_tokens,
         max_context_tokens=runtime_config.max_context_tokens,
+        max_summary_tokens=runtime_config.max_summary_tokens,
         max_tool_calls=runtime_config.tool_budget,
         generated_token_budget=runtime_config.generated_token_budget,
         token_counter=token_counter,

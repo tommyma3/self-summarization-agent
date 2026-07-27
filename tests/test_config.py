@@ -49,6 +49,7 @@ runtime:
     assert config.retrieval.snippet_tokenizer_path == "/models/qwen-tokenizer"
     assert config.runtime.tool_budget == 2
     assert config.runtime.generated_token_budget == 8
+    assert config.runtime.max_summary_tokens == 2048
 
 
 def test_load_train_config_reads_training_section(tmp_path: Path) -> None:

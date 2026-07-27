@@ -60,6 +60,8 @@ rollout:
 runtime:
   context_threshold_tokens: 6000
   max_context_tokens: 18000
+  # Summary-body cap. An overlong summary terminates the rollout with a negative reward.
+  max_summary_tokens: 2048
   tool_budget: 99999
   generated_token_budget: 24000
 

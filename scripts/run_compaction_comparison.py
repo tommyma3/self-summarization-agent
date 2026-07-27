@@ -140,6 +140,7 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
     forced_reasons: Counter[str] = Counter()
     correct = 0
     malformed = 0
+    summary_length_exceeded = 0
     parse_errors = 0
 
     reasoning_tokens = 0.0
@@ -170,6 +171,8 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
             correct += 1
         if outcome == "malformed_tool_call":
             malformed += 1
+        if outcome == "summary_length_exceeded":
+            summary_length_exceeded += 1
         if isinstance(judge, dict) and judge.get("parse_error"):
             parse_errors += 1
 
@@ -221,6 +224,7 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
         "accuracy": correct / total if total else 0.0,
         "correct": correct,
         "malformed": malformed,
+        "summary_length_exceeded": summary_length_exceeded,
         "parse_errors": parse_errors,
         "outcome_counts": dict(sorted(outcomes.items())),
         "status_counts": dict(sorted(statuses.items())),
@@ -342,8 +346,8 @@ def _condition_overrides(
 def _render_markdown(summary: dict[str, Any]) -> str:
     condition_summaries = summary["conditions"]
     rows = [
-        "| condition | accuracy | correct/total | avg reasoning tok | avg tool tok | avg summary tok | avg total tok | avg CoT tok/episode | avg prompt max | avg search | avg doc | forced answer |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| condition | accuracy | correct/total | avg reasoning tok | avg tool tok | avg summary tok | avg total tok | avg CoT tok/episode | avg prompt max | avg search | avg doc | forced answer | summary too long |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for item in condition_summaries:
         rows.append(
@@ -352,7 +356,8 @@ def _render_markdown(summary: dict[str, Any]) -> str:
             "{avg_summary_generated_tokens:.1f} | "
             "{avg_total_generated_tokens:.1f} | {avg_cot_tokens_per_episode:.1f} | "
             "{avg_max_prompt_tokens_seen:.1f} | {avg_search_calls:.2f} | "
-            "{avg_document_calls:.2f} | {forced_answer_episode_count} |".format(**item)
+            "{avg_document_calls:.2f} | {forced_answer_episode_count} | "
+            "{summary_length_exceeded} |".format(**item)
         )
     if summary.get("deltas"):
         rows.extend(["", "## Deltas", "", "Positive values mean second condition minus first condition."])

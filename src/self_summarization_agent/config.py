@@ -90,6 +90,7 @@ class RolloutConfig:
 class RuntimeConfig:
     context_threshold_tokens: int = 24000
     max_context_tokens: int = 32768
+    max_summary_tokens: int = 2048
     tool_budget: int = 16
     generated_token_budget: int | None = None
 

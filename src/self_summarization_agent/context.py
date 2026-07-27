@@ -33,8 +33,8 @@ class ContextManager:
     def should_summarize(self, state: EpisodeState) -> bool:
         return self.current_token_count(state) >= state.context_threshold_tokens
 
-    def build_summary_context(self, state: EpisodeState) -> str:
-        pieces = [build_summary_system_prompt(), state.user_prompt]
+    def build_summary_context(self, state: EpisodeState, *, max_summary_tokens: int | None = None) -> str:
+        pieces = [build_summary_system_prompt(max_summary_tokens=max_summary_tokens), state.user_prompt]
         if state.latest_summary:
             pieces.append(state.latest_summary)
         for round_record in state.rounds:

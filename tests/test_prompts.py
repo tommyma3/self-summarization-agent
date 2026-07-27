@@ -15,6 +15,12 @@ def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     assert "<answer>best supported answer</answer>" in prompt
 
 
+def test_build_summary_system_prompt_includes_configured_length_cap() -> None:
+    prompt = build_summary_system_prompt(max_summary_tokens=2048)
+
+    assert "at most 2048 tokens" in prompt
+
+
 def test_episode_state_starts_with_empty_summary() -> None:
     state = EpisodeState(query_id="q1", user_prompt="question", context_threshold_tokens=1024)
     assert state.latest_summary is None

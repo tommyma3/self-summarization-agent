@@ -37,10 +37,16 @@ Think first, then answer with exactly one action:
 Use only the conversation, summary, and tool results."""
 
 
-def build_summary_system_prompt() -> str:
-    return """You are a context summarization AI agent.
+def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:
+    length_instruction = (
+        f"Keep the summary body to at most {max_summary_tokens} tokens.\n"
+        if max_summary_tokens is not None
+        else ""
+    )
+    return f"""You are a context summarization AI agent.
 
-Your task is to summarize the previous research context so the research agent can continue the task. The summary should contain only the essential information needed to continue solving the task. Keep the summary structured. Use short sentences. Return a summary using format: <summary> your summary </summary>. 
+Your task is to summarize the previous research context so the research agent can continue the task. The summary should contain only the essential information needed to continue solving the task. Keep the summary structured. Use short sentences.
+{length_instruction}Return a summary using format: <summary> your summary </summary>.
 """
 
 

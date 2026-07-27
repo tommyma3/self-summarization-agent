@@ -249,10 +249,15 @@ class EpisodeRuntime:
     backend: BrowseCompBackend
     context_threshold_tokens: int
     max_context_tokens: int
+    max_summary_tokens: int = 2048
     max_tool_calls: int | None = None
     generated_token_budget: int | None = None
     token_counter: Callable[[str], int] = field(default=lambda text: len(text.split()))
     cache_policy_checkpoint_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_summary_tokens < 1:
+            raise ValueError(f"max_summary_tokens must be at least 1, got {self.max_summary_tokens}")
 
     def _build_transcript_block(self, label: str, content: str) -> str:
         return f"### {label}\n{content}"
@@ -400,9 +405,20 @@ class EpisodeRuntime:
         if training_cache is not None:
             turn_record["training_cache"] = training_cache
         recorded_turns.append(turn_record)
+        return self._penalized_result(active, status="malformed_tool_call", turn_records=recorded_turns)
+
+    def _penalized_result(
+        self,
+        active: _ActiveEpisode,
+        *,
+        status: str,
+        turn_records: list[dict[str, Any]] | None = None,
+    ) -> RuntimeResult:
+        state = active.state
+        recorded_turns = list(active.turn_records if turn_records is None else turn_records)
         return RuntimeResult(
-            query_id=query_id,
-            status="malformed_tool_call",
+            query_id=state.query_id,
+            status=status,
             final_answer=None,
             summary_turns=list(active.summary_turns),
             turn_rewards=apply_malformed_tool_penalty(trainable_turn_ids_from_records(recorded_turns)),
@@ -804,7 +820,10 @@ class EpisodeRuntime:
         summary_state, retired_count = self._build_summary_state(active.state)
         if retired_count == 0:
             return None
-        prompt = active.context_manager.build_summary_context(summary_state)
+        prompt = active.context_manager.build_summary_context(
+            summary_state,
+            max_summary_tokens=self.max_summary_tokens,
+        )
         active.context_manager.assert_fits(prompt)
         return prompt, retired_count
 
@@ -819,6 +838,7 @@ class EpisodeRuntime:
         generated_summary = generated_output.text
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
         summary_extraction = extract_summary_output(generated_summary)
+        summary_tokens = self._completion_token_count(summary_extraction.summary)
         state = active.state
         state.summary_count += 1
         summary_turn_id = f"summary-{state.summary_count}"
@@ -830,6 +850,8 @@ class EpisodeRuntime:
             "completion": generated_summary,
             "thinking": summary_extraction.thinking,
             "summary": summary_extraction.summary,
+            "summary_tokens": summary_tokens,
+            "max_summary_tokens": self.max_summary_tokens,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": generated_output.completion_tokens,
             "generation_kind": "summary",
@@ -837,6 +859,9 @@ class EpisodeRuntime:
         if generated_output.training_cache is not None:
             turn_record["training_cache"] = generated_output.training_cache
         active.turn_records.append(turn_record)
+        if summary_tokens > self.max_summary_tokens:
+            active.result = self._penalized_result(active, status="summary_length_exceeded")
+            return
         if not summary_extraction.summary:
             return
         state.latest_summary = summary_extraction.summary

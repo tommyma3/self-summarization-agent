@@ -77,6 +77,7 @@ def write_eval_metrics(
     rows = _load_rows(judged_rollout_path)
     correct = 0
     malformed = 0
+    summary_length_exceeded = 0
     parse_errors = 0
     for index, row in enumerate(rows, start=1):
         judge = row.get("judge")
@@ -87,6 +88,8 @@ def write_eval_metrics(
             correct += 1
         if outcome == "malformed_tool_call":
             malformed += 1
+        if outcome == "summary_length_exceeded":
+            summary_length_exceeded += 1
         if judge.get("parse_error"):
             parse_errors += 1
 
@@ -116,6 +119,7 @@ def write_eval_metrics(
         "eval_correct": correct,
         "eval_total": total,
         "eval_malformed": malformed,
+        "eval_summary_length_exceeded": summary_length_exceeded,
         "eval_parse_errors": parse_errors,
         "eval_reasoning_generated_tokens": reasoning_tokens,
         "eval_summary_generated_tokens": summary_tokens,
