@@ -71,29 +71,45 @@ def train_config(tmp_path: Path) -> TrainConfig:
     )
 
 
-def write_rollout(path: Path, checkpoint_id: str) -> None:
-    row = {
-        "policy_checkpoint_id": checkpoint_id,
-        "trainable_sample_count": 2,
-        "turn_records": [
+def write_rollout(path: Path, checkpoint_id: str, *, summary_tokens: int | None = None) -> None:
+    turn_records = [
+        {
+            "query_id": "q1",
+            "turn_id": "tool-1",
+            "kind": "tool",
+            "prompt": "tool prompt",
+            "completion": '{"tool_name": "search", "arguments": {"query": "question"}}',
+            "training_cache": training_cache(-0.5),
+        },
+        {
+            "query_id": "q1",
+            "turn_id": "final-answer",
+            "kind": "final_answer",
+            "prompt": "prompt",
+            "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
+            "training_cache": training_cache(-0.25),
+        },
+    ]
+    turn_rewards = {"tool-1": 1.0, "final-answer": 1.0}
+    if summary_tokens is not None:
+        turn_records.insert(
+            0,
             {
                 "query_id": "q1",
-                "turn_id": "tool-1",
-                "kind": "tool",
-                "prompt": "tool prompt",
-                "completion": '{"tool_name": "search", "arguments": {"query": "question"}}',
+                "turn_id": "summary-1",
+                "kind": "summary",
+                "prompt": "summary prompt",
+                "completion": "<think>internal reasoning</think>\nsummary body",
+                "summary_tokens": summary_tokens,
                 "training_cache": training_cache(-0.5),
             },
-            {
-                "query_id": "q1",
-                "turn_id": "final-answer",
-                "kind": "final_answer",
-                "prompt": "prompt",
-                "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
-                "training_cache": training_cache(-0.25),
-            }
-        ],
-        "turn_rewards": {"tool-1": 1.0, "final-answer": 1.0},
+        )
+        turn_rewards["summary-1"] = 1.0
+    row = {
+        "policy_checkpoint_id": checkpoint_id,
+        "trainable_sample_count": len(turn_records),
+        "turn_records": turn_records,
+        "turn_rewards": turn_rewards,
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -187,7 +203,7 @@ def test_run_train_step_writes_backend_and_extra_metrics(tmp_path: Path) -> None
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     rollout_path = tmp_path / "rollouts.jsonl"
-    write_rollout(rollout_path, "step-00001")
+    write_rollout(rollout_path, "step-00001", summary_tokens=3)
     output_checkpoint = tmp_path / "checkpoints" / "step-00002"
     metrics_path = tmp_path / "step_metrics.jsonl"
 
@@ -212,7 +228,8 @@ def test_run_train_step_writes_backend_and_extra_metrics(tmp_path: Path) -> None
     metric_row = json.loads(metrics_path.read_text(encoding="utf-8").strip())
     assert metric_row["training_backend"] == "verl_ray"
     assert metric_row["backend"] == "verl_ray"
-    assert metric_row["verl_ray/sample_count"] == 2
+    assert metric_row["verl_ray/sample_count"] == 3
+    assert metric_row["avg_summary_tokens"] == 3
 
 
 def test_run_train_step_rejects_checkpoint_mismatch_before_trainer_mutation(tmp_path: Path) -> None:

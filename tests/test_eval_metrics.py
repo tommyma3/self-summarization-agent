@@ -19,6 +19,9 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "max_prompt_tokens_seen": 8000,
                 "summary_count": 1,
             },
+            "turn_records": [
+                {"kind": "summary", "thinking": "internal reasoning", "summary_tokens": 8},
+            ],
         },
         {
             "judge": {"outcome": "wrong_answer", "parse_error": True},
@@ -32,6 +35,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "max_prompt_tokens_seen": 4000,
                 "summary_count": 0,
             },
+            "turn_records": [],
         },
         {
             "judge": {"outcome": "malformed_tool_call", "parse_error": False},
@@ -45,6 +49,9 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "max_prompt_tokens_seen": 6000,
                 "summary_count": 1,
             },
+            "turn_records": [
+                {"kind": "summary", "thinking": "brief reasoning", "summary_tokens": 4},
+            ],
         },
     ]
     judged_rollouts.write_text(
@@ -74,6 +81,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
     assert record["eval_total_generated_tokens"] == 210
     assert record["eval_avg_reasoning_generated_tokens"] == 175 / 3
     assert record["eval_avg_summary_generated_tokens"] == 10
+    assert record["eval_avg_summary_tokens"] == 4
     assert record["eval_avg_forced_answer_generated_tokens"] == 5 / 3
     assert record["eval_avg_tool_result_tokens"] == 40 / 3
     assert record["eval_avg_total_generated_tokens"] == 70
