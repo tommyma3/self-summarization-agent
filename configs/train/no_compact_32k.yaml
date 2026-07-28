@@ -119,9 +119,9 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 32768
+      ppo_max_token_len_per_gpu: 8192
       log_prob_micro_batch_size_per_gpu: 1
-      log_prob_max_token_len_per_gpu: 32768
+      log_prob_max_token_len_per_gpu: 8192
       use_dynamic_bsz: true
       use_remove_padding: true
       use_torch_compile: true

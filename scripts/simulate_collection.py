@@ -158,6 +158,8 @@ def write_training_sequences(
         )
     elif terminal_status == "budget_exhausted":
         reward_note = "This rollout exhausted the tool budget. Every listed turn gets reward -1.\n"
+    elif terminal_status == "summary_length_exceeded":
+        reward_note = "This rollout exceeded the summary length cap. Every listed turn gets reward -1.\n"
     else:
         reward_note = "This rollout ended malformed. Every listed turn gets reward -1.\n"
 
@@ -301,6 +303,7 @@ def trace_collection(
                 "tool_budget": runtime.max_tool_calls,
                 "generated_token_budget": runtime.generated_token_budget,
                 "generator_max_model_len": getattr(generator, "max_model_len", None),
+                "max_summary_tokens": runtime.max_summary_tokens,
             },
         )
 
@@ -634,7 +637,10 @@ def trace_collection(
                 write_section(handle, f"Round {round_number} Summary Skipped", "reason: only one raw tail round is available\n")
                 continue
 
-            summary_prompt = context_manager.build_summary_context(summary_state)
+            summary_prompt = context_manager.build_summary_context(
+                summary_state,
+                max_summary_tokens=runtime.max_summary_tokens,
+            )
             context_manager.assert_fits(summary_prompt)
             write_prompt(
                 handle,
@@ -647,6 +653,7 @@ def trace_collection(
             generated_summary = runtime.model.generate(summary_prompt)
             write_section(handle, f"Summary {state.summary_count + 1} Model Output", generated_summary)
             summary_extraction = extract_summary_output(generated_summary)
+            summary_tokens = runtime._completion_token_count(summary_extraction.summary)
             state.summary_count += 1
             summary_turn_id = f"summary-{state.summary_count}"
             append_trainable_turn(
@@ -655,6 +662,33 @@ def trace_collection(
                 prompt=summary_prompt,
                 completion=generated_summary,
             )
+            write_section(
+                handle,
+                f"Summary {state.summary_count} Token Check",
+                json.dumps(
+                    {
+                        "summary_tokens": summary_tokens,
+                        "max_summary_tokens": runtime.max_summary_tokens,
+                        "exceeded": summary_tokens > runtime.max_summary_tokens,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            )
+            if summary_tokens > runtime.max_summary_tokens:
+                write_section(
+                    handle,
+                    "Terminal Status",
+                    f"status: summary_length_exceeded\nreason: summary body is {summary_tokens} tokens (cap is {runtime.max_summary_tokens})\n",
+                )
+                write_training_sequences(
+                    handle,
+                    runtime=runtime,
+                    terminal_status="summary_length_exceeded",
+                    trainable_turns=trainable_turns,
+                )
+                _write_judge_output(handle, judge, example, "summary_length_exceeded", "")
+                return
             if not summary_extraction.summary:
                 write_section(handle, f"Summary {state.summary_count} Skipped", "reason: model returned an empty summary body\n")
                 continue
