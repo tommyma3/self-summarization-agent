@@ -57,6 +57,22 @@ def _average(total: float, count: int) -> float:
     return total / count if count else 0.0
 
 
+def _average_summary_tokens(rows: list[dict[str, Any]]) -> float:
+    """Return mean summary-body tokens per rollout, excluding thinking tokens."""
+    summary_tokens = 0.0
+    for row in rows:
+        turn_records = row.get("turn_records")
+        if not isinstance(turn_records, list):
+            continue
+        for turn in turn_records:
+            if not isinstance(turn, dict) or turn.get("kind") != "summary":
+                continue
+            value = turn.get("summary_tokens", 0)
+            if isinstance(value, int | float):
+                summary_tokens += float(value)
+    return _average(summary_tokens, len(rows))
+
+
 def _per_1k(correct: int, tokens: float) -> float:
     return correct / (tokens / 1000.0) if tokens > 0 else 0.0
 
@@ -128,6 +144,7 @@ def write_eval_metrics(
         "eval_total_generated_tokens": total_generated_tokens,
         "eval_avg_reasoning_generated_tokens": _average(reasoning_tokens, total),
         "eval_avg_summary_generated_tokens": _average(summary_tokens, total),
+        "eval_avg_summary_tokens": _average_summary_tokens(rows),
         "eval_avg_forced_answer_generated_tokens": _average(forced_answer_tokens, total),
         "eval_avg_tool_result_tokens": _average(tool_result_tokens, total),
         "eval_avg_total_generated_tokens": _average(total_generated_tokens, total),

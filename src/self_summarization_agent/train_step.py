@@ -33,6 +33,22 @@ def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _average_summary_tokens(rows: list[dict[str, Any]]) -> float:
+    """Return mean summary-body tokens per rollout, excluding thinking tokens."""
+    summary_tokens = 0.0
+    for row in rows:
+        turn_records = row.get("turn_records")
+        if not isinstance(turn_records, list):
+            continue
+        for turn in turn_records:
+            if not isinstance(turn, dict) or turn.get("kind") != "summary":
+                continue
+            value = turn.get("summary_tokens", 0)
+            if isinstance(value, int | float):
+                summary_tokens += float(value)
+    return summary_tokens / len(rows) if rows else 0.0
+
+
 def samples_from_rollout_rows(rows: list[dict[str, Any]], *, expected_checkpoint_id: str) -> list[Any]:
     samples = []
     for index, row in enumerate(rows, start=1):
@@ -150,6 +166,7 @@ def run_train_step(
             "optimizer_step_count": getattr(metrics, "optimizer_step_count", 0),
             "mean_policy_kl": getattr(metrics, "mean_policy_kl", 0.0),
             "clip_fraction": getattr(metrics, "clip_fraction", 0.0),
+            "avg_summary_tokens": _average_summary_tokens(rows),
         }
         metrics_payload.update(getattr(metrics, "extra_metrics", {}) or {})
         append_jsonl(metrics_path, metrics_payload)
