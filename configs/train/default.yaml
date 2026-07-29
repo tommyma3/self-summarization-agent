@@ -50,7 +50,7 @@ rollout:
   tensor_parallel_size: 2
   attention_backend:
   max_model_len: 27000
-  max_concurrent_episodes: 32
+  max_concurrent_episodes: 50
   overlap_judge: true
   max_new_tokens: 8192
   temperature: 0.7
