@@ -470,6 +470,157 @@ def _run_or_skip_phase(
         raise RuntimeError(f"{error_message} failed with exit code {status}")
 
 
+def run_checkpoint_evaluation(
+    config,
+    *,
+    config_path: str | Path,
+    iteration: int,
+    latest_root: str | Path | None = None,
+    command_runner: CommandRunner = default_command_runner,
+    python_executable: str = sys.executable,
+    resume: bool = False,
+    overrides: Sequence[str] = (),
+) -> Path:
+    if iteration < 0:
+        raise ValueError(f"iteration must be non-negative, got {iteration}")
+    if config.dataset.eval_limit <= 0:
+        raise ValueError("dataset.eval_limit must be positive for checkpoint evaluation")
+
+    train_dir = ensure_dir(latest_root or _train_dir(config))
+    current = resolve_latest_checkpoint(train_dir)
+    rollouts_dir = ensure_dir(train_dir / "rollouts")
+    eval_metrics_path = train_dir / "eval_metrics.jsonl"
+    phase_timings_path = train_dir / "phase_timings.jsonl"
+    eval_raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.raw.jsonl"
+    eval_judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.jsonl"
+
+    if resume and _has_eval_metrics(
+        eval_metrics_path,
+        iteration=iteration,
+        policy_checkpoint_id=current.checkpoint_id,
+    ):
+        return current.path
+
+    eval_rollout_command = [
+        python_executable,
+        "-m",
+        "self_summarization_agent.rollout_collection",
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(current.path),
+        "--output",
+        str(eval_raw_rollout_path),
+        "--split",
+        "eval",
+    ]
+    if config.rollout.overlap_judge and config.judge.enabled:
+        eval_rollout_command.extend(["--judged-output", str(eval_judged_rollout_path)])
+    _append_cli_overrides(eval_rollout_command, overrides)
+    eval_rollout_command.extend(["--set", "training.group_size=1"])
+    if resume:
+        eval_rollout_command.append("--resume")
+
+    eval_judge_command = [
+        python_executable,
+        "-m",
+        "self_summarization_agent.judge_step",
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        str(current.path),
+        "--rollouts",
+        str(eval_raw_rollout_path),
+        "--output",
+        str(eval_judged_rollout_path),
+        "--split",
+        "eval",
+    ]
+    _append_cli_overrides(eval_judge_command, overrides)
+    eval_metrics_command = [
+        python_executable,
+        "-m",
+        "self_summarization_agent.eval_metrics",
+        "--rollouts",
+        str(eval_judged_rollout_path),
+        "--metrics",
+        str(eval_metrics_path),
+        "--iteration",
+        str(iteration),
+        "--policy-checkpoint-id",
+        current.checkpoint_id,
+    ]
+
+    expected_count = _expected_eval_rollout_count(config)
+    raw_complete = resume and _has_complete_raw_rollouts(
+        eval_raw_rollout_path,
+        checkpoint_id=current.checkpoint_id,
+        expected_count=expected_count,
+    )
+    retrieval_worker_process = None
+    retrieval_worker_url = None
+    if config.retrieval.persistent_worker and not raw_complete:
+        retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
+            config_path=config_path,
+            train_dir=train_dir,
+            python_executable=python_executable,
+            overrides=overrides,
+            startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
+        )
+        eval_rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
+
+    try:
+        _run_or_skip_phase(
+            phase="eval_rollout",
+            iteration=iteration,
+            command=eval_rollout_command,
+            command_runner=command_runner,
+            timings_path=phase_timings_path,
+            completed=raw_complete,
+            error_message="Eval rollout subprocess",
+        )
+    finally:
+        _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
+
+    judged_complete = resume and _has_complete_judged_rollouts(
+        eval_judged_rollout_path,
+        checkpoint_id=current.checkpoint_id,
+        expected_count=expected_count,
+        require_judge=True,
+    )
+    if not judged_complete and config.rollout.overlap_judge and config.judge.enabled:
+        judged_complete = _has_complete_judged_rollouts(
+            eval_judged_rollout_path,
+            checkpoint_id=current.checkpoint_id,
+            expected_count=expected_count,
+            require_judge=True,
+        )
+    _run_or_skip_phase(
+        phase="eval_judge",
+        iteration=iteration,
+        command=eval_judge_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+        completed=judged_complete,
+        error_message="Eval judge subprocess",
+    )
+    metrics_complete = resume and _has_eval_metrics(
+        eval_metrics_path,
+        iteration=iteration,
+        policy_checkpoint_id=current.checkpoint_id,
+    )
+    _run_or_skip_phase(
+        phase="eval_metrics",
+        iteration=iteration,
+        command=eval_metrics_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+        completed=metrics_complete,
+        error_message="Eval metrics subprocess",
+    )
+    return current.path
+
+
 def run_training_iteration(
     config,
     *,
@@ -482,6 +633,8 @@ def run_training_iteration(
     resume_rollouts: bool = False,
     overrides: Sequence[str] = (),
 ) -> Path:
+    if iteration < 1:
+        raise ValueError(f"iteration must be at least 1, got {iteration}")
     train_dir = ensure_dir(latest_root or _train_dir(config))
     current = resolve_latest_checkpoint(train_dir)
     should_resume = resume or resume_rollouts
@@ -493,20 +646,16 @@ def run_training_iteration(
     raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.raw.jsonl"
     judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.judged.jsonl"
     cached_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.jsonl"
-    eval_raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.raw.jsonl"
-    eval_judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.jsonl"
+    eval_iteration = iteration - 1
+    eval_raw_rollout_path = rollouts_dir / f"iteration-{eval_iteration:05d}.eval.raw.jsonl"
+    eval_judged_rollout_path = rollouts_dir / f"iteration-{eval_iteration:05d}.eval.jsonl"
     next_checkpoint = checkpoints_dir / f"iteration-{iteration:05d}"
     training_already_advanced = should_resume and current.checkpoint_id == checkpoint_id_from_path(next_checkpoint)
-    eval_checkpoint = current.path if training_already_advanced else next_checkpoint
-    eval_checkpoint_id = checkpoint_id_from_path(eval_checkpoint)
+    eval_checkpoint = current.path
+    eval_checkpoint_id = current.checkpoint_id
 
     if training_already_advanced:
-        if config.dataset.eval_limit <= 0 or _has_eval_metrics(
-            eval_metrics_path,
-            iteration=iteration,
-            policy_checkpoint_id=eval_checkpoint_id,
-        ):
-            return current.path
+        return current.path
 
     rollout_command = [
         python_executable,
@@ -521,8 +670,12 @@ def run_training_iteration(
         "--sample-seed",
         str(config.experiment.seed + iteration),
     ]
+    if config.dataset.eval_limit > 0:
+        rollout_command.extend(["--eval-output", str(eval_raw_rollout_path)])
     if config.rollout.overlap_judge and config.judge.enabled:
         rollout_command.extend(["--judged-output", str(judged_rollout_path)])
+        if config.dataset.eval_limit > 0:
+            rollout_command.extend(["--eval-judged-output", str(eval_judged_rollout_path)])
     _append_cli_overrides(rollout_command, overrides)
     if should_resume:
         rollout_command.append("--resume")
@@ -573,17 +726,24 @@ def run_training_iteration(
     ]
     _append_cli_overrides(train_command, overrides)
     train_raw_complete = should_resume and (
-        training_already_advanced
-        or _has_complete_raw_rollouts(
+        _has_complete_raw_rollouts(
             raw_rollout_path,
             checkpoint_id=current.checkpoint_id,
             expected_count=_expected_train_rollout_count(config),
         )
     )
+    eval_raw_complete = config.dataset.eval_limit <= 0 or (
+        should_resume
+        and _has_complete_raw_rollouts(
+            eval_raw_rollout_path,
+            checkpoint_id=eval_checkpoint_id,
+            expected_count=_expected_eval_rollout_count(config),
+        )
+    )
+    collection_complete = train_raw_complete and eval_raw_complete
     retrieval_worker_process = None
     retrieval_worker_url = None
-    needs_train_retrieval_worker = config.retrieval.persistent_worker and not train_raw_complete
-    if needs_train_retrieval_worker:
+    if config.retrieval.persistent_worker and not collection_complete:
         retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
             config_path=config_path,
             train_dir=train_dir,
@@ -597,21 +757,89 @@ def run_training_iteration(
             rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
         try:
             _run_or_skip_phase(
-                phase="train_rollout",
+                phase="eval_train_rollout" if config.dataset.eval_limit > 0 else "train_rollout",
                 iteration=iteration,
                 command=rollout_command,
                 command_runner=command_runner,
                 timings_path=phase_timings_path,
-                completed=train_raw_complete,
+                completed=collection_complete,
                 error_message="Rollout subprocess",
             )
         finally:
             _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
             retrieval_worker_process = None
             retrieval_worker_url = None
+
+        if config.dataset.eval_limit > 0:
+            eval_judge_command = [
+                python_executable,
+                "-m",
+                "self_summarization_agent.judge_step",
+                "--config",
+                str(config_path),
+                "--checkpoint",
+                str(eval_checkpoint),
+                "--rollouts",
+                str(eval_raw_rollout_path),
+                "--output",
+                str(eval_judged_rollout_path),
+                "--split",
+                "eval",
+            ]
+            _append_cli_overrides(eval_judge_command, overrides)
+            eval_metrics_command = [
+                python_executable,
+                "-m",
+                "self_summarization_agent.eval_metrics",
+                "--rollouts",
+                str(eval_judged_rollout_path),
+                "--metrics",
+                str(eval_metrics_path),
+                "--iteration",
+                str(eval_iteration),
+                "--policy-checkpoint-id",
+                eval_checkpoint_id,
+            ]
+            eval_expected_count = _expected_eval_rollout_count(config)
+            eval_judged_complete = should_resume and _has_complete_judged_rollouts(
+                eval_judged_rollout_path,
+                checkpoint_id=eval_checkpoint_id,
+                expected_count=eval_expected_count,
+                require_judge=True,
+            )
+            if not eval_judged_complete and config.rollout.overlap_judge and config.judge.enabled:
+                eval_judged_complete = _has_complete_judged_rollouts(
+                    eval_judged_rollout_path,
+                    checkpoint_id=eval_checkpoint_id,
+                    expected_count=eval_expected_count,
+                    require_judge=True,
+                )
+            _run_or_skip_phase(
+                phase="eval_judge",
+                iteration=iteration,
+                command=eval_judge_command,
+                command_runner=command_runner,
+                timings_path=phase_timings_path,
+                completed=eval_judged_complete,
+                error_message="Eval judge subprocess",
+            )
+            eval_metrics_complete = should_resume and _has_eval_metrics(
+                eval_metrics_path,
+                iteration=eval_iteration,
+                policy_checkpoint_id=eval_checkpoint_id,
+            )
+            _run_or_skip_phase(
+                phase="eval_metrics",
+                iteration=iteration,
+                command=eval_metrics_command,
+                command_runner=command_runner,
+                timings_path=phase_timings_path,
+                completed=eval_metrics_complete,
+                error_message="Eval metrics subprocess",
+            )
+
         train_judged_complete = should_resume and (
-            training_already_advanced
-            or _has_complete_judged_rollouts(
+            _has_complete_judged_rollouts(
                 judged_rollout_path,
                 checkpoint_id=current.checkpoint_id,
                 expected_count=_expected_train_rollout_count(config),
@@ -641,8 +869,7 @@ def run_training_iteration(
             expected_count=expected_train_count,
         )
         train_cached_complete = should_resume and (
-            training_already_advanced
-            or _has_complete_cached_rollouts(
+            _has_complete_cached_rollouts(
                 cached_rollout_path,
                 checkpoint_id=current.checkpoint_id,
                 expected_count=expected_train_count,
@@ -661,7 +888,7 @@ def run_training_iteration(
         if inline_cached_rollouts:
             train_command[train_command.index("--rollouts") + 1] = str(judged_rollout_path)
         checkpoint_complete = should_resume and (
-            training_already_advanced or is_vllm_loadable_checkpoint(next_checkpoint)
+            is_vllm_loadable_checkpoint(next_checkpoint)
         )
         _run_or_skip_phase(
             phase="train_update",
@@ -672,121 +899,7 @@ def run_training_iteration(
             completed=checkpoint_complete,
             error_message="Training subprocess",
         )
-        if config.dataset.eval_limit > 0:
-            eval_rollout_command = [
-                python_executable,
-                "-m",
-                "self_summarization_agent.rollout_collection",
-                "--config",
-                str(config_path),
-                "--checkpoint",
-                str(eval_checkpoint),
-                "--output",
-                str(eval_raw_rollout_path),
-                "--split",
-                "eval",
-            ]
-            if config.rollout.overlap_judge and config.judge.enabled:
-                eval_rollout_command.extend(["--judged-output", str(eval_judged_rollout_path)])
-            _append_cli_overrides(eval_rollout_command, overrides)
-            eval_rollout_command.extend(["--set", "training.group_size=1"])
-            if should_resume:
-                eval_rollout_command.append("--resume")
-            eval_judge_command = [
-                python_executable,
-                "-m",
-                "self_summarization_agent.judge_step",
-                "--config",
-                str(config_path),
-                "--checkpoint",
-                str(eval_checkpoint),
-                "--rollouts",
-                str(eval_raw_rollout_path),
-                "--output",
-                str(eval_judged_rollout_path),
-                "--split",
-                "eval",
-            ]
-            _append_cli_overrides(eval_judge_command, overrides)
-            eval_metrics_command = [
-                python_executable,
-                "-m",
-                "self_summarization_agent.eval_metrics",
-                "--rollouts",
-                str(eval_judged_rollout_path),
-                "--metrics",
-                str(eval_metrics_path),
-                "--iteration",
-                str(iteration),
-                "--policy-checkpoint-id",
-                eval_checkpoint_id,
-            ]
-            eval_expected_count = _expected_eval_rollout_count(config)
-            eval_raw_complete = should_resume and _has_complete_raw_rollouts(
-                eval_raw_rollout_path,
-                checkpoint_id=eval_checkpoint_id,
-                expected_count=eval_expected_count,
-            )
-            if config.retrieval.persistent_worker and not eval_raw_complete:
-                retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
-                    config_path=config_path,
-                    train_dir=train_dir,
-                    python_executable=python_executable,
-                    overrides=overrides,
-                    startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
-                )
-                eval_rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
-            try:
-                _run_or_skip_phase(
-                    phase="eval_rollout",
-                    iteration=iteration,
-                    command=eval_rollout_command,
-                    command_runner=command_runner,
-                    timings_path=phase_timings_path,
-                    completed=eval_raw_complete,
-                    error_message="Eval rollout subprocess",
-                )
-            finally:
-                _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
-                retrieval_worker_process = None
-                retrieval_worker_url = None
-            eval_judged_complete = should_resume and _has_complete_judged_rollouts(
-                eval_judged_rollout_path,
-                checkpoint_id=eval_checkpoint_id,
-                expected_count=eval_expected_count,
-                require_judge=True,
-            )
-            if not eval_judged_complete and config.rollout.overlap_judge and config.judge.enabled:
-                eval_judged_complete = _has_complete_judged_rollouts(
-                    eval_judged_rollout_path,
-                    checkpoint_id=eval_checkpoint_id,
-                    expected_count=eval_expected_count,
-                    require_judge=True,
-                )
-            _run_or_skip_phase(
-                phase="eval_judge",
-                iteration=iteration,
-                command=eval_judge_command,
-                command_runner=command_runner,
-                timings_path=phase_timings_path,
-                completed=eval_judged_complete,
-                error_message="Eval judge subprocess",
-            )
-            eval_metrics_complete = should_resume and _has_eval_metrics(
-                eval_metrics_path,
-                iteration=iteration,
-                policy_checkpoint_id=eval_checkpoint_id,
-            )
-            _run_or_skip_phase(
-                phase="eval_metrics",
-                iteration=iteration,
-                command=eval_metrics_command,
-                command_runner=command_runner,
-                timings_path=phase_timings_path,
-                completed=eval_metrics_complete,
-                error_message="Eval metrics subprocess",
-            )
-        advanced = advance_latest_checkpoint(train_dir, eval_checkpoint)
+        advanced = advance_latest_checkpoint(train_dir, next_checkpoint)
         return advanced.path
     finally:
         _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
@@ -796,6 +909,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one process-isolated rollout/train iteration.")
     parser.add_argument("--config", required=True, help="Path to the train YAML config.")
     parser.add_argument("--iteration", type=int, required=True, help="Iteration number.")
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate the latest checkpoint without collecting training trajectories or updating weights.",
+    )
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
     parser.add_argument("--resume", action="store_true", help="Resume from the first incomplete iteration phase.")
     parser.add_argument(
@@ -810,15 +928,25 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_train_config(args.config, parse_cli_overrides(args.overrides))
-    next_checkpoint = run_training_iteration(
-        config,
-        config_path=args.config,
-        iteration=args.iteration,
-        latest_root=args.latest_root,
-        resume=args.resume,
-        resume_rollouts=args.resume_rollouts,
-        overrides=args.overrides,
-    )
+    if args.eval_only:
+        next_checkpoint = run_checkpoint_evaluation(
+            config,
+            config_path=args.config,
+            iteration=args.iteration,
+            latest_root=args.latest_root,
+            resume=args.resume or args.resume_rollouts,
+            overrides=args.overrides,
+        )
+    else:
+        next_checkpoint = run_training_iteration(
+            config,
+            config_path=args.config,
+            iteration=args.iteration,
+            latest_root=args.latest_root,
+            resume=args.resume,
+            resume_rollouts=args.resume_rollouts,
+            overrides=args.overrides,
+        )
     print(next_checkpoint)
 
 

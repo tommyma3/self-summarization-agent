@@ -16,7 +16,7 @@ from self_summarization_agent.config import (
     TrainingConfig,
 )
 from self_summarization_agent.dataset import QueryExample
-from self_summarization_agent.rollout_collection import collect_rollouts
+from self_summarization_agent.rollout_collection import collect_eval_then_train_rollouts, collect_rollouts
 
 
 class CyclingGenerator:
@@ -63,6 +63,21 @@ class FinishingGenerator:
     def generate(self, prompt: str) -> str:
         del prompt
         return tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
+
+
+class BatchRecordingFinishingGenerator:
+    def __init__(self) -> None:
+        self.batch_sizes: list[int] = []
+
+    def generate(self, prompt: str) -> str:
+        return self.generate_batch([prompt])[0]
+
+    def generate_batch(self, prompts: list[str]) -> list[str]:
+        self.batch_sizes.append(len(prompts))
+        return [tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}') for _ in prompts]
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
@@ -264,6 +279,53 @@ def test_collect_rollouts_uses_collection_eval_task_count(tmp_path: Path) -> Non
 
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert [row["query_id"] for row in rows] == ["q2", "q3"]
+
+
+def test_collect_eval_then_train_reuses_generator_and_overlaps_judging(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.limit = 3
+    config.dataset.train_limit = 2
+    config.dataset.eval_limit = 1
+    config.training.group_size = 2
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    examples = [
+        QueryExample(query_id=f"q{index}", query=f"question {index}", answer="done")
+        for index in range(3)
+    ]
+    generator = BatchRecordingFinishingGenerator()
+    eval_output = tmp_path / "eval.raw.jsonl"
+    eval_judged_output = tmp_path / "eval.jsonl"
+    train_output = tmp_path / "train.raw.jsonl"
+    train_judged_output = tmp_path / "train.judged.jsonl"
+
+    collect_eval_then_train_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        eval_output_path=eval_output,
+        train_output_path=train_output,
+        eval_judged_output_path=eval_judged_output,
+        train_judged_output_path=train_judged_output,
+        examples=examples,
+        backend=FakeBackend(search_index={}, documents={}),
+        generator=generator,
+        judge=FakeJudge(),
+    )
+
+    assert generator.batch_sizes == [1, 4]
+    eval_rows = [json.loads(line) for line in eval_output.read_text(encoding="utf-8").splitlines()]
+    train_rows = [json.loads(line) for line in train_output.read_text(encoding="utf-8").splitlines()]
+    eval_judged_rows = [
+        json.loads(line) for line in eval_judged_output.read_text(encoding="utf-8").splitlines()
+    ]
+    train_judged_rows = [
+        json.loads(line) for line in train_judged_output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(row["query_id"], row["rollout_index"]) for row in eval_rows] == [("q2", 0)]
+    assert len(train_rows) == 4
+    assert len(eval_judged_rows) == 1
+    assert len(train_judged_rows) == 4
+    assert {row["policy_checkpoint_id"] for row in eval_rows + train_rows} == {"step-00001"}
 
 
 def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:

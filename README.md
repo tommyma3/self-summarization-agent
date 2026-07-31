@@ -242,7 +242,7 @@ Training notes:
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
 - the new process-isolated path uses `rollout.backend: vllm_offline` and `training.backend: fsdp2_context_parallel`
-- in the new path, each iteration samples 100 training questions, collects raw rollout JSONL from the latest checkpoint, judges those rollouts, caches tokenized trainable sequences plus reference logprobs, runs clipped GRPO updates over the cached batch, evaluates the new checkpoint on the 50 held-out questions, writes a vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+- in the new path, each iteration loads the latest checkpoint into offline vLLM once, evaluates that checkpoint, collects its training trajectories with the same loaded engine, caches tokenized trainable sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
 ### Process-isolated vLLM rollout/training loop
 
@@ -259,16 +259,17 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 
 For the intended GPU run:
 
-- each train or eval rollout uses a phase-scoped FAISS worker; the embedding model is unloaded before judging, caching, and policy weight updates
-- rollout collection starts the overlap judge worker on GPU 1, then restricts offline vLLM to GPUs 2-3 with tensor parallel size 2
+- each iteration's combined eval-then-train collection uses one phase-scoped FAISS worker; the embedding model is unloaded before fallback judging, caching, and policy weight updates
+- combined collection starts one overlap judge worker on GPU 1, then loads the policy checkpoint once in offline vLLM on GPUs 2-3 with tensor parallel size 2
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
-- rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
+- rollout collection writes eval trajectories first and training trajectories second while reusing the policy vLLM engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` loads the rollout checkpoint and writes v3 sparse interval caches with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v3 rows are preserved and older cache versions are regenerated as v3
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs
-- evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
+- iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
+- after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 ### Optional verl/Ray training backend

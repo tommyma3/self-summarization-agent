@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
-from self_summarization_agent.checkpoints import mark_checkpoint_complete, resolve_latest_checkpoint, write_latest_checkpoint
+from self_summarization_agent.checkpoints import (
+    mark_checkpoint_complete,
+    resolve_latest_checkpoint,
+    write_latest_checkpoint,
+)
 from self_summarization_agent.config import (
     DatasetConfig,
     ExperimentConfig,
@@ -13,7 +17,11 @@ from self_summarization_agent.config import (
     TrainConfig,
     TrainingConfig,
 )
-from self_summarization_agent.iteration_launcher import _has_complete_cached_rollouts, run_training_iteration
+from self_summarization_agent.iteration_launcher import (
+    _has_complete_cached_rollouts,
+    run_checkpoint_evaluation,
+    run_training_iteration,
+)
 
 
 def write_fake_checkpoint(path: Path) -> None:
@@ -293,7 +301,7 @@ def test_iteration_launcher_forwards_cli_overrides_to_subprocesses(tmp_path: Pat
     assert all("training.update_epochs=2" in command for command in calls[:4])
 
 
-def test_iteration_launcher_runs_eval_after_training_when_eval_split_configured(tmp_path: Path) -> None:
+def test_iteration_launcher_collects_eval_then_train_before_update(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     config.dataset.train_limit = 1
     config.dataset.eval_limit = 1
@@ -319,15 +327,52 @@ def test_iteration_launcher_runs_eval_after_training_when_eval_split_configured(
         python_executable="python",
     )
 
-    assert "self_summarization_agent.rollout_collection" in calls[4]
-    assert "--split" in calls[4]
-    assert "eval" in calls[4]
-    assert "training.group_size=1" in calls[4]
-    assert "self_summarization_agent.judge_step" in calls[5]
-    assert "--split" in calls[5]
-    assert "eval" in calls[5]
-    assert "self_summarization_agent.eval_metrics" in calls[6]
-    assert str(latest_root / "eval_metrics.jsonl") in calls[6]
+    assert "self_summarization_agent.rollout_collection" in calls[0]
+    assert str(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl") in calls[0]
+    assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[0]
+    assert "--eval-output" in calls[0]
+    assert "self_summarization_agent.judge_step" in calls[1]
+    assert "eval" in calls[1]
+    assert str(initial_checkpoint.resolve()) in calls[1]
+    assert "self_summarization_agent.eval_metrics" in calls[2]
+    assert str(latest_root / "eval_metrics.jsonl") in calls[2]
+    assert calls[2][calls[2].index("--iteration") + 1] == "0"
+    assert calls[2][calls[2].index("--policy-checkpoint-id") + 1] == "iteration-00000"
+    assert "self_summarization_agent.train_step" in calls[-1]
+
+
+def test_checkpoint_evaluation_runs_final_eval_without_training(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.train_limit = 1
+    config.dataset.eval_limit = 1
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    final_checkpoint = latest_root / "checkpoints" / "iteration-00010"
+    write_fake_checkpoint(final_checkpoint)
+    write_latest_checkpoint(latest_root, final_checkpoint)
+    calls = []
+
+    def runner(command):
+        calls.append(list(command))
+        return 0
+
+    checkpoint = run_checkpoint_evaluation(
+        config,
+        config_path="train.yaml",
+        iteration=10,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+    )
+
+    assert checkpoint == final_checkpoint.resolve()
+    assert "self_summarization_agent.rollout_collection" in calls[0]
+    assert "--split" in calls[0] and "eval" in calls[0]
+    assert str(latest_root / "rollouts" / "iteration-00010.eval.raw.jsonl") in calls[0]
+    assert "self_summarization_agent.judge_step" in calls[1]
+    assert "self_summarization_agent.eval_metrics" in calls[2]
+    assert calls[2][calls[2].index("--iteration") + 1] == "10"
+    assert calls[2][calls[2].index("--policy-checkpoint-id") + 1] == "iteration-00010"
+    assert all("self_summarization_agent.train_step" not in command for command in calls)
 
 
 def test_iteration_launcher_scopes_retrieval_workers_to_rollout_phases(
@@ -392,17 +437,14 @@ def test_iteration_launcher_scopes_retrieval_workers_to_rollout_phases(
     )
 
     rollout_calls = [command for command in calls if "self_summarization_agent.rollout_collection" in command]
-    assert len(worker_starts) == 2
-    assert len(worker_stops) == 2
-    assert len(rollout_calls) == 2
+    assert len(worker_starts) == 1
+    assert len(worker_stops) == 1
+    assert len(rollout_calls) == 1
     assert all("--retrieval-worker-url" in command for command in rollout_calls)
     assert "http://127.0.0.1:12345" in rollout_calls[0]
-    assert "http://127.0.0.1:12346" in rollout_calls[1]
     judge_events = [index for index, event in enumerate(events) if event == "run:self_summarization_agent.judge_step"]
     assert events.index("stop:1") < judge_events[0]
     assert events.index("stop:1") < events.index("run:self_summarization_agent.train_step")
-    assert events.index("run:self_summarization_agent.train_step") < events.index("start:2")
-    assert events.index("stop:2") < judge_events[1]
 
 
 def test_iteration_launcher_stops_retrieval_worker_when_train_rollout_fails(
@@ -690,7 +732,7 @@ def test_iteration_launcher_resume_after_train_cache_runs_training_next(tmp_path
     ]
 
 
-def test_iteration_launcher_resume_after_training_runs_eval_next(tmp_path: Path) -> None:
+def test_iteration_launcher_resume_with_completed_update_collects_missing_preupdate_eval(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     config.dataset.limit = 2
     config.dataset.train_limit = 1
@@ -722,8 +764,8 @@ def test_iteration_launcher_resume_after_training_runs_eval_next(tmp_path: Path)
     )
 
     assert "self_summarization_agent.rollout_collection" in calls[0]
-    assert "--split" in calls[0]
-    assert "eval" in calls[0]
+    assert "--eval-output" in calls[0]
+    assert str(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl") in calls[0]
     assert "--resume" in calls[0]
     assert "self_summarization_agent.judge_step" in calls[1]
     assert "self_summarization_agent.eval_metrics" in calls[2]
@@ -745,7 +787,7 @@ def test_iteration_launcher_resume_after_eval_rollout_runs_eval_judge_next(tmp_p
     write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=1)
     write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.judged.jsonl", "iteration-00000", count=1)
     write_cached_rollouts(latest_root / "rollouts" / "iteration-00001.jsonl", "iteration-00000", count=1)
-    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=1)
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl", "iteration-00000", count=1)
     calls = []
 
     def fail_if_worker_starts(**kwargs):
@@ -793,7 +835,7 @@ def test_iteration_launcher_resume_uses_collection_eval_task_count(tmp_path: Pat
     write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=2)
     write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.judged.jsonl", "iteration-00000", count=2)
     write_cached_rollouts(latest_root / "rollouts" / "iteration-00001.jsonl", "iteration-00000", count=2)
-    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=2)
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl", "iteration-00000", count=2)
     calls = []
 
     def fail_if_worker_starts(**kwargs):
@@ -839,8 +881,8 @@ def test_iteration_launcher_resume_after_eval_judge_runs_eval_metrics_next(tmp_p
     write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=1)
     write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.judged.jsonl", "iteration-00000", count=1)
     write_cached_rollouts(latest_root / "rollouts" / "iteration-00001.jsonl", "iteration-00000", count=1)
-    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=1)
-    write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.eval.jsonl", "iteration-00001", count=1)
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl", "iteration-00000", count=1)
+    write_judged_rollouts(latest_root / "rollouts" / "iteration-00000.eval.jsonl", "iteration-00000", count=1)
     calls = []
 
     def runner(command):
@@ -863,18 +905,18 @@ def test_iteration_launcher_resume_after_eval_judge_runs_eval_metrics_next(tmp_p
             "-m",
             "self_summarization_agent.eval_metrics",
             "--rollouts",
-            str(latest_root / "rollouts" / "iteration-00001.eval.jsonl"),
+            str(latest_root / "rollouts" / "iteration-00000.eval.jsonl"),
             "--metrics",
             str(latest_root / "eval_metrics.jsonl"),
             "--iteration",
-            "1",
+            "0",
             "--policy-checkpoint-id",
-            "iteration-00001",
+            "iteration-00000",
         ]
     ]
 
 
-def test_iteration_launcher_resume_latest_at_target_runs_missing_eval_only(tmp_path: Path) -> None:
+def test_iteration_launcher_resume_latest_at_target_returns_without_subprocesses(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     config.dataset.limit = 2
     config.dataset.train_limit = 1
@@ -884,8 +926,6 @@ def test_iteration_launcher_resume_latest_at_target_runs_missing_eval_only(tmp_p
     next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
     write_fake_checkpoint(next_checkpoint)
     write_latest_checkpoint(latest_root, next_checkpoint)
-    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=1)
-    write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.eval.jsonl", "iteration-00001", count=1)
     calls = []
 
     def runner(command):
@@ -902,21 +942,7 @@ def test_iteration_launcher_resume_latest_at_target_runs_missing_eval_only(tmp_p
         resume=True,
     )
 
-    assert calls == [
-        [
-            "python",
-            "-m",
-            "self_summarization_agent.eval_metrics",
-            "--rollouts",
-            str(latest_root / "rollouts" / "iteration-00001.eval.jsonl"),
-            "--metrics",
-            str(latest_root / "eval_metrics.jsonl"),
-            "--iteration",
-            "1",
-            "--policy-checkpoint-id",
-            "iteration-00001",
-        ]
-    ]
+    assert calls == []
 
 
 def test_iteration_launcher_resume_after_eval_metrics_advances_without_subprocesses(tmp_path: Path) -> None:
@@ -934,9 +960,9 @@ def test_iteration_launcher_resume_after_eval_metrics_advances_without_subproces
     write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.raw.jsonl", "iteration-00000", count=1)
     write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.judged.jsonl", "iteration-00000", count=1)
     write_cached_rollouts(latest_root / "rollouts" / "iteration-00001.jsonl", "iteration-00000", count=1)
-    write_raw_rollouts(latest_root / "rollouts" / "iteration-00001.eval.raw.jsonl", "iteration-00001", count=1)
-    write_judged_rollouts(latest_root / "rollouts" / "iteration-00001.eval.jsonl", "iteration-00001", count=1)
-    write_eval_metric(latest_root / "eval_metrics.jsonl", iteration=1, checkpoint_id="iteration-00001")
+    write_raw_rollouts(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl", "iteration-00000", count=1)
+    write_judged_rollouts(latest_root / "rollouts" / "iteration-00000.eval.jsonl", "iteration-00000", count=1)
+    write_eval_metric(latest_root / "eval_metrics.jsonl", iteration=0, checkpoint_id="iteration-00000")
     calls = []
 
     def runner(command):
