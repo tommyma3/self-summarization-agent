@@ -295,6 +295,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 
 - The summarization trigger is runtime-controlled, not model-controlled.
 - Summarization happens only after a completed tool round.
+- `runtime.generated_token_budget` counts all model completion tokens, including thinking, actions, summaries, and forced answers; tool-result text is excluded. Budget exhaustion takes priority over compaction.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
 - A successful compaction starts a fresh interval with only the system instructions and compressed state; no raw tail is retained.
 - RL training data is produced as one sparse-masked sample per interval, with all model-generated assistant tokens trainable.

@@ -11,6 +11,7 @@ comparison:
 common_overrides:
   training.group_size: 1
   runtime.tool_budget: 10000
+  # Counts all model completion tokens; generated-token exhaustion takes priority over compaction.
   runtime.generated_token_budget: 24000
   rollout.overlap_judge: true
 

@@ -63,6 +63,7 @@ runtime:
   context_threshold_tokens: 1000000000
   max_context_tokens: 32768
   tool_budget: 99999
+  # Counts all model completion tokens (actions, thinking, summaries, and forced answers), not tool results.
   generated_token_budget: 24000
 
 judge:

@@ -2,6 +2,11 @@
 
 Date: 2026-06-29
 
+> Updated 2026-07-31: `generated_token_budget` now counts every model-generated
+> completion token, including normal thinking/actions, summaries, and forced
+> answers. Tool-result tokens remain separately reported and do not consume the
+> budget. Budget exhaustion takes priority over context compaction.
+
 ## Goal
 
 Compare BrowseComp-Plus evaluation behavior for two policy-runtime conditions:
@@ -9,7 +14,7 @@ Compare BrowseComp-Plus evaluation behavior for two policy-runtime conditions:
 1. no summarization or compaction, with a large active context window;
 2. runtime-controlled summarization, with compaction triggered around an 8k-token prompt threshold.
 
-The comparison should use the same checkpoint, eval query set, retrieval backend, judge, sampling settings, and reasoning-token budget. The target result is that compact and no-compact runs can match answer quality, while compact runs reduce active-context size and improve evaluation efficiency.
+The comparison should use the same checkpoint, eval query set, retrieval backend, judge, sampling settings, and total generated-token budget. The target result is that compact and no-compact runs can match answer quality, while compact runs reduce active-context size and improve evaluation efficiency.
 
 ## Current Behavior
 
@@ -21,14 +26,15 @@ The current runtime does not have an episode-level generated-token budget. Exist
 
 Add a runtime generated-token budget that is separate from the existing tool budget.
 
-The budget controls normal agent action generations only: search actions, document actions, malformed normal action generations, and voluntary final-answer generations. Summary completions are compression overhead and are reported separately, not counted against the agent reasoning budget.
+The budget controls all model-generated completion tokens: search/document/final actions and their thinking, malformed outputs, summary completions, and forced-answer completions. Summary completions remain separately reported for analysis, but they consume the same episode generation budget. External tool-result text is not model-generated and does not consume the budget.
 
 The runtime should track these episode counters:
 
-- `reasoning_generated_tokens`: normal action completion tokens counted against the new budget.
-- `summary_generated_tokens`: summary completion tokens, reported as compression overhead.
-- `forced_answer_generated_tokens`: completion tokens emitted by the forced-answer path.
+- `reasoning_generated_tokens`: complete normal-action outputs, including thinking and tool-call/final-answer tokens.
+- `summary_generated_tokens`: complete summary outputs, including summary thinking.
+- `forced_answer_generated_tokens`: complete forced-answer outputs.
 - `total_generated_tokens`: reasoning plus summary plus forced-answer completion tokens.
+- `tool_result_tokens`: external tool-result text, reported separately and excluded from `total_generated_tokens`.
 - `prompt_tokens_by_turn`: prompt token counts for normal action, forced-answer, and summary prompts.
 - `max_prompt_tokens_seen`: maximum prompt size observed for the episode.
 - `summary_count`: number of successful summary turns.
@@ -42,7 +48,7 @@ runtime:
   generated_token_budget: 32768
 ```
 
-When `generated_token_budget` is unset, runtime behavior stays unchanged. When it is set, the normal action path checks the budget before each new normal action generation. If `reasoning_generated_tokens` has reached or exceeded the budget, the runtime uses the existing forced-answer path. If a normal action generation crosses the budget, the runtime accepts that completion and forces an answer on the next turn if the episode is still active. The runtime should not truncate model output mid-generation because truncation would create artificial parsing failures.
+When `generated_token_budget` is unset, runtime behavior stays unchanged. When it is set, the runtime checks `total_generated_tokens` before each new normal action. If the budget is reached or exceeded, it uses the existing forced-answer path. If a normal action reaches the budget at the same boundary where context compaction would trigger, forced answering takes priority and no summary is generated. If any generation crosses the budget, the runtime accepts that completion and forces an answer on the next turn if the episode is still active. The runtime does not truncate model output mid-generation.
 
 ## Experiment Conditions
 
@@ -69,7 +75,7 @@ Each rollout row should carry the token-usage counters so the artifact is self-d
 - correct answers per 1k total generated tokens;
 - correct answers per second when timing is available.
 
-Primary quality comparison should use equal `reasoning_generated_tokens` budgets. Summary tokens should appear in efficiency and overhead reporting, not in the reasoning-budget gate.
+Primary quality comparison should use equal `total_generated_tokens` budgets. The component counters still expose summary overhead and normal-action usage separately.
 
 ## Failure and Resume Behavior
 
@@ -83,8 +89,10 @@ Unit tests should cover:
 
 - generated-token budget disabled preserves current behavior;
 - normal action completions increment `reasoning_generated_tokens`;
-- summary completions increment `summary_generated_tokens` and do not consume reasoning budget;
+- summary completions increment `summary_generated_tokens` and consume the generated-token budget;
+- tool-result text increments only `tool_result_tokens` and does not consume the generated-token budget;
 - reaching the generated-token budget switches the next action to the existing forced-answer path;
+- generated-token exhaustion takes priority when the compaction threshold is reached at the same boundary;
 - an action that crosses the budget is accepted and only forces answer on the next turn;
 - serialized rollout rows include the token counters;
 - comparison aggregation reports separate reasoning, summary, forced-answer, and total token metrics.

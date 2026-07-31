@@ -536,16 +536,17 @@ def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
 
     assert result.status == "completed"
     assert result.final_answer == "best available"
-    assert result.token_usage["reasoning_generated_tokens"] == 3
+    assert result.token_usage["reasoning_generated_tokens"] == 2
     assert result.token_usage["tool_result_tokens"] == 1
     assert result.token_usage["forced_answer_generated_tokens"] == 1
+    assert result.token_usage["total_generated_tokens"] == 3
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.turn_records[0]["generation_kind"] == "action"
     assert result.turn_records[1]["generation_kind"] == "forced_answer"
     assert "Search and document actions are no longer available" in model.prompts[1]
 
 
-def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> None:
+def test_runtime_counts_summary_tokens_toward_generated_token_budget() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
     second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
     summary_output = "summary overhead tokens"
@@ -580,10 +581,11 @@ def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> 
 
     assert result.status == "completed"
     assert result.summary_turns == ["summary-1"]
-    assert result.token_usage["reasoning_generated_tokens"] == 3
+    assert result.token_usage["reasoning_generated_tokens"] == 2
     assert result.token_usage["tool_result_tokens"] == 1
     assert result.token_usage["summary_generated_tokens"] == 50
     assert result.token_usage["forced_answer_generated_tokens"] == 1
+    assert result.token_usage["total_generated_tokens"] == 53
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.token_usage["summary_count"] == 1
     assert result.token_usage["retired_round_count"] == 2
@@ -591,7 +593,7 @@ def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> 
     assert result.turn_records[3]["generation_kind"] == "forced_answer"
 
 
-def test_runtime_counts_tool_result_tokens_toward_generated_token_budget() -> None:
+def test_runtime_excludes_tool_result_tokens_from_generated_token_budget() -> None:
     search_output = tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')
     answer_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}')
     backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "large tool result"})
@@ -617,10 +619,44 @@ def test_runtime_counts_tool_result_tokens_toward_generated_token_budget() -> No
 
     assert result.status == "completed"
     assert result.final_answer == "best available"
-    assert result.token_usage["reasoning_generated_tokens"] == 11
+    assert result.token_usage["reasoning_generated_tokens"] == 2
     assert result.token_usage["tool_result_tokens"] == 10
+    assert result.token_usage["total_generated_tokens"] == 2
+    assert result.token_usage["forced_answer_reasons"] == []
+    assert result.turn_records[1]["generation_kind"] == "action"
+
+
+def test_generated_token_budget_has_priority_over_compaction_threshold() -> None:
+    search_output = tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')
+    forced_answer = tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
+    backend = FakeBackend(search_index={"q": ["trigger-doc"]}, documents={})
+    model = RecordingModel(outputs=[search_output, forced_answer])
+
+    def count_tokens(text: str) -> int:
+        if text == search_output:
+            return 2
+        if text == forced_answer:
+            return 1
+        return text.count("trigger-doc")
+
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1,
+        max_context_tokens=1024,
+        max_summary_tokens=128,
+        generated_token_budget=2,
+        token_counter=count_tokens,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.summary_turns == []
+    assert [record["generation_kind"] for record in result.turn_records] == ["action", "forced_answer"]
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
-    assert result.turn_records[1]["generation_kind"] == "forced_answer"
+    assert "final-answer boundary" in model.prompts[1]
+    assert "Compact the entire preceding task trajectory" not in model.prompts[1]
 
 
 def test_serialize_runtime_result_includes_token_usage() -> None:

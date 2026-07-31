@@ -88,8 +88,9 @@ def test_trace_collection_forces_answer_after_generated_token_budget(tmp_path: P
     )
 
     trace = output_path.read_text(encoding="utf-8")
-    assert "Round 2 Forced Answer Reasons" in trace
+    assert '"forced_answer_reasons": [' in trace
     assert '"generated_token_budget"' in trace
     assert '"tool_result_tokens"' in trace
-    assert "Round 2 Acting Context" not in trace
-    assert "final_answer: best available" in trace
+    assert '"status": "completed"' in trace
+    assert '"final_answer": "best available"' in trace
+    assert "Compact the entire preceding task trajectory" not in trace

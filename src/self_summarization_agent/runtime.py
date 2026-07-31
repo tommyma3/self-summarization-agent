@@ -184,18 +184,22 @@ class _TokenUsage:
     retired_round_count: int = 0
     forced_answer_reasons: list[str] = field(default_factory=list)
 
-    def as_dict(self, *, summary_count: int, turn_records: list[dict[str, Any]]) -> dict[str, Any]:
-        total_generated_tokens = (
+    @property
+    def total_generated_tokens(self) -> int:
+        """All model-generated completion tokens; excludes external tool results."""
+        return (
             self.reasoning_generated_tokens
             + self.summary_generated_tokens
             + self.forced_answer_generated_tokens
         )
+
+    def as_dict(self, *, summary_count: int, turn_records: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "reasoning_generated_tokens": self.reasoning_generated_tokens,
             "summary_generated_tokens": self.summary_generated_tokens,
             "forced_answer_generated_tokens": self.forced_answer_generated_tokens,
             "tool_result_tokens": self.tool_result_tokens,
-            "total_generated_tokens": total_generated_tokens,
+            "total_generated_tokens": self.total_generated_tokens,
             "prompt_tokens_by_turn": [
                 {
                     "turn_id": record["turn_id"],
@@ -272,7 +276,7 @@ class EpisodeRuntime:
     def _generated_token_budget_exhausted(self, active: _ActiveEpisode) -> bool:
         return (
             self.generated_token_budget is not None
-            and active.token_usage.reasoning_generated_tokens >= self.generated_token_budget
+            and active.token_usage.total_generated_tokens >= self.generated_token_budget
         )
 
     def _prompt_token_count(self, active: _ActiveEpisode, prompt: str) -> int:
@@ -613,7 +617,6 @@ class EpisodeRuntime:
         query_id = state.query_id
         tool_result_tokens = self._completion_token_count(tool_result)
         active.token_usage.tool_result_tokens += tool_result_tokens
-        active.token_usage.reasoning_generated_tokens += tool_result_tokens
 
         tool_turn_id = self._next_tool_turn_id(state)
         turn_record: dict[str, Any] = {
@@ -733,6 +736,8 @@ class EpisodeRuntime:
         active.result = self._completed_result(active, answer)
 
     def _build_summary_prompt_for_active(self, active: _ActiveEpisode) -> ConversationPrompt | None:
+        if self._generated_token_budget_exhausted(active):
+            return None
         if not active.context_manager.should_summarize(active.state):
             return None
         if active.interval_round_count == 0:
@@ -836,6 +841,11 @@ class EpisodeRuntime:
             summary_items: list[tuple[_ActiveEpisode, str, int]] = []
             for active in active_episodes:
                 if active.result is not None:
+                    continue
+                # The generation budget has priority over context compaction.
+                # If both thresholds are reached by the latest action, the
+                # next invocation must be the forced-answer continuation.
+                if self._generated_token_budget_exhausted(active):
                     continue
                 summary_request = self._build_summary_prompt_for_active(active)
                 if summary_request is None:
