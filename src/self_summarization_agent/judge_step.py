@@ -95,6 +95,10 @@ def _validate_raw_row(row: dict[str, Any], *, index: int, expected_checkpoint_id
         raise ValueError(f"Rollout row {index} is missing query_id")
     if not isinstance(row.get("turn_records"), list):
         raise ValueError(f"Rollout row {index} is missing turn_records")
+    if not isinstance(row.get("trajectory_records"), list):
+        raise ValueError(
+            f"Rollout row {index} is missing trajectory_records; recollect this rollout with the interval schema"
+        )
     if not isinstance(row.get("summary_turns"), list):
         raise ValueError(f"Rollout row {index} is missing summary_turns")
 
@@ -102,11 +106,15 @@ def _validate_raw_row(row: dict[str, Any], *, index: int, expected_checkpoint_id
 def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) -> dict[str, Any]:
     status = row.get("status")
     judged_row = dict(row)
-    trainable_turn_ids = trainable_turn_ids_from_records(row["turn_records"])
+    trajectory_records = row["trajectory_records"]
+    trainable_turn_ids = trainable_turn_ids_from_records(trajectory_records)
+    rollout_id = f"{row.get('query_id')}:{row.get('rollout_index')}"
     if is_penalized_runtime_status(status):
         turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
         judged_row["turn_rewards"] = turn_rewards
-        judged_row["trainable_sample_count"] = len(extract_trainable_samples(row["turn_records"], turn_rewards))
+        judged_row["trainable_sample_count"] = len(
+            extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id)
+        )
         judged_row["judge"] = {
             "outcome": status,
             "judge_prompt": None,
@@ -121,7 +129,9 @@ def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) 
         trainable_turn_ids=trainable_turn_ids,
     )
     judged_row["turn_rewards"] = turn_rewards
-    judged_row["trainable_sample_count"] = len(extract_trainable_samples(row["turn_records"], turn_rewards))
+    judged_row["trainable_sample_count"] = len(
+        extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id)
+    )
     judged_row["judge"] = {
         "outcome": decision.outcome,
         "judge_prompt": decision.judge_prompt,

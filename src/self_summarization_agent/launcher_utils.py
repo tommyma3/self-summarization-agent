@@ -57,6 +57,7 @@ def serialize_runtime_result(
         "final_answer": result.final_answer,
         "summary_turns": list(result.summary_turns),
         "turn_records": list(result.turn_records),
+        "trajectory_records": list(result.trajectory_records),
         "retrieved_docids": list(result.retrieved_docids),
         "tool_call_counts": dict(result.tool_call_counts),
         "token_usage": dict(result.token_usage),
@@ -71,8 +72,6 @@ def build_runtime(
     generator: Any,
     backend: Any,
     runtime_config: Any,
-    *,
-    cache_policy_checkpoint_id: str | None = None,
 ) -> EpisodeRuntime:
     token_counter = getattr(generator, "count_tokens", None)
     if token_counter is None:
@@ -86,7 +85,6 @@ def build_runtime(
         max_tool_calls=runtime_config.tool_budget,
         generated_token_budget=runtime_config.generated_token_budget,
         token_counter=token_counter,
-        cache_policy_checkpoint_id=cache_policy_checkpoint_id,
     )
 
 

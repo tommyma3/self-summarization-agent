@@ -1,5 +1,10 @@
 # Self-Summarization Agent Design
 
+> Superseded for runtime context construction and RL sample semantics by
+> `2026-07-31-append-only-compaction-interval-design.md`. This document remains
+> as the original design record; in particular, its raw-tail retention and
+> summary/final-only masks are no longer implemented.
+
 Date: 2026-04-17
 
 ## Goal

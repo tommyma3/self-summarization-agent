@@ -5,6 +5,7 @@ from self_summarization_agent.trainer import (
     FSDP2ContextParallelPolicyTrainer,
     TransformersPolicyTrainer,
     _clipped_grpo_token_losses,
+    compute_group_advantages,
 )
 from self_summarization_agent.trajectory import RLSample
 
@@ -72,6 +73,20 @@ def make_cached_rewarded_sample(query_id: str, turn_id: str, reward: float, refe
         completion_mask=[False, True],
         reference_logprob=reference_logprob,
     )
+
+
+def test_group_advantage_is_computed_once_per_rollout_and_broadcast_to_intervals() -> None:
+    low_first = make_rewarded_sample("q1", "low-1", 0.0)
+    low_second = make_rewarded_sample("q1", "low-2", 0.0)
+    high = make_rewarded_sample("q1", "high-1", 2.0)
+    low_first.rollout_id = low_second.rollout_id = "q1:0"
+    high.rollout_id = "q1:1"
+
+    advantages = compute_group_advantages([low_first, low_second, high])
+
+    assert advantages[0] == advantages[1]
+    assert advantages[0] < 0
+    assert advantages[2] > 0
 
 
 def test_fsdp_context_parallel_encoding_pads_to_required_multiple() -> None:

@@ -73,6 +73,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
     assert record["eval_correct"] == 1
     assert record["eval_total"] == 3
     assert record["eval_malformed"] == 1
+    assert record["eval_empty_summary"] == 0
     assert record["eval_parse_errors"] == 1
     assert record["eval_reasoning_generated_tokens"] == 175
     assert record["eval_summary_generated_tokens"] == 30

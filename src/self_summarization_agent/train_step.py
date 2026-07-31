@@ -58,12 +58,23 @@ def samples_from_rollout_rows(rows: list[dict[str, Any]], *, expected_checkpoint
                 f"Rollout row {index} checkpoint mismatch: expected {expected_checkpoint_id!r}, got {checkpoint_id!r}"
             )
         turn_records = row.get("turn_records")
+        trajectory_records = row.get("trajectory_records")
         turn_rewards = row.get("turn_rewards")
-        if not isinstance(turn_records, list) or not isinstance(turn_rewards, dict):
-            raise ValueError(f"Rollout row {index} is missing turn_records or turn_rewards")
+        if (
+            not isinstance(turn_records, list)
+            or not isinstance(trajectory_records, list)
+            or not isinstance(turn_rewards, dict)
+        ):
+            raise ValueError(
+                f"Rollout row {index} is missing turn_records, trajectory_records, or turn_rewards"
+            )
         if row.get("trainable_sample_count") == 0:
             continue
-        row_samples = extract_trainable_samples(turn_records, turn_rewards)
+        row_samples = extract_trainable_samples(
+            trajectory_records,
+            turn_rewards,
+            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+        )
         missing_cache_turn_ids = [sample.turn_id for sample in row_samples if not sample.has_training_cache]
         if missing_cache_turn_ids:
             raise ValueError(

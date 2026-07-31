@@ -15,14 +15,13 @@ if str(SRC_ROOT) not in sys.path:
 
 from self_summarization_agent.bcplus_backend import build_backend
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
-from self_summarization_agent.context import ContextManager
 from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir, utc_timestamp
-from self_summarization_agent.models import EpisodeState, Message, ToolCallRecord, ToolRound
-from self_summarization_agent.prompts import build_forced_answer_system_prompt, format_history_round
-from self_summarization_agent.runtime import EpisodeRuntime, extract_summary_output, parse_model_tool_call
+from self_summarization_agent.models import Message
+from self_summarization_agent.prompts import ConversationPrompt
+from self_summarization_agent.runtime import EpisodeRuntime
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,55 +126,52 @@ def write_prompt(
             handle.write("\n")
 
 
-def build_context_manager(runtime: EpisodeRuntime) -> ContextManager:
-    return ContextManager(
-        token_counter=runtime.token_counter,
-        max_context_tokens=runtime.max_context_tokens,
-        safety_margin_tokens=0,
-    )
-
-
 def write_training_sequences(
     handle: TextIO,
     *,
     runtime: EpisodeRuntime,
     terminal_status: str,
-    trainable_turns: list[dict[str, str]],
+    trajectory_records: list[dict[str, Any]],
 ) -> None:
-    if not trainable_turns:
+    if not trajectory_records:
         write_section(
             handle,
             "Training Sequences",
-            "No trainable sequences were produced. This rollout ended before any model-generated turn was recorded.\n",
+            "No trainable intervals were produced. This rollout ended before any model-generated interval was recorded.\n",
         )
         return
 
     if terminal_status == "completed":
         reward_note = (
-            "These are the trainable prompt/completion pairs.\n"
-            "- If the final answer is judged correct, every listed turn gets reward +1.\n"
-            "- If the final answer is judged wrong, every listed turn gets reward -1.\n"
+            "These are the append-only trainable intervals.\n"
+            "- Every assistant message is trainable, including tool actions and the boundary completion.\n"
+            "- System/user state, tool results, and appended boundary instructions are conditioning-only.\n"
+            "- If the final answer is judged correct, every listed interval gets reward +1.\n"
+            "- If the final answer is judged wrong, every listed interval gets reward -1.\n"
         )
     elif terminal_status == "budget_exhausted":
-        reward_note = "This rollout exhausted the tool budget. Every listed turn gets reward -1.\n"
+        reward_note = "This rollout exhausted the tool budget. Every listed interval gets reward -1.\n"
     elif terminal_status == "summary_length_exceeded":
-        reward_note = "This rollout exceeded the summary length cap. Every listed turn gets reward -1.\n"
+        reward_note = "This rollout exceeded the summary length cap. Every listed interval gets reward -1.\n"
     else:
-        reward_note = "This rollout ended malformed. Every listed turn gets reward -1.\n"
+        reward_note = "This rollout ended unsuccessfully. Every listed interval gets reward -1.\n"
 
     write_section(
         handle,
         "Training Sequences",
-        reward_note + f"trainable_turn_count: {len(trainable_turns)}\n",
+        reward_note + f"trainable_interval_count: {len(trajectory_records)}\n",
     )
-    for index, turn in enumerate(trainable_turns, start=1):
-        prompt = turn["prompt"]
-        completion = turn["completion"]
+    for index, record in enumerate(trajectory_records, start=1):
+        prompt = str(record["prompt"])
+        completion = str(record["completion"])
+        messages = record["messages"]
         metadata = {
             "index": index,
-            "turn_id": turn["turn_id"],
-            "kind": turn["kind"],
-            "query_id": turn["query_id"],
+            "trajectory_id": record["turn_id"],
+            "termination_kind": record["termination_kind"],
+            "query_id": record["query_id"],
+            "constituent_turn_ids": record.get("turn_ids", []),
+            "assistant_completion_count": record.get("assistant_completion_count"),
             "prompt_token_count": runtime.token_counter(prompt),
             "completion_token_count": runtime.token_counter(completion),
             "prompt_character_count": len(prompt),
@@ -186,12 +182,13 @@ def write_training_sequences(
             f"Training Sequence {index} Metadata",
             json.dumps(metadata, indent=2, ensure_ascii=False),
         )
-        handle.write("\n--- Prompt ---\n")
-        handle.write(prompt)
-        handle.write("\n")
-        handle.write("\n--- Completion ---\n")
-        handle.write(completion)
-        handle.write("\n")
+        handle.write("\n--- Full interval messages ---\n")
+        handle.write(json.dumps(messages, indent=2, ensure_ascii=False))
+        handle.write("\n\n--- Trainable assistant completions ---\n")
+        for message in messages:
+            if message.get("role") == "assistant":
+                handle.write(str(message.get("content", "")))
+                handle.write("\n")
 
 
 def _write_judge_output(
@@ -219,31 +216,6 @@ def _write_judge_output(
         handle.write("\n")
 
 
-def build_forced_answer_prompt(runtime: EpisodeRuntime, state: EpisodeState) -> str:
-    pieces = [
-        runtime._build_transcript_block("SYSTEM", build_forced_answer_system_prompt()),
-        runtime._build_transcript_block("USER", state.user_prompt),
-    ]
-    if state.latest_summary:
-        pieces.append(runtime._build_transcript_block("SUMMARY", state.latest_summary))
-    history = [
-        format_history_round(
-            round_record.tool_call.tool_name,
-            round_record.tool_call.arguments,
-            round_record.tool_result.content,
-        )
-        for round_record in runtime._raw_tail_rounds(state)
-    ]
-    if history:
-        pieces.append(runtime._build_transcript_block("HISTORY", "\n".join(history)))
-    pieces.append(
-        "### NEXT_ACTION\n"
-        "Search and document actions are no longer available. "
-        "Think first, then output one <answer>...</answer> tag."
-    )
-    return "\n".join(pieces)
-
-
 def trace_collection(
     *,
     runtime: EpisodeRuntime,
@@ -254,39 +226,7 @@ def trace_collection(
     include_formatted_prompt: bool,
     judge: RewardJudge | None = None,
 ) -> None:
-    state = EpisodeState(
-        query_id=example.query_id,
-        user_prompt=example.query,
-        context_threshold_tokens=runtime.context_threshold_tokens,
-    )
-    context_manager = build_context_manager(runtime)
-    tool_call_counts = {"search": 0, "get_document": 0}
-    retrieved_docids: list[str] = []
-    trainable_turns: list[dict[str, str]] = []
-    reasoning_generated_tokens = 0
-    forced_answer_generated_tokens = 0
-    tool_result_tokens = 0
-
-    def append_trainable_turn(
-        *,
-        turn_id: str,
-        kind: str,
-        prompt: str,
-        completion: str,
-    ) -> None:
-        trainable_turns.append(
-            {
-                "query_id": example.query_id,
-                "turn_id": turn_id,
-                "kind": kind,
-                "prompt": prompt,
-                "completion": completion,
-            }
-        )
-
-    def next_tool_turn_id() -> str:
-        return runtime._next_tool_turn_id(state)
-
+    result = runtime.run(query_id=example.query_id, user_prompt=example.query)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
         write_section(handle, "Collection Trace")
@@ -307,427 +247,41 @@ def trace_collection(
             },
         )
 
-        while True:
-            used_tools = sum(tool_call_counts.values())
-            round_number = len(state.rounds) + 1
-            forced_reasons: list[str] = []
-            if runtime.max_tool_calls is not None and used_tools >= runtime.max_tool_calls:
-                forced_reasons.append("tool_budget")
-            if (
-                runtime.generated_token_budget is not None
-                and reasoning_generated_tokens >= runtime.generated_token_budget
-            ):
-                forced_reasons.append("generated_token_budget")
-
-            if forced_reasons:
-                # Force answer when runtime budgets are exhausted (mirrors EpisodeRuntime.run_many).
-                forced_prompt = build_forced_answer_prompt(runtime, state)
-                context_manager.assert_fits(forced_prompt)
-                write_prompt(
-                    handle,
-                    runtime=runtime,
-                    generator=generator,
-                    title=f"Round {round_number} Forced Answer Context",
-                    prompt=forced_prompt,
-                    include_formatted_prompt=include_formatted_prompt,
-                )
-                write_section(
-                    handle,
-                    f"Round {round_number} Forced Answer Reasons",
-                    json.dumps(
-                        {
-                            "forced_answer_reasons": forced_reasons,
-                            "reasoning_generated_tokens": reasoning_generated_tokens,
-                            "tool_result_tokens": tool_result_tokens,
-                            "generated_token_budget": runtime.generated_token_budget,
-                            "used_tools": used_tools,
-                            "tool_budget": runtime.max_tool_calls,
-                        },
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                )
-                raw_output = runtime.model.generate(forced_prompt)
-                forced_answer_generated_tokens += runtime._completion_token_count(raw_output)
-                write_section(handle, f"Round {round_number} Forced Answer Model Output", raw_output)
-                parsed_tool_call = parse_model_tool_call(raw_output)
-                if parsed_tool_call is None:
-                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: forced answer is malformed\n")
-                    append_trainable_turn(
-                        turn_id=next_tool_turn_id(),
-                        kind="tool",
-                        prompt=forced_prompt,
-                        completion=raw_output,
-                    )
-                    write_training_sequences(
-                        handle,
-                        runtime=runtime,
-                        terminal_status="malformed_tool_call",
-                        trainable_turns=trainable_turns,
-                    )
-                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                    return
-
-                payload, normalized_output = parsed_tool_call
-                tool_name = payload["tool_name"]
-                arguments = payload["arguments"]
-
-                if tool_name != "finish":
-                    write_section(handle, "Terminal Status", f"status: malformed_tool_call\nreason: forced answer produced unsupported tool {tool_name!r}\n")
-                    append_trainable_turn(
-                        turn_id=next_tool_turn_id(),
-                        kind="tool",
-                        prompt=forced_prompt,
-                        completion=normalized_output,
-                    )
-                    write_training_sequences(
-                        handle,
-                        runtime=runtime,
-                        terminal_status="malformed_tool_call",
-                        trainable_turns=trainable_turns,
-                    )
-                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                    return
-
-                answer = arguments.get("answer") if isinstance(arguments, dict) else None
-                if not isinstance(answer, str):
-                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: forced answer finish.answer is not a string\n")
-                    append_trainable_turn(
-                        turn_id=next_tool_turn_id(),
-                        kind="tool",
-                        prompt=forced_prompt,
-                        completion=normalized_output,
-                    )
-                    write_training_sequences(
-                        handle,
-                        runtime=runtime,
-                        terminal_status="malformed_tool_call",
-                        trainable_turns=trainable_turns,
-                    )
-                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                    return
-
-                append_trainable_turn(
-                    turn_id="final-answer",
-                    kind="final_answer",
-                    prompt=forced_prompt,
-                    completion=raw_output,
-                )
-                write_section(handle, "Terminal Status", f"status: completed\nfinal_answer: {answer}\n")
-                write_training_sequences(
-                    handle,
-                    runtime=runtime,
-                    terminal_status="completed",
-                    trainable_turns=trainable_turns,
-                )
-                _write_judge_output(handle, judge, example, "completed", answer)
-                return
-
-            acting_prompt = runtime._build_runtime_prompt(state)
-            context_manager.assert_fits(acting_prompt)
+        write_section(
+            handle,
+            "Runtime Result",
+            json.dumps(
+                {
+                    "status": result.status,
+                    "final_answer": result.final_answer,
+                    "summary_turns": result.summary_turns,
+                    "turn_rewards": result.turn_rewards,
+                    "retrieved_docids": result.retrieved_docids,
+                    "tool_call_counts": result.tool_call_counts,
+                    "token_usage": result.token_usage,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+        )
+        for index, record in enumerate(result.trajectory_records, start=1):
+            messages = [Message(role=message["role"], content=message["content"]) for message in record["messages"]]
+            prompt = ConversationPrompt(messages)
             write_prompt(
                 handle,
                 runtime=runtime,
                 generator=generator,
-                title=f"Round {round_number} Acting Context",
-                prompt=acting_prompt,
+                title=f"Trajectory Interval {index}",
+                prompt=prompt,
                 include_formatted_prompt=include_formatted_prompt,
             )
-
-            raw_output = runtime.model.generate(acting_prompt)
-            reasoning_generated_tokens += runtime._completion_token_count(raw_output)
-            write_section(handle, f"Round {round_number} Model Output", raw_output)
-            parsed_tool_call = parse_model_tool_call(raw_output)
-            if parsed_tool_call is None:
-                write_section(handle, "Terminal Status", "status: malformed_tool_call\n")
-                append_trainable_turn(
-                    turn_id=next_tool_turn_id(),
-                    kind="tool",
-                    prompt=acting_prompt,
-                    completion=raw_output,
-                )
-                write_training_sequences(
-                    handle,
-                    runtime=runtime,
-                    terminal_status="malformed_tool_call",
-                    trainable_turns=trainable_turns,
-                )
-                _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                return
-
-            payload, normalized_output = parsed_tool_call
-            tool_name = payload["tool_name"]
-            arguments = payload["arguments"]
-            write_section(
-                handle,
-                f"Round {round_number} Parsed Action",
-                json.dumps(payload, indent=2, ensure_ascii=False),
-            )
-
-            if tool_name == "finish":
-                answer = arguments.get("answer") if isinstance(arguments, dict) else None
-                if not isinstance(answer, str):
-                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: finish.answer is not a string\n")
-                    append_trainable_turn(
-                        turn_id=next_tool_turn_id(),
-                        kind="tool",
-                        prompt=acting_prompt,
-                        completion=normalized_output,
-                    )
-                    write_training_sequences(
-                        handle,
-                        runtime=runtime,
-                        terminal_status="malformed_tool_call",
-                        trainable_turns=trainable_turns,
-                    )
-                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                    return
-                append_trainable_turn(
-                    turn_id="final-answer",
-                    kind="final_answer",
-                    prompt=acting_prompt,
-                    completion=raw_output,
-                )
-                write_section(handle, "Terminal Status", f"status: completed\nfinal_answer: {answer}\n")
-                write_training_sequences(
-                    handle,
-                    runtime=runtime,
-                    terminal_status="completed",
-                    trainable_turns=trainable_turns,
-                )
-                _write_judge_output(handle, judge, example, "completed", answer)
-                return
-
-            if tool_name == "search":
-                query = arguments.get("query") if isinstance(arguments, dict) else None
-                if not isinstance(query, str):
-                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: search.query is not a string\n")
-                    append_trainable_turn(
-                        turn_id=next_tool_turn_id(),
-                        kind="tool",
-                        prompt=acting_prompt,
-                        completion=normalized_output,
-                    )
-                    write_training_sequences(
-                        handle,
-                        runtime=runtime,
-                        terminal_status="malformed_tool_call",
-                        trainable_turns=trainable_turns,
-                    )
-                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                    return
-                search_results = runtime.backend.search(query)
-                append_trainable_turn(
-                    turn_id=next_tool_turn_id(),
-                    kind="tool",
-                    prompt=acting_prompt,
-                    completion=raw_output,
-                )
-                tool_call_counts["search"] += 1
-                runtime._record_search_result_docids(retrieved_docids, search_results)
-                tool_result = json.dumps(search_results, ensure_ascii=False)
-            elif tool_name == "get_document":
-                doc_id = arguments.get("doc_id") if isinstance(arguments, dict) else None
-                if not isinstance(doc_id, str):
-                    write_section(handle, "Terminal Status", "status: malformed_tool_call\nreason: get_document.doc_id is not a string\n")
-                    append_trainable_turn(
-                        turn_id=next_tool_turn_id(),
-                        kind="tool",
-                        prompt=acting_prompt,
-                        completion=normalized_output,
-                    )
-                    write_training_sequences(
-                        handle,
-                        runtime=runtime,
-                        terminal_status="malformed_tool_call",
-                        trainable_turns=trainable_turns,
-                    )
-                    _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                    return
-                runtime._record_retrieved_docids(retrieved_docids, [doc_id])
-                tool_result = runtime.backend.get_document(doc_id)
-                append_trainable_turn(
-                    turn_id=next_tool_turn_id(),
-                    kind="tool",
-                    prompt=acting_prompt,
-                    completion=raw_output,
-                )
-                tool_call_counts["get_document"] += 1
-            else:
-                write_section(handle, "Terminal Status", f"status: malformed_tool_call\nreason: unsupported tool {tool_name!r}\n")
-                append_trainable_turn(
-                    turn_id=next_tool_turn_id(),
-                    kind="tool",
-                    prompt=acting_prompt,
-                    completion=normalized_output,
-                )
-                write_training_sequences(
-                    handle,
-                    runtime=runtime,
-                    terminal_status="malformed_tool_call",
-                    trainable_turns=trainable_turns,
-                )
-                _write_judge_output(handle, judge, example, "malformed_tool_call", "")
-                return
-
-            write_section(
-                handle,
-                f"Round {round_number} Tool Result",
-                json.dumps(
-                    {
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                        "tool_call_counts": tool_call_counts,
-                        "retrieved_docids": retrieved_docids,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                )
-                + "\n\n"
-                + tool_result,
-            )
-            current_tool_result_tokens = runtime._completion_token_count(tool_result)
-            tool_result_tokens += current_tool_result_tokens
-            reasoning_generated_tokens += current_tool_result_tokens
-
-            state.rounds.append(
-                ToolRound(
-                    assistant_message=Message(role="assistant", content=normalized_output),
-                    tool_call=ToolCallRecord(tool_name=tool_name, arguments=arguments, raw_output=normalized_output),
-                    tool_result=Message(role="tool", content=tool_result),
-                )
-            )
-
-            after_tool_prompt = runtime._build_runtime_prompt(state)
-            write_prompt(
-                handle,
-                runtime=runtime,
-                generator=generator,
-                title=f"Round {round_number} Context After Tool",
-                prompt=after_tool_prompt,
-                include_formatted_prompt=include_formatted_prompt,
-            )
-
-            compacted_state = runtime._compacted_state(state)
-            compacted_tokens = context_manager.current_token_count(compacted_state)
-            write_section(
-                handle,
-                f"Round {round_number} Threshold Check",
-                json.dumps(
-                    {
-                        "compacted_context_tokens": compacted_tokens,
-                        "context_threshold_tokens": state.context_threshold_tokens,
-                        "should_summarize": context_manager.should_summarize(compacted_state),
-                        "raw_tail_round_count": len(runtime._raw_tail_rounds(state)),
-                        "reasoning_generated_tokens": reasoning_generated_tokens,
-                        "forced_answer_generated_tokens": forced_answer_generated_tokens,
-                        "tool_result_tokens": tool_result_tokens,
-                        "generated_token_budget": runtime.generated_token_budget,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-            )
-
-            if not context_manager.should_summarize(compacted_state):
-                continue
-
-            summary_state, retired_count = runtime._build_summary_state(state)
-            if retired_count == 0:
-                write_section(handle, f"Round {round_number} Summary Skipped", "reason: only one raw tail round is available\n")
-                continue
-
-            summary_prompt = context_manager.build_summary_context(
-                summary_state,
-                max_summary_tokens=runtime.max_summary_tokens,
-            )
-            context_manager.assert_fits(summary_prompt)
-            write_prompt(
-                handle,
-                runtime=runtime,
-                generator=generator,
-                title=f"Summary {state.summary_count + 1} Context",
-                prompt=summary_prompt,
-                include_formatted_prompt=include_formatted_prompt,
-            )
-            generated_summary = runtime.model.generate(summary_prompt)
-            write_section(handle, f"Summary {state.summary_count + 1} Model Output", generated_summary)
-            summary_extraction = extract_summary_output(generated_summary)
-            summary_tokens = runtime._completion_token_count(summary_extraction.summary)
-            state.summary_count += 1
-            summary_turn_id = f"summary-{state.summary_count}"
-            append_trainable_turn(
-                turn_id=summary_turn_id,
-                kind="summary",
-                prompt=summary_prompt,
-                completion=generated_summary,
-            )
-            write_section(
-                handle,
-                f"Summary {state.summary_count} Token Check",
-                json.dumps(
-                    {
-                        "summary_tokens": summary_tokens,
-                        "max_summary_tokens": runtime.max_summary_tokens,
-                        "exceeded": summary_tokens > runtime.max_summary_tokens,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-            )
-            if summary_tokens > runtime.max_summary_tokens:
-                write_section(
-                    handle,
-                    "Terminal Status",
-                    f"status: summary_length_exceeded\nreason: summary body is {summary_tokens} tokens (cap is {runtime.max_summary_tokens})\n",
-                )
-                write_training_sequences(
-                    handle,
-                    runtime=runtime,
-                    terminal_status="summary_length_exceeded",
-                    trainable_turns=trainable_turns,
-                )
-                _write_judge_output(handle, judge, example, "summary_length_exceeded", "")
-                return
-            if not summary_extraction.summary:
-                write_section(handle, f"Summary {state.summary_count} Skipped", "reason: model returned an empty summary body\n")
-                continue
-
-            state.latest_summary = summary_extraction.summary
-            state.summarized_round_count += retired_count
-            write_section(
-                handle,
-                f"Summary {state.summary_count} Extracted",
-                json.dumps(
-                    {
-                        "thinking": summary_extraction.thinking,
-                        "summary": summary_extraction.summary,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-            )
-            write_section(
-                handle,
-                f"Summary {state.summary_count} Applied",
-                json.dumps(
-                    {
-                        "retired_rounds": retired_count,
-                        "summarized_round_count": state.summarized_round_count,
-                        "remaining_raw_tail_rounds": len(runtime._raw_tail_rounds(state)),
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-            )
-            write_prompt(
-                handle,
-                runtime=runtime,
-                generator=generator,
-                title=f"Context After Summary {state.summary_count}",
-                prompt=runtime._build_runtime_prompt(state),
-                include_formatted_prompt=include_formatted_prompt,
-            )
+        write_training_sequences(
+            handle,
+            runtime=runtime,
+            terminal_status=result.status,
+            trajectory_records=result.trajectory_records,
+        )
+        _write_judge_output(handle, judge, example, result.status, result.final_answer or "")
 
 
 def main() -> None:

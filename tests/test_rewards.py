@@ -1,215 +1,156 @@
 import pytest
 
-from self_summarization_agent.rewards import apply_malformed_tool_penalty, apply_terminal_reward
+from self_summarization_agent.rewards import (
+    apply_malformed_tool_penalty,
+    apply_terminal_reward,
+    trainable_turn_ids_from_records,
+)
 from self_summarization_agent.train_grpo import group_samples_by_query
-from self_summarization_agent.trajectory import extract_trainable_samples
+from self_summarization_agent.trajectory import extract_trainable_samples, tokenize_interval_messages
 
 
-def test_terminal_correct_reward_trains_summary_and_answer_turns() -> None:
-    rewards = apply_terminal_reward(outcome="correct_answer", summary_turn_ids=["s1", "s2"], final_answer_turn_id="a1")
-    assert rewards == {"s1": 1.0, "s2": 1.0, "a1": 1.0}
+def trajectory_record(record_id: str, query_id: str = "q1") -> dict:
+    return {
+        "schema_version": 1,
+        "query_id": query_id,
+        "turn_id": record_id,
+        "kind": "trajectory",
+        "termination_kind": "compaction",
+        "messages": [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "task state"},
+            {"role": "assistant", "content": "reasoning and action"},
+            {"role": "user", "content": "tool result"},
+            {"role": "assistant", "content": "reasoning and summary"},
+        ],
+        "prompt": "debug transcript",
+    }
 
 
-def test_terminal_correct_reward_can_train_all_recorded_turns() -> None:
-    rewards = apply_terminal_reward(outcome="correct_answer", trainable_turn_ids=["tool-1", "s1", "a1"])
-    assert rewards == {"tool-1": 1.0, "s1": 1.0, "a1": 1.0}
+def test_terminal_reward_trains_all_interval_records() -> None:
+    rewards = apply_terminal_reward(
+        outcome="correct_answer",
+        trainable_turn_ids=["trajectory-1", "trajectory-2"],
+    )
+
+    assert rewards == {"trajectory-1": 1.0, "trajectory-2": 1.0}
 
 
-def test_malformed_tool_penalty_only_marks_offending_turn() -> None:
-    rewards = apply_malformed_tool_penalty(turn_id="tool-3")
-    assert rewards == {"tool-3": -1.0}
+def test_malformed_penalty_marks_all_completed_intervals() -> None:
+    rewards = apply_malformed_tool_penalty(["trajectory-1", "trajectory-2"])
+
+    assert rewards == {"trajectory-1": -1.0, "trajectory-2": -1.0}
 
 
-def test_apply_terminal_reward_raises_on_invalid_outcome() -> None:
-    with pytest.raises(ValueError, match="Unknown terminal outcome: invalid"):
-        apply_terminal_reward(outcome="invalid", summary_turn_ids=["s1"], final_answer_turn_id="a1")  # type: ignore[arg-type]
-
-
-def test_extract_trainable_samples_returns_tool_summary_and_final_answer_turns() -> None:
-    turns = [
-        {
-            "query_id": "q1",
-            "kind": "tool",
-            "turn_id": "t1",
-            "prompt": "p0",
-            "completion": '{"tool_name": "search", "arguments": {"query": "q"}}',
-        },
-        {"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"},
-        {"query_id": "q1", "kind": "final_answer", "turn_id": "a1", "prompt": "p2", "completion": "c2"},
+def test_only_trajectory_records_are_reward_targets() -> None:
+    records = [
+        {"kind": "tool", "turn_id": "tool-1"},
+        trajectory_record("trajectory-1"),
+        {"kind": "summary", "turn_id": "summary-1"},
     ]
-    rewards = {"t1": 1.0, "s1": 1.0, "a1": -1.0}
 
-    samples = extract_trainable_samples(turns, rewards)
-
-    assert [sample.turn_id for sample in samples] == ["t1", "s1", "a1"]
-    assert [sample.query_id for sample in samples] == ["q1", "q1", "q1"]
-    assert [sample.reward for sample in samples] == [1.0, 1.0, -1.0]
-    assert [sample.trainable_kind for sample in samples] == ["tool", "summary", "final_answer"]
+    assert trainable_turn_ids_from_records(records) == ["trajectory-1"]
 
 
-def test_extract_trainable_samples_preserves_query_id_for_grouping() -> None:
-    turns = [
-        {"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"},
-        {"query_id": "q1", "kind": "final_answer", "turn_id": "a1", "prompt": "p2", "completion": "c2"},
-        {"query_id": "q2", "kind": "summary", "turn_id": "s2", "prompt": "p3", "completion": "c3"},
-    ]
-    rewards = {"s1": 1.0, "a1": -1.0, "s2": 0.5}
+def test_extract_trainable_samples_returns_one_sample_per_interval() -> None:
+    records = [trajectory_record("trajectory-1"), trajectory_record("trajectory-2")]
+    samples = extract_trainable_samples(
+        records,
+        {"trajectory-1": 1.0, "trajectory-2": -1.0},
+        rollout_id="q1:0",
+    )
 
-    grouped = group_samples_by_query(extract_trainable_samples(turns, rewards))
+    assert [sample.turn_id for sample in samples] == ["trajectory-1", "trajectory-2"]
+    assert [sample.reward for sample in samples] == [1.0, -1.0]
+    assert all(sample.rollout_id == "q1:0" for sample in samples)
+    assert samples[0].completion == "reasoning and action\nreasoning and summary"
+
+
+def test_extract_trainable_samples_preserves_query_grouping() -> None:
+    records = [trajectory_record("trajectory-1", "q1"), trajectory_record("trajectory-2", "q2")]
+    rewards = {"trajectory-1": 1.0, "trajectory-2": -1.0}
+
+    grouped = group_samples_by_query(extract_trainable_samples(records, rewards))
 
     assert sorted(grouped) == ["q1", "q2"]
-    assert [sample.turn_id for sample in grouped["q1"]] == ["s1", "a1"]
-    assert [sample.turn_id for sample in grouped["q2"]] == ["s2"]
 
 
-def test_extract_trainable_samples_raises_on_leftover_reward_ids() -> None:
-    turns = [{"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"}]
-    rewards = {"s1": 1.0, "unused": -1.0}
+def test_extract_trainable_samples_rejects_non_system_prefix() -> None:
+    record = trajectory_record("trajectory-1")
+    record["messages"][0]["role"] = "user"
 
-    with pytest.raises(ValueError, match="Reward ids do not match any turn: unused"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_on_malformed_turn_record() -> None:
-    turns = [{"query_id": "q1", "kind": "summary", "turn_id": "s1", "completion": "c1"}]
-    rewards = {"s1": 1.0}
-
-    with pytest.raises(ValueError, match="Trainable turn record is missing required key: prompt"):
-        extract_trainable_samples(turns, rewards)
+    with pytest.raises(ValueError, match="must begin with a system message"):
+        extract_trainable_samples([record], {"trajectory-1": 1.0})
 
 
-def test_extract_trainable_samples_raises_when_trainable_turn_has_no_reward() -> None:
-    turns = [{"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"}]
-    rewards = {}
+def test_extract_trainable_samples_rejects_missing_assistant_completion() -> None:
+    record = trajectory_record("trajectory-1")
+    record["messages"] = record["messages"][:2]
 
-    with pytest.raises(ValueError, match="Missing reward for trainable turn_id: s1"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_on_non_string_prompt_or_completion() -> None:
-    turns = [
-        {"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": 123, "completion": "c1"},
-    ]
-    rewards = {"s1": 1.0}
-
-    with pytest.raises(ValueError, match="Trainable turn_id s1 has non-string prompt"):
-        extract_trainable_samples(turns, rewards)
+    with pytest.raises(ValueError, match="has no assistant completion"):
+        extract_trainable_samples([record], {"trajectory-1": 1.0})
 
 
-def test_extract_trainable_samples_raises_on_non_string_completion() -> None:
-    turns = [{"query_id": "q1", "kind": "final_answer", "turn_id": "a1", "prompt": "p2", "completion": ["bad"]}]
-    rewards = {"a1": 1.0}
+def test_extract_trainable_samples_rejects_old_per_turn_schema() -> None:
+    old_record = {
+        "query_id": "q1",
+        "turn_id": "tool-1",
+        "kind": "tool",
+        "prompt": "old prompt",
+        "completion": "old completion",
+    }
 
-    with pytest.raises(ValueError, match="Trainable turn_id a1 has non-string completion"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_on_non_numeric_reward_value() -> None:
-    turns = [{"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"}]
-    rewards = {"s1": "bad"}
-
-    with pytest.raises(ValueError, match="Trainable turn_id s1 has non-numeric reward"):
-        extract_trainable_samples(turns, rewards)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Unknown trajectory record kind"):
+        extract_trainable_samples([old_record], {"tool-1": 1.0})
 
 
-def test_extract_trainable_samples_raises_on_non_dict_turn_record() -> None:
-    turns = ["not-a-dict"]  # type: ignore[list-item]
-    rewards = {}
-
-    with pytest.raises(ValueError, match="Turn record must be a mapping, got str"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_on_non_finite_reward_value() -> None:
-    turns = [{"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"}]
-    rewards = {"s1": float("nan")}
-
-    with pytest.raises(ValueError, match="Trainable turn_id s1 has non-finite reward"):
-        extract_trainable_samples(turns, rewards)
+def test_extract_trainable_samples_rejects_leftover_reward_ids() -> None:
+    with pytest.raises(ValueError, match="Reward ids do not match any trajectory record"):
+        extract_trainable_samples(
+            [trajectory_record("trajectory-1")],
+            {"trajectory-1": 1.0, "unused": -1.0},
+        )
 
 
-def test_extract_trainable_samples_raises_on_tool_turn_without_payload() -> None:
-    turns = [
-        {"kind": "tool", "turn_id": "tool-1"},
-        {"query_id": "q1", "kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"},
-    ]
-    rewards = {"tool-1": -1.0, "s1": 1.0}
+def test_interval_tokenization_masks_only_assistant_content() -> None:
+    class WhitespaceTokenizer:
+        chat_template = None
 
-    with pytest.raises(ValueError, match="Trainable turn record is missing required key: query_id"):
-        extract_trainable_samples(turns, rewards)
+        def __init__(self) -> None:
+            self.vocabulary: dict[str, int] = {}
 
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            del add_special_tokens
+            ids = []
+            for token in text.split():
+                if token not in self.vocabulary:
+                    self.vocabulary[token] = len(self.vocabulary) + 1
+                ids.append(self.vocabulary[token])
+            return ids
 
-def test_extract_trainable_samples_requires_tool_turn_payload() -> None:
-    turns = [{"kind": "tool", "turn_id": "tool-1"}]
-    rewards = {"tool-1": -1.0}
+    messages = trajectory_record("trajectory-1")["messages"]
+    _input_ids, _labels, mask = tokenize_interval_messages(
+        WhitespaceTokenizer(),
+        messages,
+        max_sequence_length=128,
+        sample_id="trajectory-1",
+    )
 
-    with pytest.raises(ValueError, match="Trainable turn record is missing required key: query_id"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_when_reward_matches_no_turn() -> None:
-    turns = [
-        {
-            "query_id": "q1",
-            "kind": "tool",
-            "turn_id": "tool-1",
-            "prompt": "p1",
-            "completion": '{"tool_name": "search", "arguments": {"query": "q"}}',
-        }
-    ]
-    rewards = {"tool-1": -1.0, "missing": -1.0}
-
-    with pytest.raises(ValueError, match="Reward ids do not match any turn: missing"):
-        extract_trainable_samples(turns, rewards)
+    assert sum(mask) == len("reasoning and action".split()) + len("reasoning and summary".split())
 
 
-def test_extract_trainable_samples_raises_on_unknown_turn_kind() -> None:
-    turns = [{"kind": "assistant", "turn_id": "x1"}]
-    rewards = {}
+def test_interval_tokenization_never_left_truncates_system_prefix() -> None:
+    class TinyTokenizer:
+        chat_template = None
 
-    with pytest.raises(ValueError, match="Unknown turn kind: assistant"):
-        extract_trainable_samples(turns, rewards)
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            del add_special_tokens
+            return list(range(len(text.split())))
 
-
-def test_extract_trainable_samples_raises_on_non_string_turn_id() -> None:
-    turns = [{"query_id": "q1", "kind": "summary", "turn_id": ["bad"], "prompt": "p1", "completion": "c1"}]
-    rewards = {}
-
-    with pytest.raises(ValueError, match=r"Turn record has non-string turn_id: \['bad'\]"):
-        extract_trainable_samples(turns, rewards)  # type: ignore[list-item]
-
-
-def test_extract_trainable_samples_raises_on_duplicate_trainable_turn_id() -> None:
-    turns = [
-        {"query_id": "q1", "kind": "summary", "turn_id": "dup", "prompt": "p1", "completion": "c1"},
-        {"query_id": "q1", "kind": "final_answer", "turn_id": "dup", "prompt": "p2", "completion": "c2"},
-    ]
-    rewards = {"dup": 1.0}
-
-    with pytest.raises(ValueError, match="Duplicate turn_id found: dup"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_on_tool_trainable_turn_id_collision() -> None:
-    turns = [
-        {
-            "query_id": "q1",
-            "kind": "tool",
-            "turn_id": "dup",
-            "prompt": "p0",
-            "completion": '{"tool_name": "search", "arguments": {"query": "q"}}',
-        },
-        {"query_id": "q1", "kind": "summary", "turn_id": "dup", "prompt": "p1", "completion": "c1"},
-    ]
-    rewards = {"dup": 1.0}
-
-    with pytest.raises(ValueError, match="Duplicate turn_id found: dup"):
-        extract_trainable_samples(turns, rewards)
-
-
-def test_extract_trainable_samples_raises_on_missing_query_id() -> None:
-    turns = [{"kind": "summary", "turn_id": "s1", "prompt": "p1", "completion": "c1"}]
-    rewards = {"s1": 1.0}
-
-    with pytest.raises(ValueError, match="Trainable turn record is missing required key: query_id"):
-        extract_trainable_samples(turns, rewards)
+    with pytest.raises(ValueError, match="never left-truncated"):
+        tokenize_interval_messages(
+            TinyTokenizer(),
+            trajectory_record("trajectory-1")["messages"],
+            max_sequence_length=2,
+            sample_id="trajectory-1",
+        )

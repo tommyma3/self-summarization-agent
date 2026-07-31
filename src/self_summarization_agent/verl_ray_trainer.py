@@ -80,16 +80,16 @@ def _pad_cached_sequences(
             "rewards": torch.empty((0,), dtype=torch.float32),
             "sequence_lengths": torch.empty((0,), dtype=torch.long),
         }
-    # Left-truncate samples that exceed max_sequence_length, matching the
-    # truncation semantics of _encode_shifted_sample_from_text (trainer.py).
+    # Interval prefixes always contain the invariant system instructions and
+    # must never be silently removed by left truncation.
     if max_sequence_length is not None:
         for sample in samples:
             sample_len = len(sample.input_ids or [])
             if sample_len > max_sequence_length:
-                drop = sample_len - max_sequence_length
-                sample.input_ids = sample.input_ids[drop:]
-                sample.labels = sample.labels[drop:]
-                sample.completion_mask = sample.completion_mask[drop:]
+                raise ValueError(
+                    f"Interval {sample.turn_id} exceeds training.max_sequence_length: "
+                    f"{sample_len} > {max_sequence_length}; interval prefixes are never left-truncated"
+                )
     lengths = [len(sample.input_ids or []) for sample in samples]
     max_length = max(lengths)
     input_ids = torch.zeros((len(samples), max_length), dtype=torch.long)
@@ -155,19 +155,6 @@ def build_verl_dataproto(
     )
 
 
-def _position_ids(attention_mask: torch.Tensor) -> torch.Tensor:
-    return torch.clamp(attention_mask.long().cumsum(dim=-1) - 1, min=0)
-
-
-def _padded_to_nested(padded_2d: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-    """Convert a padded 2D tensor (batch, max_seq_len) to a NestedTensor with
-    jagged layout, using the per-sample ``lengths`` to trim each row."""
-    if padded_2d.dim() != 2:
-        raise ValueError(f"Expected 2D padded tensor, got shape {padded_2d.shape}")
-    tensors = [padded_2d[i, : int(lengths[i].item())] for i in range(len(lengths))]
-    return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
-
-
 def build_verl_actor_dataproto(
     grouped_samples: dict[str, list[RLSample]],
     *,
@@ -185,9 +172,6 @@ def build_verl_actor_dataproto(
         contributing = contributing[:max_contributing]
     samples = [sample for sample, _advantage in contributing]
     tensors = _pad_cached_sequences(samples, max_sequence_length=max_sequence_length)
-    input_ids = tensors["input_ids"]
-    completion_mask = tensors["completion_mask"]
-    sequence_lengths = tensors["sequence_lengths"]
     batch_size = len(samples)
     if batch_size == 0:
         # Return an empty DataProto — caller should guard against this.
@@ -221,39 +205,45 @@ def build_verl_actor_dataproto(
             },
         )
 
-    # Build full-sequence tensors (prompt + response)
-    attention_mask = torch.zeros_like(input_ids, dtype=torch.long)
-    for index, length in enumerate(sequence_lengths.tolist()):
-        attention_mask[index, : int(length)] = 1
-
-    # Split each sample into prompt-only and response-only sub-sequences.
-    # completion_mask is True for response tokens, False for prompt/padding.
+    # verl represents a rollout as a prompt followed by one response. An
+    # interval has non-contiguous assistant spans, so use its first token as
+    # the prompt and the complete shifted target sequence as the response.
+    # The sparse response_mask then selects only assistant-generated targets
+    # while preserving intervening tool-result conditioning in token order.
+    full_input_tensors: list[torch.Tensor] = []
+    attention_mask_tensors: list[torch.Tensor] = []
+    position_id_tensors: list[torch.Tensor] = []
     prompt_tensors: list[torch.Tensor] = []
     response_tensors: list[torch.Tensor] = []
     response_mask_tensors: list[torch.Tensor] = []
     old_log_probs_tensors: list[torch.Tensor] = []
     advantages_tensors: list[torch.Tensor] = []
 
-    for index, (sample, advantage) in enumerate(contributing):
-        length = int(sequence_lengths[index].item())
-        is_completion = completion_mask[index, :length].bool()
+    for sample, advantage in contributing:
+        input_tokens = list(sample.input_ids or [])
+        response_tokens = list(sample.labels or [])
+        response_mask_values = list(sample.completion_mask or [])
+        if not input_tokens or len(input_tokens) != len(response_tokens):
+            raise ValueError(f"Interval {sample.turn_id} has invalid shifted token tensors")
+        if input_tokens[1:] != response_tokens[:-1]:
+            raise ValueError(f"Interval {sample.turn_id} has non-contiguous shifted token tensors")
+        if len(response_mask_values) != len(response_tokens):
+            raise ValueError(f"Interval {sample.turn_id} has a misaligned completion mask")
 
-        # prompt tokens (where completion_mask is False)
-        prompt_tokens = input_ids[index, :length][~is_completion]
-        prompt_tensors.append(prompt_tokens if len(prompt_tokens) > 0 else torch.tensor([], dtype=torch.long))
+        full_tokens = torch.tensor([input_tokens[0], *response_tokens], dtype=torch.long)
+        full_input_tensors.append(full_tokens)
+        attention_mask_tensors.append(torch.ones(len(full_tokens), dtype=torch.long))
+        position_id_tensors.append(torch.arange(len(full_tokens), dtype=torch.long))
+        prompt_tensors.append(full_tokens[:1])
+        response_tensors.append(torch.tensor(response_tokens, dtype=torch.long))
+        response_mask_tensors.append(torch.tensor(response_mask_values, dtype=torch.bool))
 
-        # response tokens (where completion_mask is True)
-        response_tokens = input_ids[index, :length][is_completion]
-        response_tensors.append(response_tokens if len(response_tokens) > 0 else torch.tensor([], dtype=torch.long))
-        response_mask_tensors.append(torch.ones(len(response_tokens), dtype=torch.bool))
-
-        # old_log_probs for response tokens
+        # Reference log probabilities remain aligned with every shifted target;
+        # response_mask excludes conditioning-only positions from the loss.
         if sample.reference_logprobs is not None:
             ref_logprobs = torch.tensor(sample.reference_logprobs, dtype=torch.float32)
-            if len(ref_logprobs) > len(response_tokens):
-                ref_logprobs = ref_logprobs[: len(response_tokens)]
-            elif len(ref_logprobs) < len(response_tokens):
-                ref_logprobs = torch.nn.functional.pad(ref_logprobs, (0, len(response_tokens) - len(ref_logprobs)))
+            if len(ref_logprobs) != len(response_tokens):
+                raise ValueError(f"Interval {sample.turn_id} has misaligned reference log probabilities")
         else:
             ref_logprobs = torch.full((len(response_tokens),), float(sample.reference_logprob), dtype=torch.float32)
         old_log_probs_tensors.append(ref_logprobs)
@@ -266,9 +256,13 @@ def build_verl_actor_dataproto(
     response_mask = torch.nested.as_nested_tensor(response_mask_tensors, layout=torch.jagged)
     old_log_probs = torch.nested.as_nested_tensor(old_log_probs_tensors, layout=torch.jagged)
     advantages = torch.nested.as_nested_tensor(advantages_tensors, layout=torch.jagged)
+    full_input_ids = torch.nested.as_nested_tensor(full_input_tensors, layout=torch.jagged)
+    attention_mask = torch.nested.as_nested_tensor(attention_mask_tensors, layout=torch.jagged)
+    position_ids = torch.nested.as_nested_tensor(position_id_tensors, layout=torch.jagged)
 
+    sequence_lengths = torch.tensor([len(tokens) for tokens in full_input_tensors], dtype=torch.long)
     total_tokens = int(sequence_lengths.sum().item())
-    train_tokens = responses.offsets().diff().sum().item() if batch_size > 0 else 0
+    train_tokens = int(sum(mask.sum().item() for mask in response_mask_tensors))
     old_logprob_scope = (
         "token"
         if all(sample.reference_logprobs is not None for sample in samples)
@@ -281,9 +275,9 @@ def build_verl_actor_dataproto(
     }
     return DataProto.from_single_dict(
         {
-            "input_ids": _padded_to_nested(input_ids, sequence_lengths),
-            "attention_mask": _padded_to_nested(attention_mask, sequence_lengths),
-            "position_ids": _padded_to_nested(_position_ids(attention_mask), sequence_lengths),
+            "input_ids": full_input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
             "prompts": prompts,
             "responses": responses,
             "response_mask": response_mask,

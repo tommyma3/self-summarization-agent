@@ -5,7 +5,7 @@ This repo contains the first runtime slice for a self-summarization agent on `Br
 Current scope:
 - runtime loop with `search`, `get_document`, and `finish`
 - runtime-controlled summarization after completed tool rounds
-- trajectory extraction for RL on tool-call, `summary`, and `final_answer` turns
+- interval-level RL trajectories that preserve reasoning, tool actions, tool results, and boundary completions
 - BrowseComp-style run export
 - smoke and unit-test entrypoints
 
@@ -44,7 +44,7 @@ If you prefer the project virtualenv directly:
 
 - [main.py](/D:/M/CS/self-summarization-agent/main.py): CLI entrypoint for the smoke run
 - [src/self_summarization_agent/runtime.py](/D:/M/CS/self-summarization-agent/src/self_summarization_agent/runtime.py): episode runtime and summarization logic
-- [src/self_summarization_agent/trajectory.py](/D:/M/CS/self-summarization-agent/src/self_summarization_agent/trajectory.py): trainable turn extraction
+- [src/self_summarization_agent/trajectory.py](/D:/M/CS/self-summarization-agent/src/self_summarization_agent/trajectory.py): interval extraction, assistant-token masks, and training-cache validation
 - [src/self_summarization_agent/train_grpo.py](/D:/M/CS/self-summarization-agent/src/self_summarization_agent/train_grpo.py): query grouping helper for RL samples
 - [src/self_summarization_agent/export.py](/D:/M/CS/self-summarization-agent/src/self_summarization_agent/export.py): BrowseComp-style run export
 - [tests](/D:/M/CS/self-summarization-agent/tests): unit and integration-style tests
@@ -175,15 +175,17 @@ runtime = EpisodeRuntime(
 )
 
 result = runtime.run(query_id="q1", user_prompt="your benchmark question")
-samples = extract_trainable_samples(result.turn_records, result.turn_rewards)
+samples = extract_trainable_samples(result.trajectory_records, result.turn_rewards)
 grouped = group_samples_by_query(samples)
 ```
 
 What the runtime returns:
-- `turn_records` for tool-call, `summary`, and `final_answer` turns
-- malformed tool-call records as negative trainable examples
-- `turn_rewards` aligned with those turn ids
+- `turn_records` as generation-level diagnostics for tool-call, summary, and final-answer steps
+- `trajectory_records` as the actual RL samples, one per compaction/final-answer interval
+- `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout
 - `summary_turns`, `retrieved_docids`, and `tool_call_counts`
+
+Each training interval begins with the system instructions and either the original user request or the latest compressed state. The runtime appends every generated reasoning/action and tool result without reconstructing the history. At a compaction or forced-answer boundary, it appends the boundary instruction to that same context and generates one more assistant completion. All assistant tokens in the resulting interval are trainable; system/user state, tool results, and boundary instructions are masked out. Successful compaction then resets the next interval to only the system instructions plus the new compressed state.
 
 ## How To Run Real Experiments
 
@@ -262,10 +264,10 @@ For the intended GPU run:
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
 - rollout collection writes raw trajectories and, by default, overlaps judging into the paired judged rollout artifact; `--judge-inline` is only a compatibility path
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` loads the rollout checkpoint and writes v2 training caches with tokenized trainable turns, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v2 rows are preserved and old v1 cached rows are regenerated as v2
+- `cache_step` loads the rollout checkpoint and writes v3 sparse interval caches with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v3 rows are preserved and older cache versions are regenerated as v3
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
-- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over completion tokens using token-level reference logprobs when present
+- training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs
 - evaluation collects one rollout for each held-out eval question from the new checkpoint, judges those rows, and writes one accuracy row per iteration/checkpoint to `eval_metrics.jsonl`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
@@ -293,5 +295,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 
 - The summarization trigger is runtime-controlled, not model-controlled.
 - Summarization happens only after a completed tool round.
-- RL training data is produced from tool-call, `summary`, and `final_answer` turns.
-- Malformed tool calls terminate the rollout immediately and assign negative trainable rewards to the recorded generated steps in that failed trajectory.
+- Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
+- A successful compaction starts a fresh interval with only the system instructions and compressed state; no raw tail is retained.
+- RL training data is produced as one sparse-masked sample per interval, with all model-generated assistant tokens trainable.
+- Malformed tool calls terminate the rollout immediately and assign negative reward to every interval in that failed rollout.

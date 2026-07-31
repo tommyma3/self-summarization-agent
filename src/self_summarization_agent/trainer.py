@@ -17,7 +17,8 @@ except ImportError:
     AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
-from self_summarization_agent.trajectory import RLSample, TOKEN_CACHE_VERSION
+from self_summarization_agent.prompts import ConversationPrompt
+from self_summarization_agent.trajectory import RLSample, TOKEN_CACHE_VERSION, tokenize_interval_messages
 
 
 @dataclass(slots=True)
@@ -30,6 +31,22 @@ class _PolicyBatch:
 def compute_group_advantages(samples: list[RLSample]) -> list[float]:
     if not samples:
         return []
+    if all(sample.rollout_id is not None for sample in samples):
+        rollout_rewards: dict[str, float] = {}
+        for sample in samples:
+            rollout_id = str(sample.rollout_id)
+            existing = rollout_rewards.get(rollout_id)
+            if existing is not None and existing != sample.reward:
+                raise ValueError(f"Rollout {rollout_id} has inconsistent interval rewards")
+            rollout_rewards[rollout_id] = sample.reward
+        rewards = torch.tensor(list(rollout_rewards.values()), dtype=torch.float32)
+        centered = rewards - rewards.mean()
+        std = rewards.std(unbiased=False)
+        if std.item() > 0:
+            centered = centered / (std + 1e-6)
+        advantage_by_rollout = dict(zip(rollout_rewards, centered.tolist()))
+        return [advantage_by_rollout[str(sample.rollout_id)] for sample in samples]
+
     rewards = torch.tensor([sample.reward for sample in samples], dtype=torch.float32)
     centered = rewards - rewards.mean()
     std = rewards.std(unbiased=False)
@@ -254,8 +271,22 @@ def _encode_shifted_sample_from_text(
     tokenizer: Any,
     device: torch.device,
     max_sequence_length: int | None,
+    enable_thinking: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pad_token_id = _pad_token_id_from_tokenizer(tokenizer)
+    if sample.messages is not None:
+        input_id_values, label_values, mask_values = tokenize_interval_messages(
+            tokenizer,
+            sample.messages,
+            max_sequence_length=max_sequence_length,
+            sample_id=sample.turn_id,
+            enable_thinking=enable_thinking,
+        )
+        return (
+            torch.tensor(input_id_values, dtype=torch.long, device=device),
+            torch.tensor(label_values, dtype=torch.long, device=device),
+            torch.tensor(mask_values, dtype=torch.bool, device=device),
+        )
     prompt_ids = tokenizer.encode(sample.prompt, add_special_tokens=False)
     full_ids = tokenizer.encode(sample.prompt + sample.completion, add_special_tokens=False)
     if max_sequence_length is not None and len(full_ids) > max_sequence_length:
@@ -419,6 +450,9 @@ class TransformersPolicyTrainer:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
+
     def _model_device(self) -> torch.device:
         device = getattr(self.model, "device", None)
         if device is not None:
@@ -428,7 +462,10 @@ class TransformersPolicyTrainer:
     def _format_prompt(self, prompt: str) -> str:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
-        messages = [{"role": "user", "content": prompt}]
+        if isinstance(prompt, ConversationPrompt):
+            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+        else:
+            messages = [{"role": "user", "content": prompt}]
         try:
             return self.tokenizer.apply_chat_template(
                 messages,
@@ -488,6 +525,7 @@ class TransformersPolicyTrainer:
                     tokenizer=self.tokenizer,
                     device=device,
                     max_sequence_length=max_len,
+                    enable_thinking=self.model_config.enable_thinking,
                 )
             input_tensors.append(input_ids)
             label_tensors.append(labels)
@@ -536,6 +574,7 @@ class TransformersPolicyTrainer:
                 tokenizer=self.tokenizer,
                 device=device,
                 max_sequence_length=max_len,
+                enable_thinking=self.model_config.enable_thinking,
             )
             for sample in samples
         ]
@@ -728,6 +767,7 @@ class FSDP2ContextParallelPolicyTrainer:
             tokenizer=self.tokenizer,
             device=self.accelerator.device,
             max_sequence_length=max_len,
+            enable_thinking=self.model_config.enable_thinking,
         )
         input_ids = input_ids.unsqueeze(0)
         labels = labels.unsqueeze(0)
@@ -810,9 +850,10 @@ class FSDP2ContextParallelPolicyTrainer:
 
         max_len = getattr(self.training_config, "max_sequence_length", None)
         if max_len is not None and input_ids.shape[1] > max_len:
-            input_ids = input_ids[:, -max_len:]
-            labels = labels[:, -max_len:]
-            completion_mask = completion_mask[:, -max_len:]
+            raise ValueError(
+                "An interval batch exceeds training.max_sequence_length: "
+                f"{input_ids.shape[1]} > {max_len}; interval prefixes are never left-truncated"
+            )
 
         if self.training_config.context_parallel_size > 1:
             input_ids, labels, completion_mask = self._pad_for_context_parallel(
@@ -870,6 +911,7 @@ class FSDP2ContextParallelPolicyTrainer:
                 tokenizer=self.tokenizer,
                 device=self.accelerator.device,
                 max_sequence_length=max_len,
+                enable_thinking=self.model_config.enable_thinking,
             )
             for sample in samples
         ]

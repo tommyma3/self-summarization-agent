@@ -35,7 +35,7 @@ from self_summarization_agent.trajectory import extract_trainable_samples
 
 
 def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str, Any]:
-    trainable_turn_ids = trainable_turn_ids_from_records(result.turn_records)
+    trainable_turn_ids = trainable_turn_ids_from_records(result.trajectory_records)
     if is_penalized_runtime_status(result.status):
         result.turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
         return {"outcome": result.status, "judge_prompt": None, "judge_response": None, "parse_error": False}
@@ -399,12 +399,7 @@ def collect_rollouts(
     generator = generator or build_generator(rollout_model_config)
     if judge_inline:
         judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
-    runtime = build_runtime(
-        generator,
-        backend,
-        config.runtime,
-        cache_policy_checkpoint_id=checkpoint_id,
-    )
+    runtime = build_runtime(generator, backend, config.runtime)
 
     try:
         for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
@@ -418,7 +413,13 @@ def collect_rollouts(
                 if judge_inline:
                     judge_payload = apply_judged_rewards(result, example, judge)
                     include_rewards = True
-                    trainable_sample_count = len(extract_trainable_samples(result.turn_records, result.turn_rewards))
+                    trainable_sample_count = len(
+                        extract_trainable_samples(
+                            result.trajectory_records,
+                            result.turn_rewards,
+                            rollout_id=f"{example.query_id}:{rollout_index}",
+                        )
+                    )
                 row = {
                     "policy_checkpoint_id": checkpoint_id,
                     "policy_checkpoint_path": str(checkpoint),

@@ -18,7 +18,11 @@ from self_summarization_agent.checkpoints import (
 )
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir, utc_timestamp
-from self_summarization_agent.trajectory import TOKEN_CACHE_FIELD, extract_trainable_samples, is_training_cache_v2
+from self_summarization_agent.trajectory import (
+    TOKEN_CACHE_FIELD,
+    extract_trainable_samples,
+    is_training_cache_current,
+)
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -253,6 +257,10 @@ def _has_complete_raw_rollouts(
             raise ValueError(f"Cannot resume from {path}: row {index} is missing rollout_index")
         if not isinstance(row.get("turn_records"), list):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_records")
+        if not isinstance(row.get("trajectory_records"), list):
+            raise ValueError(
+                f"Cannot resume from {path}: row {index} is missing trajectory_records; recollect it"
+            )
     return True
 
 
@@ -278,6 +286,10 @@ def _has_complete_judged_rollouts(
             )
         if not isinstance(row.get("turn_records"), list):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_records")
+        if not isinstance(row.get("trajectory_records"), list):
+            raise ValueError(
+                f"Cannot resume from {path}: row {index} is missing trajectory_records; recollect it"
+            )
         if not isinstance(row.get("turn_rewards"), dict):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_rewards")
         if require_judge and not isinstance(row.get("judge"), dict):
@@ -305,16 +317,35 @@ def _has_complete_cached_rollouts(
                 f"{row.get('policy_checkpoint_id')!r}, expected {checkpoint_id!r}"
             )
         turn_records = row.get("turn_records")
+        trajectory_records = row.get("trajectory_records")
         turn_rewards = row.get("turn_rewards")
         if not isinstance(turn_records, list):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_records")
+        if not isinstance(trajectory_records, list):
+            raise ValueError(
+                f"Cannot resume from {path}: row {index} is missing trajectory_records; recollect it"
+            )
         if not isinstance(turn_rewards, dict):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_rewards")
         if row.get("trainable_sample_count") == 0:
             continue
+        rewarded_ids = set(turn_rewards)
+        current_cache_ids = {
+            record.get("turn_id")
+            for record in trajectory_records
+            if isinstance(record, dict)
+            and isinstance(record.get("turn_id"), str)
+            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+        }
+        if not rewarded_ids <= current_cache_ids:
+            return False
         missing_cache_turn_ids = [
             sample.turn_id
-            for sample in extract_trainable_samples(turn_records, turn_rewards)
+            for sample in extract_trainable_samples(
+                trajectory_records,
+                turn_rewards,
+                rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+            )
             if not sample.has_training_cache
         ]
         if missing_cache_turn_ids:
@@ -324,17 +355,21 @@ def _has_complete_cached_rollouts(
             )
         trainable_turn_ids = {
             sample.turn_id
-            for sample in extract_trainable_samples(turn_records, turn_rewards)
+            for sample in extract_trainable_samples(
+                trajectory_records,
+                turn_rewards,
+                rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+            )
         }
-        v2_cache_turn_ids = {
-            turn.get("turn_id")
-            for turn in turn_records
-            if isinstance(turn, dict)
-            and isinstance(turn.get("turn_id"), str)
-            and turn.get("turn_id") in trainable_turn_ids
-            and is_training_cache_v2(turn.get(TOKEN_CACHE_FIELD))
+        current_cache_turn_ids = {
+            record.get("turn_id")
+            for record in trajectory_records
+            if isinstance(record, dict)
+            and isinstance(record.get("turn_id"), str)
+            and record.get("turn_id") in trainable_turn_ids
+            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
         }
-        if not trainable_turn_ids <= v2_cache_turn_ids:
+        if not trainable_turn_ids <= current_cache_turn_ids:
             return False
     return True
 
@@ -359,26 +394,45 @@ def _has_inline_cached_rollouts(
                 f"{row.get('policy_checkpoint_id')!r}, expected {checkpoint_id!r}"
             )
         turn_records = row.get("turn_records")
+        trajectory_records = row.get("trajectory_records")
         turn_rewards = row.get("turn_rewards")
-        if not isinstance(turn_records, list) or not isinstance(turn_rewards, dict):
+        if (
+            not isinstance(turn_records, list)
+            or not isinstance(trajectory_records, list)
+            or not isinstance(turn_rewards, dict)
+        ):
             return False
         if row.get("trainable_sample_count") == 0:
             continue
-        samples = extract_trainable_samples(turn_records, turn_rewards)
+        rewarded_ids = set(turn_rewards)
+        current_cache_ids = {
+            record.get("turn_id")
+            for record in trajectory_records
+            if isinstance(record, dict)
+            and isinstance(record.get("turn_id"), str)
+            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+        }
+        if not rewarded_ids <= current_cache_ids:
+            return False
+        samples = extract_trainable_samples(
+            trajectory_records,
+            turn_rewards,
+            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+        )
         if not samples:
             return False
         if any(not sample.has_training_cache for sample in samples):
             return False
         trainable_turn_ids = {sample.turn_id for sample in samples}
-        v2_cache_turn_ids = {
-            turn.get("turn_id")
-            for turn in turn_records
-            if isinstance(turn, dict)
-            and isinstance(turn.get("turn_id"), str)
-            and turn.get("turn_id") in trainable_turn_ids
-            and is_training_cache_v2(turn.get(TOKEN_CACHE_FIELD))
+        current_cache_turn_ids = {
+            record.get("turn_id")
+            for record in trajectory_records
+            if isinstance(record, dict)
+            and isinstance(record.get("turn_id"), str)
+            and record.get("turn_id") in trainable_turn_ids
+            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
         }
-        if not trainable_turn_ids <= v2_cache_turn_ids:
+        if not trainable_turn_ids <= current_cache_turn_ids:
             return False
     return True
 

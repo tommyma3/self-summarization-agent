@@ -93,6 +93,25 @@ def test_build_verl_fsdp_worker_config_maps_repo_training_knobs() -> None:
     assert config["actor"]["fsdp_config"]["use_torch_compile"] is False
 
 
+def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> None:
+    patch_fake_dataproto(monkeypatch)
+    interval = sample("trajectory-1", 1.0, -0.5)
+    interval.completion_mask = [True, False, True]
+
+    batch = build_verl_actor_dataproto(
+        {"q1": [interval, sample("trajectory-2", 0.0, -0.5)]},
+        checkpoint_id="step-00001",
+        max_contributing=1,
+    )
+
+    assert batch.batch["prompts"].values().tolist() == [10]
+    assert batch.batch["responses"].values().tolist() == [11, 12, 13]
+    assert batch.batch["input_ids"].values().tolist() == [10, 11, 12, 13]
+    assert batch.batch["response_mask"].values().tolist() == [True, False, True]
+    assert batch.batch["old_log_probs"].values().tolist() == [0.0, -0.75, -0.25]
+    assert batch.meta_info["train_tokens"] == 2
+
+
 def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) -> None:
     patch_fake_dataproto(monkeypatch)
     training_config = TrainingConfig(backend="verl_ray", group_size=2)

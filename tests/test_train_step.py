@@ -50,12 +50,30 @@ class FakeTrainer:
 
 def training_cache(reference_logprob: float = -0.5) -> dict:
     return {
-        "version": 1,
+        "version": 3,
         "input_ids": [1, 2],
         "labels": [2, 3],
         "completion_mask": [False, True],
         "reference_logprob": reference_logprob,
+        "reference_logprobs": [0.0, reference_logprob],
     }
+
+
+def trajectory_record(record_id: str, *, termination_kind: str, cache: bool = True) -> dict:
+    record = {
+        "query_id": "q1",
+        "turn_id": record_id,
+        "kind": "trajectory",
+        "termination_kind": termination_kind,
+        "messages": [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "task state"},
+            {"role": "assistant", "content": "reasoning and completion"},
+        ],
+    }
+    if cache:
+        record["training_cache"] = training_cache(-0.5)
+    return record
 
 
 def train_config(tmp_path: Path) -> TrainConfig:
@@ -79,7 +97,6 @@ def write_rollout(path: Path, checkpoint_id: str, *, summary_tokens: int | None 
             "kind": "tool",
             "prompt": "tool prompt",
             "completion": '{"tool_name": "search", "arguments": {"query": "question"}}',
-            "training_cache": training_cache(-0.5),
         },
         {
             "query_id": "q1",
@@ -87,10 +104,9 @@ def write_rollout(path: Path, checkpoint_id: str, *, summary_tokens: int | None 
             "kind": "final_answer",
             "prompt": "prompt",
             "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
-            "training_cache": training_cache(-0.25),
         },
     ]
-    turn_rewards = {"tool-1": 1.0, "final-answer": 1.0}
+    trajectory_records = [trajectory_record("trajectory-1", termination_kind="final_answer")]
     if summary_tokens is not None:
         turn_records.insert(
             0,
@@ -101,14 +117,20 @@ def write_rollout(path: Path, checkpoint_id: str, *, summary_tokens: int | None 
                 "prompt": "summary prompt",
                 "completion": "<think>internal reasoning</think>\nsummary body",
                 "summary_tokens": summary_tokens,
-                "training_cache": training_cache(-0.5),
             },
         )
-        turn_rewards["summary-1"] = 1.0
+        trajectory_records = [
+            trajectory_record("trajectory-1", termination_kind="compaction"),
+            trajectory_record("trajectory-2", termination_kind="final_answer"),
+        ]
+    turn_rewards = {record["turn_id"]: 1.0 for record in trajectory_records}
     row = {
         "policy_checkpoint_id": checkpoint_id,
-        "trainable_sample_count": len(turn_records),
+        "query_id": "q1",
+        "rollout_index": 0,
+        "trainable_sample_count": len(trajectory_records),
         "turn_records": turn_records,
+        "trajectory_records": trajectory_records,
         "turn_rewards": turn_rewards,
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
@@ -117,6 +139,8 @@ def write_rollout(path: Path, checkpoint_id: str, *, summary_tokens: int | None 
 def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
     row = {
         "policy_checkpoint_id": checkpoint_id,
+        "query_id": "q1",
+        "rollout_index": 0,
         "trainable_sample_count": 2,
         "status": "malformed_tool_call",
         "turn_records": [
@@ -126,7 +150,6 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
                 "kind": "summary",
                 "prompt": "prompt",
                 "completion": "summary",
-                "training_cache": training_cache(-0.5),
             },
             {
                 "query_id": "q1",
@@ -134,10 +157,13 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
                 "turn_id": "tool-2",
                 "prompt": "tool prompt",
                 "completion": '{"tool_name": "search"}',
-                "training_cache": training_cache(-0.25),
             },
         ],
-        "turn_rewards": {"summary-1": -1.0, "tool-2": -1.0},
+        "trajectory_records": [
+            trajectory_record("trajectory-1", termination_kind="compaction"),
+            trajectory_record("trajectory-2", termination_kind="malformed"),
+        ],
+        "turn_rewards": {"trajectory-1": -1.0, "trajectory-2": -1.0},
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -145,6 +171,8 @@ def write_malformed_rollout(path: Path, checkpoint_id: str) -> None:
 def write_raw_rollout(path: Path, checkpoint_id: str) -> None:
     row = {
         "policy_checkpoint_id": checkpoint_id,
+        "query_id": "q1",
+        "rollout_index": 0,
         "trainable_sample_count": None,
         "turn_records": [
             {
@@ -155,6 +183,7 @@ def write_raw_rollout(path: Path, checkpoint_id: str) -> None:
                 "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
             }
         ],
+        "trajectory_records": [trajectory_record("trajectory-1", termination_kind="final_answer", cache=False)],
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -162,6 +191,8 @@ def write_raw_rollout(path: Path, checkpoint_id: str) -> None:
 def write_uncached_judged_rollout(path: Path, checkpoint_id: str) -> None:
     row = {
         "policy_checkpoint_id": checkpoint_id,
+        "query_id": "q1",
+        "rollout_index": 0,
         "trainable_sample_count": 1,
         "turn_records": [
             {
@@ -172,7 +203,8 @@ def write_uncached_judged_rollout(path: Path, checkpoint_id: str) -> None:
                 "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
             }
         ],
-        "turn_rewards": {"final-answer": 1.0},
+        "trajectory_records": [trajectory_record("trajectory-1", termination_kind="final_answer", cache=False)],
+        "turn_rewards": {"trajectory-1": 1.0},
     }
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
@@ -228,7 +260,7 @@ def test_run_train_step_writes_backend_and_extra_metrics(tmp_path: Path) -> None
     metric_row = json.loads(metrics_path.read_text(encoding="utf-8").strip())
     assert metric_row["training_backend"] == "verl_ray"
     assert metric_row["backend"] == "verl_ray"
-    assert metric_row["verl_ray/sample_count"] == 3
+    assert metric_row["verl_ray/sample_count"] == 2
     assert metric_row["avg_summary_tokens"] == 3
 
 
@@ -273,7 +305,7 @@ def test_run_train_step_consumes_malformed_negative_samples(tmp_path: Path) -> N
     )
 
     assert trainer.grouped_samples is not None
-    assert [sample.turn_id for sample in trainer.grouped_samples["q1"]] == ["summary-1", "tool-2"]
+    assert [sample.turn_id for sample in trainer.grouped_samples["q1"]] == ["trajectory-1", "trajectory-2"]
     assert [sample.reward for sample in trainer.grouped_samples["q1"]] == [-1.0, -1.0]
     assert trainer.saved_checkpoints == [str(output_checkpoint)]
 
@@ -294,7 +326,7 @@ def test_run_train_step_rejects_raw_unjudged_rollouts(tmp_path: Path) -> None:
             trainer=trainer,
         )
     except ValueError as exc:
-        assert "turn_records or turn_rewards" in str(exc)
+        assert "turn_records, trajectory_records, or turn_rewards" in str(exc)
     else:
         raise AssertionError("Expected raw rollout rows to be rejected")
 

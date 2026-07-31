@@ -40,6 +40,19 @@ def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
             {"query_id": "q1", "turn_id": "tool-1", "kind": "tool", "prompt": "p", "completion": "c"},
             {"query_id": "q1", "turn_id": "summary-1", "kind": "summary", "prompt": "p", "completion": "c"},
         ],
+        "trajectory_records": [
+            {
+                "query_id": "q1",
+                "turn_id": "trajectory-1",
+                "kind": "trajectory",
+                "termination_kind": "compaction",
+                "messages": [
+                    {"role": "system", "content": "instructions"},
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "reasoning and summary"},
+                ],
+            }
+        ],
     }
 
     judged = apply_decision_to_rollout_row(
@@ -48,8 +61,8 @@ def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
     )
 
     assert judged["judge"]["outcome"] == "summary_length_exceeded"
-    assert judged["turn_rewards"] == {"tool-1": -1.0, "summary-1": -1.0}
-    assert judged["trainable_sample_count"] == 2
+    assert judged["turn_rewards"] == {"trajectory-1": -1.0}
+    assert judged["trainable_sample_count"] == 1
 
 
 def test_create_judge_prompt_is_minimal() -> None:
@@ -109,6 +122,21 @@ def write_raw_rollouts(path: Path) -> None:
                     "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
                 }
             ],
+            "trajectory_records": [
+                {
+                    "query_id": "q1",
+                    "turn_id": "trajectory-1",
+                    "kind": "trajectory",
+                    "termination_kind": "final_answer",
+                    "messages": [
+                        {"role": "system", "content": "instructions"},
+                        {"role": "user", "content": "question"},
+                        {"role": "assistant", "content": "reasoning and search"},
+                        {"role": "user", "content": "search result"},
+                        {"role": "assistant", "content": "reasoning and answer"},
+                    ],
+                }
+            ],
             "retrieved_docids": [],
             "tool_call_counts": {},
             "judge": None,
@@ -136,8 +164,8 @@ def test_judge_rollouts_assigns_rewards_and_sample_counts(tmp_path: Path) -> Non
 
     rows = [json.loads(line) for line in judged_path.read_text(encoding="utf-8").splitlines()]
     assert generator.batch_sizes == [1]
-    assert rows[0]["turn_rewards"] == {"tool-1": 1.0, "final-answer": 1.0}
-    assert rows[0]["trainable_sample_count"] == 2
+    assert rows[0]["turn_rewards"] == {"trajectory-1": 1.0}
+    assert rows[0]["trainable_sample_count"] == 1
     assert rows[0]["judge"]["outcome"] == "correct_answer"
 
 

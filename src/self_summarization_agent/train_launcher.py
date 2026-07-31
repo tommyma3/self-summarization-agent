@@ -77,7 +77,7 @@ def _merge_launcher_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _apply_judged_rewards(result, example: QueryExample, judge: RewardJudge) -> dict[str, Any]:
-    trainable_turn_ids = trainable_turn_ids_from_records(result.turn_records)
+    trainable_turn_ids = trainable_turn_ids_from_records(result.trajectory_records)
     if is_penalized_runtime_status(result.status):
         result.turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
         return {"outcome": result.status, "judge_prompt": None, "judge_response": None, "parse_error": False}
@@ -212,7 +212,13 @@ def train_experiment(
                     malformed_count += 1
                 else:
                     judged_count += 1
-                    all_samples.extend(extract_trainable_samples(result.turn_records, result.turn_rewards))
+                all_samples.extend(
+                    extract_trainable_samples(
+                        result.trajectory_records,
+                        result.turn_rewards,
+                        rollout_id=f"{example.query_id}:{rollout_index}",
+                    )
+                )
                 append_jsonl(
                     step_rollout_path,
                     serialize_runtime_result(

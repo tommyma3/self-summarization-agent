@@ -1,56 +1,83 @@
-def _tag_text(text: object) -> str:
-    return str(text).replace("</", "< /").strip()
+from collections.abc import Iterable
+
+from self_summarization_agent.models import Message
 
 
-def format_action_tag(tool_name: str, arguments: dict[str, object]) -> str:
-    if tool_name == "search":
-        return f"<search>{_tag_text(arguments.get('query', ''))}</search>"
-    if tool_name == "get_document":
-        return f"<document>{_tag_text(arguments.get('doc_id', ''))}</document>"
-    if tool_name == "finish":
-        return f"<answer>{_tag_text(arguments.get('answer', ''))}</answer>"
-    return ""
+class ConversationPrompt(str):
+    """Readable prompt text carrying the structured messages used by chat templates."""
+
+    def __new__(cls, messages: Iterable[Message]):
+        copied_messages = tuple(Message(role=message.role, content=message.content) for message in messages)
+        value = render_messages(copied_messages)
+        prompt = super().__new__(cls, value)
+        prompt.messages = copied_messages
+        return prompt
 
 
-def format_history_round(tool_name: str, arguments: dict[str, object], tool_result: str) -> str:
-    action = format_action_tag(tool_name, arguments)
-    information = f"<information>{_tag_text(tool_result)}</information>"
-    return "\n".join(part for part in (action, information) if part)
+def render_messages(messages: Iterable[Message]) -> str:
+    return "\n".join(f"### {message.role.upper()}\n{message.content}" for message in messages)
+
+
+def serialize_messages(messages: Iterable[Message]) -> list[dict[str, str]]:
+    return [{"role": message.role, "content": message.content} for message in messages]
+
+
+def format_tool_result(tool_result: str) -> str:
+    return f"<information>{tool_result}</information>"
 
 
 def build_system_prompt() -> str:
     return """You are an expert research agent answering the user's question step by step.
 
-Think first. Then choose exactly one action:
+Normally, think first and then choose exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
-(3) Provide your final answer within <answer> </answer> tags."""
+(3) Provide your final answer within <answer> </answer> tags.
+
+The runtime may append a compaction or forced-answer instruction. When it does,
+follow that final boundary instruction instead of taking a normal action."""
 
 
-def build_forced_answer_system_prompt() -> str:
-    return """You are an expert research agent. You are at the final-answer boundary.
-
+def build_forced_answer_prompt() -> str:
+    return """The final-answer boundary has been reached.
 Search and document actions are no longer available.
 Think first, then answer with exactly one action:
 <answer>best supported answer</answer>
 
-Use only the conversation, summary, and tool results."""
+Use only the preceding task state, reasoning, and tool results."""
 
 
-def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:
+def build_forced_answer_system_prompt() -> str:
+    """Compatibility alias for the appended forced-answer instruction."""
+    return build_forced_answer_prompt()
+
+
+def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     length_instruction = (
         f"Keep the summary body to at most {max_summary_tokens} tokens.\n"
         if max_summary_tokens is not None
         else ""
     )
-    return f"""You are a context summarization AI agent.
+    return f"""Compact the entire preceding task trajectory into a self-summary for the next interval.
+Preserve the original task, constraints, established evidence, hypotheses, unresolved work, and useful next steps.
+Keep the summary structured and concise. Use short sentences.
+{length_instruction}Think first, then return the compressed state after </think>."""
 
-Your task is to summarize the previous research context so the research agent can continue the task. The summary should contain only the essential information needed to continue solving the task. Keep the summary structured. Use short sentences.
-{length_instruction}Return a summary using format: <summary> your summary </summary>.
-"""
+
+def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:
+    """Compatibility alias for the appended compaction instruction."""
+    return build_summary_prompt(max_summary_tokens=max_summary_tokens)
 
 
-def build_summary_prompt() -> str:
-    return (
-        ""
-    )
+def build_initial_messages(user_prompt: str) -> list[Message]:
+    return [
+        Message(role="system", content=build_system_prompt()),
+        Message(role="user", content=user_prompt),
+    ]
+
+
+def build_compacted_messages(summary: str) -> list[Message]:
+    return [
+        Message(role="system", content=build_system_prompt()),
+        Message(role="user", content=summary),
+    ]

@@ -1,13 +1,8 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from self_summarization_agent.models import EpisodeState
-from self_summarization_agent.prompts import (
-    build_summary_prompt,
-    build_summary_system_prompt,
-    build_system_prompt,
-    format_history_round,
-)
+from self_summarization_agent.models import EpisodeState, Message
+from self_summarization_agent.prompts import ConversationPrompt, build_summary_prompt
 
 
 @dataclass(slots=True)
@@ -15,41 +10,26 @@ class ContextManager:
     token_counter: Callable[[str], int]
     max_context_tokens: int
     safety_margin_tokens: int = 256
+    prompt_token_counter: Callable[[str], int] | None = None
+
+    def _count_prompt(self, prompt: str) -> int:
+        if self.prompt_token_counter is not None:
+            return self.prompt_token_counter(prompt)
+        return self.token_counter(prompt)
 
     def current_token_count(self, state: EpisodeState) -> int:
-        pieces = [build_system_prompt(), state.user_prompt]
-        if state.latest_summary:
-            pieces.append(state.latest_summary)
-        for round_record in state.rounds:
-            pieces.append(
-                format_history_round(
-                    round_record.tool_call.tool_name,
-                    round_record.tool_call.arguments,
-                    round_record.tool_result.content,
-                )
-            )
-        return self.token_counter("\n".join(pieces))
+        return self._count_prompt(ConversationPrompt(state.messages))
 
     def should_summarize(self, state: EpisodeState) -> bool:
         return self.current_token_count(state) >= state.context_threshold_tokens
 
-    def build_summary_context(self, state: EpisodeState, *, max_summary_tokens: int | None = None) -> str:
-        pieces = [build_summary_system_prompt(max_summary_tokens=max_summary_tokens), state.user_prompt]
-        if state.latest_summary:
-            pieces.append(state.latest_summary)
-        for round_record in state.rounds:
-            pieces.append(
-                format_history_round(
-                    round_record.tool_call.tool_name,
-                    round_record.tool_call.arguments,
-                    round_record.tool_result.content,
-                )
-            )
-        pieces.append(build_summary_prompt())
-        return "\n".join(pieces)
+    def build_summary_context(self, state: EpisodeState, *, max_summary_tokens: int | None = None) -> ConversationPrompt:
+        messages = list(state.messages)
+        messages.append(Message(role="user", content=build_summary_prompt(max_summary_tokens=max_summary_tokens)))
+        return ConversationPrompt(messages)
 
-    def assert_fits(self, packed_prompt: str) -> None:
-        packed_tokens = self.token_counter(packed_prompt)
-        limit = max(1, self.max_context_tokens - self.safety_margin_tokens)
+    def assert_fits(self, packed_prompt: str, *, reserved_tokens: int = 0) -> None:
+        packed_tokens = self._count_prompt(packed_prompt)
+        limit = max(1, self.max_context_tokens - self.safety_margin_tokens - reserved_tokens)
         if packed_tokens > limit:
             raise ValueError(f"Packed prompt exceeds safe limit: {packed_tokens} > {limit}")

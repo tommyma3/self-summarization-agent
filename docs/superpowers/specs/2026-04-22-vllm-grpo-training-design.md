@@ -1,5 +1,9 @@
 # vLLM GRPO Training Design
 
+> The orchestration and distributed-training discussion remains relevant, but
+> trainable-turn language in this document is superseded by the interval sample
+> contract in `2026-07-31-append-only-compaction-interval-design.md`.
+
 Date: 2026-04-22
 
 ## Purpose

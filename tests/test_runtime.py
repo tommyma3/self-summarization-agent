@@ -1,7 +1,6 @@
 import contextlib
 import io
 import json
-from dataclasses import dataclass
 
 import main as cli_entrypoint
 from self_summarization_agent.backend import FakeBackend
@@ -9,15 +8,6 @@ from self_summarization_agent.cli import build_smoke_run_record
 from self_summarization_agent.launcher_utils import serialize_runtime_result
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import extract_trainable_samples
-
-
-@dataclass(frozen=True, slots=True)
-class MetadataOutput:
-    text: str
-    prompt_token_ids: list[int] | None = None
-    completion_token_ids: list[int] | None = None
-    cumulative_logprob: float | None = None
-    token_logprobs: list[float] | None = None
 
 
 class RecordingModel(ScriptedModel):
@@ -28,21 +18,6 @@ class RecordingModel(ScriptedModel):
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return super().generate(prompt)
-
-
-class MetadataModel:
-    def __init__(self, outputs: list[MetadataOutput]) -> None:
-        self.outputs = outputs
-        self.cursor = 0
-
-    def generate_batch_with_metadata(self, prompts: list[str]) -> list[MetadataOutput]:
-        del prompts
-        batch = self.outputs[self.cursor : self.cursor + 1]
-        self.cursor += 1
-        return batch
-
-    def count_tokens(self, text: str) -> int:
-        return len(text.split())
 
 
 def tool_output(json_text: str, thinking: str = "thinking") -> str:
@@ -59,7 +34,7 @@ def test_fake_backend_returns_search_hits_and_document() -> None:
     assert backend.get_document("doc-1") == "doc-1 body"
 
 
-def test_runtime_injects_summary_after_threshold_crossing() -> None:
+def test_runtime_completes_without_summary_below_threshold() -> None:
     backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact from doc-1"})
     model = ScriptedModel(
         outputs=[
@@ -67,7 +42,7 @@ def test_runtime_injects_summary_after_threshold_crossing() -> None:
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=5, max_context_tokens=1024)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
@@ -105,69 +80,22 @@ def test_runtime_batches_same_step_search_calls() -> None:
     assert [result.final_answer for result in results] == ["done one", "done two"]
 
 
-def test_runtime_attaches_training_cache_from_generation_metadata() -> None:
-    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact"})
-    model = MetadataModel(
-        [
-            MetadataOutput(
-                text=tool_output('{"tool_name": "search", "arguments": {"query": "q"}}'),
-                prompt_token_ids=[10, 11],
-                completion_token_ids=[12, 13],
-                cumulative_logprob=-2.0,
-                token_logprobs=[-0.75, -1.25],
-            ),
-            MetadataOutput(
-                text=tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
-                prompt_token_ids=[20],
-                completion_token_ids=[21],
-                cumulative_logprob=-0.5,
-                token_logprobs=[-0.5],
-            ),
-        ]
-    )
-    runtime = EpisodeRuntime(
-        model=model,
-        backend=backend,
-        context_threshold_tokens=1000,
-        max_context_tokens=1024,
-        cache_policy_checkpoint_id="step-00001",
-    )
-
-    result = runtime.run(query_id="q1", user_prompt="question")
-
-    tool_cache = result.turn_records[0]["training_cache"]
-    assert tool_cache["policy_checkpoint_id"] == "step-00001"
-    assert tool_cache["version"] == 2
-    assert tool_cache["input_ids"] == [10, 11, 12]
-    assert tool_cache["labels"] == [11, 12, 13]
-    assert tool_cache["completion_mask"] == [False, True, True]
-    assert tool_cache["reference_logprob"] == -1.0
-    assert tool_cache["reference_logprobs"] == [0.0, -0.75, -1.25]
-    final_cache = result.turn_records[1]["training_cache"]
-    assert final_cache["input_ids"] == [20]
-    assert final_cache["labels"] == [21]
-    assert final_cache["completion_mask"] == [True]
-    assert final_cache["reference_logprob"] == -0.5
-    assert final_cache["reference_logprobs"] == [-0.5]
-
-
 def test_runtime_stops_on_malformed_tool_call() -> None:
     backend = FakeBackend(search_index={}, documents={})
     model = ScriptedModel(outputs=['{"tool_name": "search"}'])
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=1024)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "malformed_tool_call"
-    assert result.turn_rewards == {"tool-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": -1.0}
 
 
 def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
-    second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
     overlong_summary = "one two three"
-    backend = FakeBackend(search_index={"first": ["doc-1"], "second": ["doc-2"]}, documents={})
-    model = RecordingModel(outputs=[first_search, second_search, overlong_summary])
+    backend = FakeBackend(search_index={"first": ["doc-1"]}, documents={})
+    model = RecordingModel(outputs=[first_search, overlong_summary])
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
@@ -181,8 +109,8 @@ def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
     assert result.status == "summary_length_exceeded"
     assert result.final_answer is None
     assert result.summary_turns == []
-    assert [record["kind"] for record in result.turn_records] == ["tool", "tool", "summary"]
-    assert result.turn_rewards == {"tool-1": -1.0, "tool-2": -1.0, "summary-1": -1.0}
+    assert [record["kind"] for record in result.turn_records] == ["tool", "summary"]
+    assert result.turn_rewards == {"trajectory-1": -1.0}
     summary_record = result.turn_records[-1]
     assert summary_record["summary_tokens"] == 3
     assert summary_record["max_summary_tokens"] == 2
@@ -191,12 +119,11 @@ def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
 
 def test_runtime_accepts_summary_at_maximum_length() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
-    second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
     summary = "one two"
     final_answer = tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
-    backend = FakeBackend(search_index={"first": ["doc-1"], "second": ["doc-2"]}, documents={})
+    backend = FakeBackend(search_index={"first": ["doc-1"]}, documents={})
     runtime = EpisodeRuntime(
-        model=ScriptedModel(outputs=[first_search, second_search, summary, final_answer]),
+        model=ScriptedModel(outputs=[first_search, summary, final_answer]),
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
@@ -207,7 +134,7 @@ def test_runtime_accepts_summary_at_maximum_length() -> None:
 
     assert result.status == "completed"
     assert result.summary_turns == ["summary-1"]
-    assert result.turn_records[2]["summary_tokens"] == 2
+    assert result.turn_records[1]["summary_tokens"] == 2
 
 
 def test_parse_model_tool_call_accepts_thinking_and_fenced_json() -> None:
@@ -325,7 +252,7 @@ def test_runtime_records_raw_tool_call_completion_when_model_outputs_thinking() 
             '<think>The document supports it.</think>\n{"tool_name": "finish", "arguments": {"answer": "done"}}',
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=1024)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
@@ -354,7 +281,7 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=1024,
         max_tool_calls=2,
     )
@@ -368,11 +295,11 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert "Tool Budget Remaining" not in model.prompts[1]
     assert "### SYSTEM" in model.prompts[1]
     assert "choose exactly one action" in model.prompts[1]
-    assert "Think first, then output one action tag" in model.prompts[1]
     assert "### USER\nquestion" in model.prompts[1]
-    assert "### HISTORY\n<search>q</search>" in model.prompts[1]
+    assert "### ASSISTANT\n<think>thinking</think>" in model.prompts[1]
+    assert '{"tool_name": "search", "arguments": {"query": "q"}}' in model.prompts[1]
     assert '<information>[{"docid": "doc-1", "snippet": "fact from doc-1"}]</information>' in model.prompts[1]
-    assert "### NEXT_ACTION" in model.prompts[1]
+    assert "### NEXT_ACTION" not in model.prompts[1]
 
 
 def test_runtime_attributes_malformed_penalty_to_second_tool_turn() -> None:
@@ -383,27 +310,20 @@ def test_runtime_attributes_malformed_penalty_to_second_tool_turn() -> None:
             tool_output('{"tool_name": "search"}'),
         ]
     )
-    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=100, max_context_tokens=1024)
+    runtime = EpisodeRuntime(model=model, backend=backend, context_threshold_tokens=1000, max_context_tokens=1024)
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "malformed_tool_call"
-    assert result.turn_rewards == {"tool-1": -1.0, "tool-2": -1.0}
+    assert result.turn_rewards == {"trajectory-1": -1.0}
 
 
-def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
+def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summary() -> None:
+    backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
     model = RecordingModel(
         outputs=[
-            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
-            "summary of old-doc only",
+            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}', thinking="retain this reasoning"),
+            "summary of the task and old-doc",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -412,38 +332,31 @@ def test_runtime_uses_summary_plus_unsummarized_raw_tail_after_compaction() -> N
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
-        token_counter=lambda text: text.count("trigger-doc"),
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("old-doc"),
     )
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "completed"
-    assert len(model.prompts) == 4
-    acting_prompt_after_summary = model.prompts[3]
+    assert len(model.prompts) == 3
+    compaction_prompt = model.prompts[1]
+    assert "retain this reasoning" in compaction_prompt
+    assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in compaction_prompt
+    assert compaction_prompt.rstrip().endswith("Think first, then return the compressed state after </think>.")
+    acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
-    assert "choose exactly one action" in acting_prompt_after_summary
-    assert "Think first, then output one action tag" in acting_prompt_after_summary
-    assert "### USER\nquestion" in acting_prompt_after_summary
-    assert "### SUMMARY\nsummary of old-doc only" in acting_prompt_after_summary
+    assert "### USER\nsummary of the task and old-doc" in acting_prompt_after_summary
+    assert "### USER\nquestion" not in acting_prompt_after_summary
+    assert "retain this reasoning" not in acting_prompt_after_summary
     assert "<search>first</search>" not in acting_prompt_after_summary
-    assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' not in acting_prompt_after_summary
-    assert "<search>second</search>" in acting_prompt_after_summary
-    assert '<information>[{"docid": "trigger-doc", "snippet": ""}]</information>' in acting_prompt_after_summary
-    assert "### NEXT_ACTION" in acting_prompt_after_summary
 
 
 def test_runtime_puts_only_post_think_summary_into_context() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
+    backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
     model = RecordingModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
             "<think>reason about old-doc</think>\nsummary body for context",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
@@ -453,36 +366,29 @@ def test_runtime_puts_only_post_think_summary_into_context() -> None:
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
-        token_counter=lambda text: text.count("trigger-doc"),
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("old-doc"),
     )
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "completed"
-    summary_record = result.turn_records[2]
+    summary_record = result.turn_records[1]
     assert summary_record["completion"] == "<think>reason about old-doc</think>\nsummary body for context"
     assert summary_record["thinking"] == "reason about old-doc"
     assert summary_record["summary"] == "summary body for context"
-    acting_prompt_after_summary = model.prompts[3]
-    assert "### SUMMARY\nsummary body for context" in acting_prompt_after_summary
+    acting_prompt_after_summary = model.prompts[2]
+    assert "### USER\nsummary body for context" in acting_prompt_after_summary
     assert "reason about old-doc" not in acting_prompt_after_summary
     assert "<think>" not in acting_prompt_after_summary
 
 
-def test_runtime_skips_summary_when_post_think_body_is_empty() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
+def test_runtime_penalizes_empty_post_think_summary() -> None:
+    backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
     model = RecordingModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
             "<think>reasoning only</think>   ",
-            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
     runtime = EpisodeRuntime(
@@ -490,56 +396,22 @@ def test_runtime_skips_summary_when_post_think_body_is_empty() -> None:
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
-        token_counter=lambda text: text.count("trigger-doc"),
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("old-doc"),
     )
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
-    assert result.status == "completed"
+    assert result.status == "empty_summary"
     assert result.summary_turns == []
-    assert "### SUMMARY" not in model.prompts[3]
 
 
-def test_runtime_keeps_single_raw_round_in_next_prompt_without_summary() -> None:
-    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact from doc-1"})
-    model = RecordingModel(
-        outputs=[
-            tool_output('{"tool_name": "search", "arguments": {"query": "q"}}'),
-            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
-        ]
-    )
-    runtime = EpisodeRuntime(
-        model=model,
-        backend=backend,
-        context_threshold_tokens=1,
-        max_context_tokens=1024,
-        token_counter=lambda text: text.count("doc-1"),
-    )
-
-    result = runtime.run(query_id="q1", user_prompt="question")
-
-    assert result.status == "completed"
-    assert result.summary_turns == []
-    assert len(model.prompts) == 2
-    acting_prompt = model.prompts[1]
-    assert "### SUMMARY" not in acting_prompt
-    assert "<search>q</search>" in acting_prompt
-    assert '<information>[{"docid": "doc-1", "snippet": "fact from doc-1"}]</information>' in acting_prompt
-
-
-def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
+def test_runtime_records_one_training_trajectory_per_interval() -> None:
+    backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
     model = RecordingModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
-            "   ",
+            "summary of the task and old-doc",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -548,74 +420,34 @@ def test_runtime_empty_summary_does_not_retire_older_rounds() -> None:
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
-        token_counter=lambda text: text.count("trigger-doc"),
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("old-doc"),
     )
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
-    assert result.status == "completed"
-    assert result.summary_turns == []
-    assert len(model.prompts) == 4
-    acting_prompt_after_empty_summary = model.prompts[3]
-    assert "### SUMMARY" not in acting_prompt_after_empty_summary
-    assert "<search>first</search>" in acting_prompt_after_empty_summary
-    assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in acting_prompt_after_empty_summary
-    assert "<search>second</search>" in acting_prompt_after_empty_summary
-    assert '<information>[{"docid": "trigger-doc", "snippet": ""}]</information>' in acting_prompt_after_empty_summary
-
-
-def test_runtime_records_trainable_tool_summary_and_final_answer_turns() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
-    model = RecordingModel(
-        outputs=[
-            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
-            "summary of old-doc only",
-            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
-        ]
-    )
-    runtime = EpisodeRuntime(
-        model=model,
-        backend=backend,
-        context_threshold_tokens=1,
-        max_context_tokens=1024,
-        token_counter=lambda text: text.count("trigger-doc"),
-    )
-
-    result = runtime.run(query_id="q1", user_prompt="question")
-
-    assert [record["kind"] for record in result.turn_records] == ["tool", "tool", "summary", "final_answer"]
-    assert [record["query_id"] for record in result.turn_records] == ["q1", "q1", "q1", "q1"]
-    assert result.turn_records[0]["turn_id"] == "tool-1"
-    assert result.turn_records[0]["completion"] == tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
-    assert result.turn_records[1]["turn_id"] == "tool-2"
-    assert result.turn_records[1]["completion"] == tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
-    assert result.turn_records[2]["turn_id"] == "summary-1"
-    assert result.turn_records[2]["completion"] == "summary of old-doc only"
-    assert result.turn_records[3]["turn_id"] == "final-answer"
-    assert result.turn_records[3]["completion"] == tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
-    assert result.turn_rewards == {"tool-1": 1.0, "tool-2": 1.0, "summary-1": 1.0, "final-answer": 1.0}
+    assert [record["kind"] for record in result.turn_records] == ["tool", "summary", "final_answer"]
+    assert [record["termination_kind"] for record in result.trajectory_records] == ["compaction", "final_answer"]
+    first_interval = result.trajectory_records[0]
+    assert first_interval["turn_ids"] == ["tool-1", "summary-1"]
+    assert [message["role"] for message in first_interval["messages"]] == [
+        "system", "user", "assistant", "user", "user", "assistant"
+    ]
+    assert "retain" not in first_interval["messages"][0]["content"]
+    assert "Compact the entire preceding task trajectory" in first_interval["messages"][-2]["content"]
+    second_interval = result.trajectory_records[1]
+    assert second_interval["turn_ids"] == ["final-answer"]
+    assert [message["role"] for message in second_interval["messages"]] == ["system", "user", "assistant"]
+    assert second_interval["messages"][1]["content"] == "summary of the task and old-doc"
+    assert result.turn_rewards == {"trajectory-1": 1.0, "trajectory-2": 1.0}
 
 
 def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
-    backend = FakeBackend(
-        search_index={
-            "first": ["old-doc"],
-            "second": ["trigger-doc"],
-        },
-        documents={},
-    )
+    backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
     model = ScriptedModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}'),
-            "summary of old-doc only",
+            "summary of the task and old-doc",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -624,15 +456,16 @@ def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
-        token_counter=lambda text: text.count("trigger-doc"),
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("old-doc"),
     )
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
-    samples = extract_trainable_samples(result.turn_records, result.turn_rewards)
+    samples = extract_trainable_samples(result.trajectory_records, result.turn_rewards)
 
-    assert [sample.turn_id for sample in samples] == ["tool-1", "tool-2", "summary-1", "final-answer"]
-    assert [sample.reward for sample in samples] == [1.0, 1.0, 1.0, 1.0]
+    assert [sample.turn_id for sample in samples] == ["trajectory-1", "trajectory-2"]
+    assert [sample.reward for sample in samples] == [1.0, 1.0]
 
 
 def test_runtime_forces_final_answer_after_tool_limit() -> None:
@@ -646,7 +479,7 @@ def test_runtime_forces_final_answer_after_tool_limit() -> None:
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=1024,
         max_tool_calls=1,
     )
@@ -660,6 +493,11 @@ def test_runtime_forces_final_answer_after_tool_limit() -> None:
     assert "final-answer boundary" in model.prompts[1]
     assert "Tool Budget Remaining" not in model.prompts[1]
     assert "Search and document actions are no longer available" in model.prompts[1]
+    interval_messages = result.trajectory_records[0]["messages"]
+    assert [message["role"] for message in interval_messages] == [
+        "system", "user", "assistant", "user", "user", "assistant"
+    ]
+    assert "final-answer boundary" in interval_messages[-2]["content"]
 
 
 def test_runtime_rejects_non_finish_action_after_tool_limit() -> None:
@@ -668,7 +506,7 @@ def test_runtime_rejects_non_finish_action_after_tool_limit() -> None:
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=1024,
         max_tool_calls=0,
     )
@@ -688,7 +526,7 @@ def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=1024,
         generated_token_budget=1,
         token_counter=lambda text: 2 if text == search_output else 1,
@@ -733,6 +571,7 @@ def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> 
         backend=backend,
         context_threshold_tokens=1,
         max_context_tokens=1024,
+        max_summary_tokens=128,
         generated_token_budget=3,
         token_counter=count_tokens,
     )
@@ -747,7 +586,7 @@ def test_runtime_reports_summary_tokens_without_consuming_reasoning_budget() -> 
     assert result.token_usage["forced_answer_generated_tokens"] == 1
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.token_usage["summary_count"] == 1
-    assert result.token_usage["retired_round_count"] == 1
+    assert result.token_usage["retired_round_count"] == 2
     assert result.turn_records[2]["generation_kind"] == "summary"
     assert result.turn_records[3]["generation_kind"] == "forced_answer"
 
@@ -768,7 +607,7 @@ def test_runtime_counts_tool_result_tokens_toward_generated_token_budget() -> No
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=1024,
         generated_token_budget=5,
         token_counter=count_tokens,
@@ -790,7 +629,7 @@ def test_serialize_runtime_result_includes_token_usage() -> None:
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=1024,
         token_counter=lambda text: 7 if text.startswith("<think>") else 3,
     )
@@ -816,7 +655,7 @@ def test_runtime_raises_when_acting_prompt_exceeds_fit_limit() -> None:
     runtime = EpisodeRuntime(
         model=model,
         backend=backend,
-        context_threshold_tokens=100,
+        context_threshold_tokens=1000,
         max_context_tokens=3,
         token_counter=lambda text: len(text.split()),
     )

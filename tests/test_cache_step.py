@@ -23,7 +23,7 @@ class FakeScorer:
         self.seen_batches.append([sample.turn_id for sample in samples])
         return [
             {
-                "version": 2,
+                "version": 3,
                 "input_ids": [1, index + 2],
                 "labels": [index + 2, index + 3],
                 "completion_mask": [False, True],
@@ -52,7 +52,7 @@ def judged_row(query_id: str, rollout_index: int, checkpoint_id: str = "step-000
         "policy_checkpoint_id": checkpoint_id,
         "policy_checkpoint_path": checkpoint_id,
         "rollout_index": rollout_index,
-        "trainable_sample_count": 2,
+        "trainable_sample_count": 1,
         "query_id": query_id,
         "query": "question",
         "status": "completed",
@@ -74,7 +74,24 @@ def judged_row(query_id: str, rollout_index: int, checkpoint_id: str = "step-000
                 "completion": '{"tool_name": "finish", "arguments": {"answer": "done"}}',
             },
         ],
-        "turn_rewards": {"tool-1": 1.0, "final-answer": 1.0},
+        "trajectory_records": [
+            {
+                "schema_version": 1,
+                "query_id": query_id,
+                "turn_id": "trajectory-1",
+                "kind": "trajectory",
+                "termination_kind": "final_answer",
+                "messages": [
+                    {"role": "system", "content": "instructions"},
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "reasoning and search"},
+                    {"role": "user", "content": "search result"},
+                    {"role": "assistant", "content": "reasoning and answer"},
+                ],
+                "prompt": "debug transcript",
+            }
+        ],
+        "turn_rewards": {"trajectory-1": 1.0},
         "judge": {"outcome": "correct_answer", "parse_error": False},
     }
 
@@ -84,7 +101,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_cache_step_writes_training_cache_for_each_trainable_turn(tmp_path: Path) -> None:
+def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     judged_path = tmp_path / "judged.jsonl"
@@ -101,13 +118,14 @@ def test_cache_step_writes_training_cache_for_each_trainable_turn(tmp_path: Path
     )
 
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert scorer.seen_batches == [["tool-1", "final-answer"]]
-    assert rows[0]["turn_records"][0]["training_cache"]["input_ids"] == [1, 2]
-    assert rows[0]["turn_records"][0]["training_cache"]["version"] == 2
-    assert rows[0]["turn_records"][0]["training_cache"]["reference_logprob"] == -0.5
-    assert rows[0]["turn_records"][0]["training_cache"]["reference_logprobs"] == [0.0, -0.5]
-    assert rows[0]["turn_records"][0]["training_cache"]["policy_checkpoint_id"] == "step-00001"
-    assert rows[0]["turn_records"][1]["training_cache"]["completion_mask"] == [False, True]
+    assert scorer.seen_batches == [["trajectory-1"]]
+    cache = rows[0]["trajectory_records"][0]["training_cache"]
+    assert cache["input_ids"] == [1, 2]
+    assert cache["version"] == 3
+    assert cache["reference_logprob"] == -0.5
+    assert cache["reference_logprobs"] == [0.0, -0.5]
+    assert cache["policy_checkpoint_id"] == "step-00001"
+    assert cache["completion_mask"] == [False, True]
 
 
 def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
@@ -118,9 +136,9 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     rows = [judged_row("q1", 0), judged_row("q2", 1)]
     write_jsonl(judged_path, rows)
     first_cached = judged_row("q1", 0)
-    for turn in first_cached["turn_records"]:
-        turn["training_cache"] = {
-            "version": 2,
+    for record in first_cached["trajectory_records"]:
+        record["training_cache"] = {
+            "version": 3,
             "input_ids": [1],
             "labels": [2],
             "completion_mask": [True],
@@ -140,13 +158,13 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     )
 
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert scorer.seen_batches == [["tool-1", "final-answer"]]
+    assert scorer.seen_batches == [["trajectory-1"]]
     assert [(row["query_id"], row["rollout_index"]) for row in cached_rows] == [("q1", 0), ("q2", 1)]
-    assert cached_rows[0]["turn_records"][0]["training_cache"]["version"] == 2
-    assert cached_rows[1]["turn_records"][0]["training_cache"]["version"] == 2
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 3
+    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == 3
 
 
-def test_cache_step_resume_rewrites_v1_cached_rows_to_v2(tmp_path: Path) -> None:
+def test_cache_step_resume_rewrites_old_cached_rows_to_v3(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     judged_path = tmp_path / "judged.jsonl"
@@ -154,9 +172,9 @@ def test_cache_step_resume_rewrites_v1_cached_rows_to_v2(tmp_path: Path) -> None
     row = judged_row("q1", 0)
     write_jsonl(judged_path, [row])
     existing_cached = judged_row("q1", 0)
-    for turn in existing_cached["turn_records"]:
-        turn["training_cache"] = {
-            "version": 1,
+    for record in existing_cached["trajectory_records"]:
+        record["training_cache"] = {
+            "version": 2,
             "input_ids": [1],
             "labels": [2],
             "completion_mask": [True],
@@ -175,10 +193,10 @@ def test_cache_step_resume_rewrites_v1_cached_rows_to_v2(tmp_path: Path) -> None
     )
 
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert scorer.seen_batches == [["tool-1", "final-answer"]]
+    assert scorer.seen_batches == [["trajectory-1"]]
     assert len(cached_rows) == 1
-    assert cached_rows[0]["turn_records"][0]["training_cache"]["version"] == 2
-    assert cached_rows[0]["turn_records"][0]["training_cache"]["reference_logprobs"] == [0.0, -0.5]
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 3
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["reference_logprobs"] == [0.0, -0.5]
 
 
 def test_cache_step_rejects_raw_unjudged_rows(tmp_path: Path) -> None:

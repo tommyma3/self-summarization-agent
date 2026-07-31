@@ -1,5 +1,8 @@
 # Self-Summarization Agent Design for BrowseComp-Plus
 
+> Historical note: the raw-tail compaction description below has been
+> superseded by `superpowers/specs/2026-07-31-append-only-compaction-interval-design.md`.
+
 ## Overview
 
 This project is a research prototype for an AI agent with self-summarization, built on top of a Qwen3.5-9B base model and evaluated on the BrowseComp-Plus benchmark. The main goal is to improve long-horizon reasoning by teaching the model to compress its own past interaction history into useful summaries when the context becomes too large.

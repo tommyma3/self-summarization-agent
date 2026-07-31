@@ -18,6 +18,7 @@ from self_summarization_agent.dataset import load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.launcher_utils import build_runtime
 from self_summarization_agent.models import EpisodeState
+from self_summarization_agent.prompts import build_initial_messages
 from self_summarization_agent.runtime import parse_model_tool_call
 
 
@@ -95,6 +96,7 @@ def main() -> None:
         query_id=example.query_id,
         user_prompt=example.query,
         context_threshold_tokens=config.runtime.context_threshold_tokens,
+        messages=build_initial_messages(example.query),
     )
     prompt = runtime._build_runtime_prompt(state)
     model_prompt = format_prompt_for_display(generator, prompt)

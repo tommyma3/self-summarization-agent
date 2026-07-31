@@ -14,7 +14,7 @@ def test_build_run_record_matches_browsecomp_plus_shape() -> None:
         status="completed",
         final_answer="answer",
         summary_turns=["summary-1"],
-        turn_rewards={"summary-1": 1.0},
+        turn_rewards={"trajectory-1": 1.0},
         retrieved_docids=["doc-1", "doc-2"],
         tool_call_counts={"search": 1, "get_document": 1},
     )

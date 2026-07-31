@@ -31,6 +31,7 @@ def write_raw_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
             "rollout_index": index,
             "query_id": f"q{index}",
             "turn_records": [],
+            "trajectory_records": [],
         }
         for index in range(count)
     ]
@@ -45,6 +46,7 @@ def write_judged_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
             "rollout_index": index,
             "query_id": f"q{index}",
             "turn_records": [],
+            "trajectory_records": [],
             "turn_rewards": {},
             "judge": {"outcome": "wrong_answer", "parse_error": False},
         }
@@ -53,22 +55,22 @@ def write_judged_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def training_cache(*, version: int = 2) -> dict:
+def training_cache(*, version: int = 3) -> dict:
     cache = {
-        "version": 2,
+        "version": 3,
         "input_ids": [1],
         "labels": [2],
         "completion_mask": [True],
         "reference_logprob": -0.1,
         "reference_logprobs": [-0.1],
     }
-    if version == 1:
-        cache["version"] = 1
+    if version != 3:
+        cache["version"] = version
         del cache["reference_logprobs"]
     return cache
 
 
-def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = 2) -> None:
+def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = 3) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
         {
@@ -82,10 +84,23 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_v
                     "kind": "final_answer",
                     "prompt": "prompt",
                     "completion": "completion",
+                }
+            ],
+            "trajectory_records": [
+                {
+                    "query_id": f"q{index}",
+                    "turn_id": "trajectory-1",
+                    "kind": "trajectory",
+                    "termination_kind": "final_answer",
+                    "messages": [
+                        {"role": "system", "content": "instructions"},
+                        {"role": "user", "content": "question"},
+                        {"role": "assistant", "content": "answer"},
+                    ],
                     "training_cache": training_cache(version=cache_version),
                 }
             ],
-            "turn_rewards": {"final-answer": 1.0},
+            "turn_rewards": {"trajectory-1": 1.0},
             "trainable_sample_count": 1,
             "judge": {"outcome": "wrong_answer", "parse_error": False},
         }
@@ -94,9 +109,9 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_v
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_complete_cached_rollouts_requires_v2_training_cache(tmp_path: Path) -> None:
+def test_complete_cached_rollouts_requires_v3_training_cache(tmp_path: Path) -> None:
     cached_path = tmp_path / "cached.jsonl"
-    write_cached_rollouts(cached_path, "iteration-00000", count=1, cache_version=1)
+    write_cached_rollouts(cached_path, "iteration-00000", count=1, cache_version=2)
 
     assert not _has_complete_cached_rollouts(
         cached_path,

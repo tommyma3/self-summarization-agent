@@ -3,8 +3,10 @@ from typing import Literal
 
 
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted"]
-TRAINABLE_TURN_KINDS = {"tool", "summary", "final_answer"}
-PENALIZED_RUNTIME_STATUSES = frozenset({"malformed_tool_call", "summary_length_exceeded"})
+TRAINABLE_TURN_KINDS = {"trajectory"}
+PENALIZED_RUNTIME_STATUSES = frozenset(
+    {"malformed_tool_call", "empty_summary", "summary_length_exceeded"}
+)
 
 
 def is_penalized_runtime_status(status: object) -> bool:
@@ -12,6 +14,11 @@ def is_penalized_runtime_status(status: object) -> bool:
 
 
 def trainable_turn_ids_from_records(turn_records: Iterable[Mapping[str, object]]) -> list[str]:
+    """Return trainable interval ids.
+
+    The historical function name is retained at the artifact boundary, but
+    ordinary per-invocation turn records are no longer trainable.
+    """
     turn_ids: list[str] = []
     for turn in turn_records:
         if turn.get("kind") not in TRAINABLE_TURN_KINDS:

@@ -15,6 +15,7 @@ except ImportError:
     AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
 
 from self_summarization_agent.config import JudgeConfig, ModelConfig
+from self_summarization_agent.prompts import ConversationPrompt
 
 
 class TextGenerator(Protocol):
@@ -22,6 +23,9 @@ class TextGenerator(Protocol):
         ...
 
     def count_tokens(self, text: str) -> int:
+        ...
+
+    def count_prompt_tokens(self, prompt: str) -> int:
         ...
 
 
@@ -79,10 +83,16 @@ class TransformersGenerator:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
+
     def _format_prompt(self, prompt: str) -> str:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
-        messages = [{"role": "user", "content": prompt}]
+        if isinstance(prompt, ConversationPrompt):
+            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+        else:
+            messages = [{"role": "user", "content": prompt}]
         try:
             return self.tokenizer.apply_chat_template(
                 messages,
@@ -203,10 +213,16 @@ class VLLMGenerator:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
+
     def _format_prompt(self, prompt: str) -> str:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
-        messages = [{"role": "user", "content": prompt}]
+        if isinstance(prompt, ConversationPrompt):
+            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+        else:
+            messages = [{"role": "user", "content": prompt}]
         try:
             return self.tokenizer.apply_chat_template(
                 messages,

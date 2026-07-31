@@ -63,11 +63,11 @@ def extract_lengths(jsonl_path: Path) -> list[dict[str, int]]:
             except json.JSONDecodeError as exc:
                 print(f"Warning: skipping line {line_num} — invalid JSON: {exc}")
                 continue
-            turn_records = row.get("turn_records")
-            if not isinstance(turn_records, list):
+            trajectory_records = row.get("trajectory_records")
+            if not isinstance(trajectory_records, list):
                 continue
-            for turn in turn_records:
-                cache = turn.get("training_cache")
+            for record in trajectory_records:
+                cache = record.get("training_cache")
                 if not isinstance(cache, dict):
                     continue
                 input_ids = cache.get("input_ids")

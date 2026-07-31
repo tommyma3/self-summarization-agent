@@ -12,7 +12,11 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
-from self_summarization_agent.trajectory import TOKEN_CACHE_FIELD, extract_trainable_samples, is_training_cache_v2
+from self_summarization_agent.trajectory import (
+    TOKEN_CACHE_FIELD,
+    extract_trainable_samples,
+    is_training_cache_current,
+)
 
 
 def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -48,6 +52,10 @@ def _validate_judged_row(row: dict[str, Any], *, index: int, expected_checkpoint
         )
     if not isinstance(row.get("turn_records"), list):
         raise ValueError(f"Rollout row {index} is missing turn_records")
+    if not isinstance(row.get("trajectory_records"), list):
+        raise ValueError(
+            f"Rollout row {index} is missing trajectory_records; recollect it with the interval schema"
+        )
     if not isinstance(row.get("turn_rewards"), dict):
         raise ValueError(f"Rollout row {index} is missing turn_rewards")
     _rollout_key(row, index=index)
@@ -57,7 +65,11 @@ def _validate_cached_row(row: dict[str, Any], *, index: int, expected_checkpoint
     _validate_judged_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
     if row.get("trainable_sample_count") == 0:
         return
-    samples = extract_trainable_samples(row["turn_records"], row["turn_rewards"])
+    samples = extract_trainable_samples(
+        row["trajectory_records"],
+        row["turn_rewards"],
+        rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+    )
     missing_cache_turn_ids = [sample.turn_id for sample in samples if not sample.has_training_cache]
     if missing_cache_turn_ids:
         raise ValueError(
@@ -66,21 +78,38 @@ def _validate_cached_row(row: dict[str, Any], *, index: int, expected_checkpoint
         )
 
 
-def _row_has_v2_training_cache(row: dict[str, Any]) -> bool:
+def _row_has_current_training_cache(row: dict[str, Any]) -> bool:
     if row.get("trainable_sample_count") == 0:
         return True
     rewards = row.get("turn_rewards")
     if not isinstance(rewards, dict):
         return False
-    samples = extract_trainable_samples(row["turn_records"], rewards)
+    trajectory_records = row.get("trajectory_records")
+    if not isinstance(trajectory_records, list):
+        return False
+    rewarded_ids = set(rewards)
+    current_cache_ids = {
+        record.get("turn_id")
+        for record in trajectory_records
+        if isinstance(record, dict)
+        and isinstance(record.get("turn_id"), str)
+        and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+    }
+    if not rewarded_ids <= current_cache_ids:
+        return False
+    samples = extract_trainable_samples(
+        trajectory_records,
+        rewards,
+        rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+    )
     sample_turn_ids = {sample.turn_id for sample in samples}
     cached_turn_ids = {
-        turn.get("turn_id")
-        for turn in row["turn_records"]
-        if isinstance(turn, dict)
-        and isinstance(turn.get("turn_id"), str)
-        and turn.get("turn_id") in sample_turn_ids
-        and is_training_cache_v2(turn.get(TOKEN_CACHE_FIELD))
+        record.get("turn_id")
+        for record in row["trajectory_records"]
+        if isinstance(record, dict)
+        and isinstance(record.get("turn_id"), str)
+        and record.get("turn_id") in sample_turn_ids
+        and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
     }
     return sample_turn_ids <= cached_turn_ids
 
@@ -91,11 +120,12 @@ def _completed_cached_rows(path: Path, *, expected_checkpoint_id: str) -> dict[t
     rows = _load_rollout_rows(path)
     completed: dict[tuple[str, int], dict[str, Any]] = {}
     for index, row in enumerate(rows, start=1):
-        _validate_cached_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
+        _validate_judged_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
         key = _rollout_key(row, index=index)
         if key in completed:
             raise ValueError(f"Cached rollout row {index} duplicates rollout key {key!r}")
-        if _row_has_v2_training_cache(row):
+        if _row_has_current_training_cache(row):
+            _validate_cached_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
             completed[key] = row
     return completed
 
@@ -113,7 +143,11 @@ def _attach_training_caches(
     cache_payloads: list[dict[str, Any]],
     checkpoint_id: str,
 ) -> dict[str, Any]:
-    row_samples = extract_trainable_samples(row["turn_records"], row["turn_rewards"])
+    row_samples = extract_trainable_samples(
+        row["trajectory_records"],
+        row["turn_rewards"],
+        rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+    )
     if len(cache_payloads) != len(row_samples):
         raise ValueError(
             f"Scorer returned {len(cache_payloads)} cache payloads for {len(row_samples)} trainable samples"
@@ -123,14 +157,14 @@ def _attach_training_caches(
         for sample, payload in zip(row_samples, cache_payloads)
     }
     cached_row = dict(row)
-    cached_turns: list[dict[str, Any]] = []
-    for turn in row["turn_records"]:
-        cached_turn = dict(turn)
-        turn_id = cached_turn.get("turn_id")
+    cached_records: list[dict[str, Any]] = []
+    for record in row["trajectory_records"]:
+        cached_record = dict(record)
+        turn_id = cached_record.get("turn_id")
         if isinstance(turn_id, str) and turn_id in payload_by_turn_id:
-            cached_turn[TOKEN_CACHE_FIELD] = payload_by_turn_id[turn_id]
-        cached_turns.append(cached_turn)
-    cached_row["turn_records"] = cached_turns
+            cached_record[TOKEN_CACHE_FIELD] = payload_by_turn_id[turn_id]
+        cached_records.append(cached_record)
+    cached_row["trajectory_records"] = cached_records
     return cached_row
 
 
@@ -231,7 +265,11 @@ def run_cache_step(
     scorer = scorer or build_cache_scorer(config, checkpoint_path=checkpoint)
     is_main = _is_main_process(scorer)
     for row in pending_rows:
-        samples = extract_trainable_samples(row["turn_records"], row["turn_rewards"])
+        samples = extract_trainable_samples(
+            row["trajectory_records"],
+            row["turn_rewards"],
+            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+        )
         cache_payloads = scorer.cache_samples(samples)
         cached_row = _attach_training_caches(
             row,
