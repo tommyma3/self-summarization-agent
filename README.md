@@ -12,7 +12,7 @@ Current scope:
 Partially implemented / still minimal:
 - the legacy training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
 - retrieval and judge dependencies still come from the local `bc-plus` environment
-- process-isolated rollout/training orchestration is wired for offline `vllm` rollout collection and checkpoint handoff
+- process-isolated rollout/training orchestration supports offline vLLM or SGLang rollout collection and checkpoint handoff
 - the FSDP2/context-parallel full-training backend is represented in config and launcher contracts, but must be run in the GPU training environment
 
 ## Setup
@@ -26,7 +26,7 @@ Install dependencies with `uv`:
 uv sync --group dev
 ```
 
-The GPU training environment also needs vLLM and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
+The GPU training environment also needs the selected rollout engine (vLLM or SGLang) and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
 
 For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
 
@@ -133,7 +133,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated offline vLLM rollout collection, judging, and clipped GRPO training updates
+- `iteration_launcher` for process-isolated offline rollout collection, judging, and clipped GRPO training updates
 
 The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
@@ -241,10 +241,11 @@ Training notes:
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
-- the new process-isolated path uses `rollout.backend: vllm_offline` and `training.backend: fsdp2_context_parallel`
-- in the new path, each iteration loads the latest checkpoint into offline vLLM once, evaluates that checkpoint, collects its training trajectories with the same loaded engine, caches tokenized trainable sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+- the process-isolated path supports `rollout.backend: vllm_offline` (the default) or `rollout.backend: sglang`; SGLang is an optional runtime dependency and must be installed separately
+- the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` can both consume trajectories collected by either offline rollout engine
+- in the new path, each iteration loads the latest checkpoint into the selected offline rollout engine once, evaluates that checkpoint, collects its training trajectories with the same loaded engine, caches tokenized trainable sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
-### Process-isolated vLLM rollout/training loop
+### Process-isolated rollout/training loop
 
 The new orchestration path uses checkpoint files as the weight-sync boundary:
 
@@ -260,9 +261,9 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 For the intended GPU run:
 
 - each iteration's combined eval-then-train collection uses one phase-scoped FAISS worker; the embedding model is unloaded before fallback judging, caching, and policy weight updates
-- combined collection starts one overlap judge worker on GPU 1, then loads the policy checkpoint once in offline vLLM on GPUs 2-3 with tensor parallel size 2
-- rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through vLLM
-- rollout collection writes eval trajectories first and training trajectories second while reusing the policy vLLM engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
+- combined collection starts one overlap judge worker on GPU 1, then loads the policy checkpoint once in the selected offline rollout engine on GPUs 2-3 with tensor parallel size 2
+- rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through the selected engine
+- rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` loads the rollout checkpoint and writes v3 sparse interval caches with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v3 rows are preserved and older cache versions are regenerated as v3
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
@@ -271,6 +272,12 @@ For the intended GPU run:
 - iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
+
+To use SGLang for policy rollouts, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
+
+```powershell
+python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer
+```
 
 ### Optional verl/Ray training backend
 

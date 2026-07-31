@@ -294,6 +294,142 @@ class VLLMGenerator:
         return completions
 
 
+@dataclass(slots=True)
+class SGLangGenerator:
+    model_path: str
+    max_new_tokens: int
+    temperature: float
+    top_p: float
+    do_sample: bool
+    dtype: str = "auto"
+    tensor_parallel_size: int = 1
+    attention_backend: str | None = None
+    max_model_len: int | None = None
+    trust_remote_code: bool = False
+    enable_thinking: bool = False
+    tokenizer: Any = field(init=False)
+    engine: Any = field(init=False)
+
+    def __post_init__(self) -> None:
+        try:
+            import sglang as sgl
+        except ImportError as exc:
+            raise ImportError(
+                "SGLang is not installed. Install it in the remote environment to use backend='sglang'."
+            ) from exc
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path,
+            trust_remote_code=self.trust_remote_code,
+        )
+        engine_kwargs = {
+            "model_path": self.model_path,
+            "dtype": self.dtype,
+            "tp_size": self.tensor_parallel_size,
+            "attention_backend": self.attention_backend,
+            "context_length": self.max_model_len,
+            "trust_remote_code": self.trust_remote_code,
+        }
+        self.engine = sgl.Engine(**{key: value for key, value in engine_kwargs.items() if value is not None})
+
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
+
+    def _format_prompt(self, prompt: str) -> str:
+        if not getattr(self.tokenizer, "chat_template", None):
+            return prompt
+        if isinstance(prompt, ConversationPrompt):
+            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+        else:
+            messages = [{"role": "user", "content": prompt}]
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=self.enable_thinking,
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+    def generate(self, prompt: str) -> str:
+        outputs = self.generate_batch([prompt])
+        return outputs[0] if outputs else ""
+
+    def _sampling_params(self) -> dict[str, Any]:
+        sampling_params = {
+            "max_new_tokens": self.max_new_tokens,
+            "temperature": self.temperature if self.do_sample else 0.0,
+        }
+        if self.do_sample:
+            sampling_params["top_p"] = self.top_p
+        return sampling_params
+
+    def _generate_outputs(self, prompts: list[str], *, return_logprob: bool = False) -> list[dict[str, Any]]:
+        if not prompts:
+            return []
+        outputs = self.engine.generate(
+            prompts,
+            self._sampling_params(),
+            return_logprob=return_logprob,
+        )
+        return outputs if isinstance(outputs, list) else [outputs]
+
+    def generate_batch(self, prompts: list[str]) -> list[str]:
+        formatted_prompts = [self._format_prompt(prompt) for prompt in prompts]
+        return [str(output.get("text") or "") for output in self._generate_outputs(formatted_prompts)]
+
+    def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
+        formatted_prompts = [self._format_prompt(prompt) for prompt in prompts]
+        outputs = self._generate_outputs(formatted_prompts, return_logprob=True)
+        completions: list[GenerationResult] = []
+        for prompt, output in zip(formatted_prompts, outputs):
+            completion_token_ids, token_logprobs = _extract_sglang_completion_logprobs(output)
+            completions.append(
+                GenerationResult(
+                    text=str(output.get("text") or ""),
+                    prompt_token_ids=list(self.tokenizer.encode(prompt, add_special_tokens=False)),
+                    completion_token_ids=completion_token_ids,
+                    cumulative_logprob=sum(token_logprobs) if token_logprobs is not None else None,
+                    token_logprobs=token_logprobs,
+                )
+            )
+        return completions
+
+
+def _extract_sglang_completion_logprobs(output: Any) -> tuple[list[int] | None, list[float] | None]:
+    if not isinstance(output, dict):
+        return None, None
+    meta_info = output.get("meta_info")
+    if not isinstance(meta_info, dict):
+        return None, None
+    raw_logprobs = meta_info.get("output_token_logprobs")
+    if not isinstance(raw_logprobs, list):
+        return None, None
+    token_ids: list[int] = []
+    logprobs: list[float] = []
+    for item in raw_logprobs:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            return None, None
+        logprob, token_id = item[0], item[1]
+        if (
+            not isinstance(logprob, (int, float))
+            or isinstance(logprob, bool)
+            or not isinstance(token_id, int)
+            or isinstance(token_id, bool)
+        ):
+            return None, None
+        logprobs.append(float(logprob))
+        token_ids.append(token_id)
+    return token_ids, logprobs
+
+
 def _extract_completion_token_logprobs(completion: Any) -> list[float] | None:
     token_ids = getattr(completion, "token_ids", None)
     raw_logprobs = getattr(completion, "logprobs", None)
@@ -374,6 +510,20 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
             language_model_only=model_config.language_model_only,
+        )
+    if backend_name in {"sglang", "sglang_offline"}:
+        return SGLangGenerator(
+            model_path=model_path,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+            dtype=model_config.dtype,
+            tensor_parallel_size=tensor_parallel_size,
+            attention_backend=attention_backend,
+            max_model_len=max_model_len,
+            trust_remote_code=model_config.trust_remote_code,
+            enable_thinking=model_config.enable_thinking,
         )
     raise ValueError(f"Unsupported model backend: {model_config.backend}")
 

@@ -387,7 +387,7 @@ def collect_rollouts(
         if not resume and judged_path.exists():
             judged_path.unlink()
 
-    # Build retrieval before narrowing CUDA visibility for vLLM. The FAISS backend can
+    # Build retrieval before narrowing CUDA visibility for the rollout engine. The FAISS backend can
     # load its embedding model on the normal/default device. The overlap judge worker
     # is also started before the parent is restricted to config.rollout.gpu_ids.
     backend = backend or build_backend(
@@ -550,7 +550,7 @@ def collect_eval_then_train_rollouts(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect one training pass of rollout artifacts with offline vLLM.")
+    parser = argparse.ArgumentParser(description="Collect one training pass with the configured offline rollout engine.")
     parser.add_argument("--config", required=True, help="Path to the train YAML config.")
     parser.add_argument("--checkpoint", default=None, help="Checkpoint path. Defaults to latest under train dir.")
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
