@@ -58,13 +58,13 @@ rollout:
   do_sample: true
 
 runtime:
-  context_threshold_tokens: 6000
-  max_context_tokens: 18000
+  context_threshold_tokens: 16000
+  max_context_tokens: 24000
   # Summary-body cap. An overlong summary terminates the rollout with a negative reward.
   max_summary_tokens: 6400
   tool_budget: 99999
   # Counts all model completion tokens (actions, thinking, summaries, and forced answers), not tool results.
-  generated_token_budget: 24000
+  generated_token_budget: 64000
 
 judge:
   enabled: true
@@ -87,7 +87,7 @@ training:
   tensor_parallel_size: 1
   data_parallel_size: 4
   activation_checkpointing: true
-  max_sequence_length: 16384
+  max_sequence_length: 24000
   epochs: 10
   steps: 10
   group_size: 4

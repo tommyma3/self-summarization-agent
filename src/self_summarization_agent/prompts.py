@@ -27,17 +27,14 @@ def format_tool_result(tool_result: str) -> str:
 
 
 def build_system_prompt() -> str:
-    return """You are an expert research agent.
-Think first and then choose exactly one action:
+    return """You are an expert research agent. Output exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
 (3) Provide your final answer within <answer> </answer> tags."""
 
 
 def build_forced_answer_prompt() -> str:
-    return """The final-answer boundary has been reached.
-Think first, then answer with exactly one action:
-<answer>best supported answer</answer>."""
+    return """The final-answer boundary has been reached. Answer with exactly one action: <answer>best supported answer</answer>."""
 
 
 def build_forced_answer_system_prompt() -> str:
@@ -49,8 +46,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # Retain the keyword for compatibility with existing callers; the limit is
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
-    return """Compact the preceding task state into a summary for future steps.
-Think first, and put only the compressed state inside <summary> </summary> tags."""
+    return """Compact the preceding task state into a summary for future steps. Put the summary inside <summary> </summary> tags."""
 
 
 def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:

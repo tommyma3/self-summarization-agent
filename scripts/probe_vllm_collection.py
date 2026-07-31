@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--do-sample", action="store_true", default=None, help="Force sampled rollout generation.")
     parser.add_argument("--no-sample", action="store_false", dest="do_sample", help="Force deterministic rollout generation.")
     parser.add_argument("--include-formatted-prompt", action="store_true", help="Also write tokenizer chat-template prompts.")
+    parser.add_argument("--training-max-seq-len", type=int, default=None, help="Override training.max_sequence_length for the fit check.")
     parser.add_argument(
         "--set",
         dest="overrides",
@@ -193,6 +194,8 @@ def main() -> None:
         output_path=output_path,
         include_formatted_prompt=args.include_formatted_prompt,
         judge=judge,
+        training_config=getattr(config, "training", None),
+        training_max_sequence_length=args.training_max_seq_len,
     )
     print(output_path)
 
