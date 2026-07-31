@@ -93,7 +93,7 @@ def test_runtime_stops_on_malformed_tool_call() -> None:
 
 def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
-    overlong_summary = "one two three"
+    overlong_summary = "<think>compact</think>\n<summary>one two three</summary>"
     backend = FakeBackend(search_index={"first": ["doc-1"]}, documents={})
     model = RecordingModel(outputs=[first_search, overlong_summary])
     runtime = EpisodeRuntime(
@@ -114,12 +114,13 @@ def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
     summary_record = result.turn_records[-1]
     assert summary_record["summary_tokens"] == 3
     assert summary_record["max_summary_tokens"] == 2
-    assert "at most 2 tokens" in model.prompts[-1]
+    assert "at most 2 tokens" not in model.prompts[-1]
+    assert "<summary>...</summary>" in model.prompts[-1]
 
 
 def test_runtime_accepts_summary_at_maximum_length() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
-    summary = "one two"
+    summary = "<think>compact</think>\n<summary>one two</summary>"
     final_answer = tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
     backend = FakeBackend(search_index={"first": ["doc-1"]}, documents={})
     runtime = EpisodeRuntime(
@@ -231,17 +232,26 @@ def test_parse_model_tool_call_rejects_invalid_first_json_after_thinking() -> No
 
 
 def test_extract_summary_output_splits_thinking_from_summary_body() -> None:
-    extracted = extract_summary_output("<think>I should preserve doc-1.</think>\nSummary cites doc-1.")
+    extracted = extract_summary_output(
+        "<think><summary>ignore this</summary> I should preserve doc-1.</think>\n"
+        "discard this prefix <summary>Summary cites doc-1.</summary> discard this suffix"
+    )
 
-    assert extracted.thinking == "I should preserve doc-1."
+    assert extracted is not None
+    assert extracted.thinking == "<summary>ignore this</summary> I should preserve doc-1."
     assert extracted.summary == "Summary cites doc-1."
 
 
-def test_extract_summary_output_uses_full_output_without_think_end() -> None:
-    extracted = extract_summary_output("Summary without explicit thinking.")
+def test_extract_summary_output_rejects_wrapped_summary_without_completed_thinking() -> None:
+    extracted = extract_summary_output("<summary>Summary without explicit thinking.</summary>")
 
-    assert extracted.thinking == ""
-    assert extracted.summary == "Summary without explicit thinking."
+    assert extracted is None
+
+
+def test_extract_summary_output_rejects_unwrapped_output() -> None:
+    extracted = extract_summary_output("<think>done</think>\nSummary without wrappers.")
+
+    assert extracted is None
 
 
 def test_runtime_records_raw_tool_call_completion_when_model_outputs_thinking() -> None:
@@ -323,7 +333,7 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     model = RecordingModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}', thinking="retain this reasoning"),
-            "summary of the task and old-doc",
+            "<think>compact old-doc</think>\n<summary>summary of the task and old-doc</summary>",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -343,7 +353,9 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     compaction_prompt = model.prompts[1]
     assert "retain this reasoning" in compaction_prompt
     assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in compaction_prompt
-    assert compaction_prompt.rstrip().endswith("Think first, then return the compressed state after </think>.")
+    assert compaction_prompt.rstrip().endswith(
+        "Think first. After </think>, put only the compressed state inside <summary>...</summary>."
+    )
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
     assert "### USER\nsummary of the task and old-doc" in acting_prompt_after_summary
@@ -357,7 +369,8 @@ def test_runtime_puts_only_post_think_summary_into_context() -> None:
     model = RecordingModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            "<think>reason about old-doc</think>\nsummary body for context",
+            "<think>reason about old-doc</think>\n"
+            "outside prefix <summary>summary body for context</summary> outside suffix",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -374,16 +387,21 @@ def test_runtime_puts_only_post_think_summary_into_context() -> None:
 
     assert result.status == "completed"
     summary_record = result.turn_records[1]
-    assert summary_record["completion"] == "<think>reason about old-doc</think>\nsummary body for context"
+    assert summary_record["completion"] == (
+        "<think>reason about old-doc</think>\n"
+        "outside prefix <summary>summary body for context</summary> outside suffix"
+    )
     assert summary_record["thinking"] == "reason about old-doc"
     assert summary_record["summary"] == "summary body for context"
     acting_prompt_after_summary = model.prompts[2]
     assert "### USER\nsummary body for context" in acting_prompt_after_summary
     assert "reason about old-doc" not in acting_prompt_after_summary
     assert "<think>" not in acting_prompt_after_summary
+    assert "<summary>" not in acting_prompt_after_summary
+    assert "outside prefix" not in acting_prompt_after_summary
 
 
-def test_runtime_penalizes_empty_post_think_summary() -> None:
+def test_runtime_penalizes_summary_without_complete_wrapper() -> None:
     backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
     model = RecordingModel(
         outputs=[
@@ -402,8 +420,35 @@ def test_runtime_penalizes_empty_post_think_summary() -> None:
 
     result = runtime.run(query_id="q1", user_prompt="question")
 
+    assert result.status == "malformed_tool_call"
+    assert result.summary_turns == []
+    assert result.turn_records[-1]["summary"] == ""
+    assert result.trajectory_records[-1]["termination_kind"] == "malformed"
+    assert result.turn_rewards == {"trajectory-1": -1.0}
+
+
+def test_runtime_penalizes_empty_wrapped_summary_as_empty_summary() -> None:
+    backend = FakeBackend(search_index={"first": ["old-doc"]}, documents={})
+    model = RecordingModel(
+        outputs=[
+            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
+            "<think>reasoning only</think>\n<summary>   </summary>",
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1,
+        max_context_tokens=1024,
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("old-doc"),
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
     assert result.status == "empty_summary"
     assert result.summary_turns == []
+    assert result.turn_records[-1]["summary"] == ""
 
 
 def test_runtime_records_one_training_trajectory_per_interval() -> None:
@@ -411,7 +456,7 @@ def test_runtime_records_one_training_trajectory_per_interval() -> None:
     model = RecordingModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            "summary of the task and old-doc",
+            "<think>compact old-doc</think>\n<summary>summary of the task and old-doc</summary>",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -434,7 +479,7 @@ def test_runtime_records_one_training_trajectory_per_interval() -> None:
         "system", "user", "assistant", "user", "user", "assistant"
     ]
     assert "retain" not in first_interval["messages"][0]["content"]
-    assert "Compact the entire preceding task trajectory" in first_interval["messages"][-2]["content"]
+    assert "Compact the preceding task state" in first_interval["messages"][-2]["content"]
     second_interval = result.trajectory_records[1]
     assert second_interval["turn_ids"] == ["final-answer"]
     assert [message["role"] for message in second_interval["messages"]] == ["system", "user", "assistant"]
@@ -447,7 +492,7 @@ def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
     model = ScriptedModel(
         outputs=[
             tool_output('{"tool_name": "search", "arguments": {"query": "first"}}'),
-            "summary of the task and old-doc",
+            "<think>compact old-doc</think>\n<summary>summary of the task and old-doc</summary>",
             tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
         ]
     )
@@ -549,7 +594,7 @@ def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
 def test_runtime_counts_summary_tokens_toward_generated_token_budget() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
     second_search = tool_output('{"tool_name": "search", "arguments": {"query": "second"}}')
-    summary_output = "summary overhead tokens"
+    summary_output = "<think>compact</think>\n<summary>summary overhead tokens</summary>"
     final_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')
 
     def count_tokens(text: str) -> int:

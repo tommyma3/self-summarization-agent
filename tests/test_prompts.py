@@ -16,17 +16,20 @@ def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     assert "<answer>best supported answer</answer>" in prompt
 
 
-def test_build_summary_system_prompt_includes_configured_length_cap() -> None:
+def test_build_summary_system_prompt_is_concise_and_requires_wrappers() -> None:
     prompt = build_summary_system_prompt(max_summary_tokens=2048)
 
-    assert "at most 2048 tokens" in prompt
+    assert "2048" not in prompt
+    assert "<summary>...</summary>" in prompt
+    assert "compressed state" in prompt
 
 
-def test_system_prompt_defers_to_appended_runtime_boundaries() -> None:
+def test_system_prompt_lists_normal_action_formats() -> None:
     prompt = build_system_prompt()
 
-    assert "runtime may append a compaction or forced-answer instruction" in prompt
-    assert "follow that final boundary instruction" in prompt
+    assert "<search> your query </search>" in prompt
+    assert "<document> docid </document>" in prompt
+    assert "<answer> </answer>" in prompt
 
 
 def test_tool_result_wrapper_preserves_raw_result_text() -> None:

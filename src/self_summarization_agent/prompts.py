@@ -27,24 +27,18 @@ def format_tool_result(tool_result: str) -> str:
 
 
 def build_system_prompt() -> str:
-    return """You are an expert research agent answering the user's question step by step.
-
-Normally, think first and then choose exactly one action:
+    return """You are an expert research agent.
+Think first and then choose exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
-(3) Provide your final answer within <answer> </answer> tags.
-
-The runtime may append a compaction or forced-answer instruction. When it does,
-follow that final boundary instruction instead of taking a normal action."""
+(3) Provide your final answer within <answer> </answer> tags."""
 
 
 def build_forced_answer_prompt() -> str:
     return """The final-answer boundary has been reached.
 Search and document actions are no longer available.
 Think first, then answer with exactly one action:
-<answer>best supported answer</answer>
-
-Use only the preceding task state, reasoning, and tool results."""
+<answer>best supported answer</answer>."""
 
 
 def build_forced_answer_system_prompt() -> str:
@@ -53,15 +47,12 @@ def build_forced_answer_system_prompt() -> str:
 
 
 def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
-    length_instruction = (
-        f"Keep the summary body to at most {max_summary_tokens} tokens.\n"
-        if max_summary_tokens is not None
-        else ""
-    )
-    return f"""Compact the entire preceding task trajectory into a self-summary for the next interval.
-Preserve the original task, constraints, established evidence, hypotheses, unresolved work, and useful next steps.
-Keep the summary structured and concise. Use short sentences.
-{length_instruction}Think first, then return the compressed state after </think>."""
+    # Retain the keyword for compatibility with existing callers; the limit is
+    # enforced by the runtime rather than disclosed in the compaction prompt.
+    del max_summary_tokens
+    return """Compact the preceding task state into a summary for future steps.
+Preserve the task, constraints, key evidence, unresolved work, and next steps.
+Think first. After </think>, put only the compressed state inside <summary> </summary> tags."""
 
 
 def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:

@@ -35,8 +35,9 @@ def test_summary_instruction_is_appended_to_unchanged_context() -> None:
 
     assert list(prompt.messages[:-1]) == state.messages
     assert prompt.messages[-1].role == "user"
-    assert "Compact the entire preceding task trajectory" in prompt.messages[-1].content
-    assert "at most 32 tokens" in prompt.messages[-1].content
+    assert "Compact the preceding task state" in prompt.messages[-1].content
+    assert "<summary>...</summary>" in prompt.messages[-1].content
+    assert "32" not in prompt.messages[-1].content
 
 
 def test_assert_fits_clamps_effective_limit_when_margin_is_too_large() -> None:

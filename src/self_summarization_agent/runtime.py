@@ -27,6 +27,10 @@ from self_summarization_agent.rewards import (
 _JSON_DECODER = json.JSONDecoder()
 _THINK_END_RE = re.compile(r"</think\s*>", flags=re.IGNORECASE)
 _THINK_START_RE = re.compile(r"^\s*<think\b[^>]*>", flags=re.IGNORECASE)
+_SUMMARY_BLOCK_RE = re.compile(
+    r"<\s*summary\s*>(.*?)<\s*/\s*summary\s*>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _ACTION_TAGS = ("search", "document", "answer")
 _ACTION_OPEN_RE = {
     tag: re.compile(rf"<\s*{tag}\s*>", flags=re.IGNORECASE) for tag in _ACTION_TAGS
@@ -152,11 +156,14 @@ def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | No
     return _parse_json_tool_call(raw_output)
 
 
-def extract_summary_output(raw_output: str) -> SummaryExtraction:
+def extract_summary_output(raw_output: str) -> SummaryExtraction | None:
     extracted = _extract_completed_thinking(raw_output)
     if extracted is None:
-        return SummaryExtraction(thinking="", summary=raw_output.strip())
-    return SummaryExtraction(thinking=extracted.thinking, summary=extracted.remainder)
+        return None
+    summary_match = _SUMMARY_BLOCK_RE.search(extracted.remainder)
+    if summary_match is None:
+        return None
+    return SummaryExtraction(thinking=extracted.thinking, summary=summary_match.group(1).strip())
 
 
 @dataclass(slots=True)
@@ -759,7 +766,7 @@ class EpisodeRuntime:
         generated_summary = generated_output.text
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
         summary_extraction = extract_summary_output(generated_summary)
-        summary_tokens = self._completion_token_count(summary_extraction.summary)
+        summary_tokens = self._completion_token_count(summary_extraction.summary) if summary_extraction is not None else 0
         state = active.state
         state.summary_count += 1
         summary_turn_id = f"summary-{state.summary_count}"
@@ -769,8 +776,8 @@ class EpisodeRuntime:
             "kind": "summary",
             "prompt": prompt,
             "completion": generated_summary,
-            "thinking": summary_extraction.thinking,
-            "summary": summary_extraction.summary,
+            "thinking": summary_extraction.thinking if summary_extraction is not None else "",
+            "summary": summary_extraction.summary if summary_extraction is not None else "",
             "summary_tokens": summary_tokens,
             "max_summary_tokens": self.max_summary_tokens,
             "prompt_tokens": prompt_tokens,
@@ -782,7 +789,14 @@ class EpisodeRuntime:
         retired_count = active.interval_round_count
         interval_messages = list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(state.messages)
         interval_messages.append(Message(role="assistant", content=generated_summary))
-        self._finalize_trajectory(active, interval_messages, termination_kind="compaction")
+        self._finalize_trajectory(
+            active,
+            interval_messages,
+            termination_kind="compaction" if summary_extraction is not None else "malformed",
+        )
+        if summary_extraction is None:
+            active.result = self._penalized_result(active, status="malformed_tool_call")
+            return
         if summary_tokens > self.max_summary_tokens:
             active.result = self._penalized_result(active, status="summary_length_exceeded")
             return

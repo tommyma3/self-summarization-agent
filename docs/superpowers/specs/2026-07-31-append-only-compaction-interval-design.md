@@ -28,8 +28,10 @@ user request or previous compressed state
 assistant/tool events
 ...
 compaction instruction
-assistant compaction reasoning and compressed state
+assistant compaction reasoning and `<summary>compressed state</summary>`
 ```
+
+The compaction prompt is concise and does not state the configured summary-body limit. It requires completed thinking followed by the compressed state inside `<summary>...</summary>`. The runtime first removes everything through `</think>`, then installs only the text inside the first complete wrapper in the remainder, ignoring any other prefix or suffix. Missing `</think>` or summary wrappers are malformed-tool-call failures; a present but empty wrapper is an empty-summary failure. The full raw completion, including thinking and wrappers, remains in the interval trajectory and generated-token accounting.
 
 The compaction prompt does not insert a second copy of the previous compressed state. A valid summary retires the entire preceding interval. The next action begins from exactly:
 
