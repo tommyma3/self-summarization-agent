@@ -36,7 +36,6 @@ Think first and then choose exactly one action:
 
 def build_forced_answer_prompt() -> str:
     return """The final-answer boundary has been reached.
-Search and document actions are no longer available.
 Think first, then answer with exactly one action:
 <answer>best supported answer</answer>."""
 
@@ -51,8 +50,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """Compact the preceding task state into a summary for future steps.
-Preserve the task, constraints, key evidence, unresolved work, and next steps.
-Think first. After </think>, put only the compressed state inside <summary> </summary> tags."""
+Think first, and put only the compressed state inside <summary> </summary> tags."""
 
 
 def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:
