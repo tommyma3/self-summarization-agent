@@ -70,6 +70,7 @@ class ModelConfig:
     enable_thinking: bool = True
     chat_template_path: str | None = None
     language_model_only: bool = False
+    enable_prefix_caching: bool = False
     api_base_url: str | None = None
     api_model: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -87,6 +88,7 @@ class RolloutConfig:
     tensor_parallel_size: int = 2
     attention_backend: str | None = None
     max_model_len: int | None = None
+    enable_prefix_caching: bool = True
     max_concurrent_episodes: int = 32
     overlap_judge: bool = True
     max_new_tokens: int | None = None

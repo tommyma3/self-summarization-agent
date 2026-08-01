@@ -25,6 +25,7 @@ rollout:
   gpu_ids: [0, 1, 2, 3]
   tensor_parallel_size: 4
   max_model_len: 65536
+  enable_prefix_caching: true
 runtime:
   context_threshold_tokens: 32
   max_context_tokens: 64
@@ -119,6 +120,7 @@ training:
     assert config.rollout.gpu_ids == [0, 1, 2, 3]
     assert config.rollout.tensor_parallel_size == 4
     assert config.rollout.max_model_len == 65536
+    assert config.rollout.enable_prefix_caching is True
     assert config.judge.backend == "vllm_offline"
     assert config.judge.model_path == "judge-dir"
     assert config.judge.gpu_ids == [4, 5]

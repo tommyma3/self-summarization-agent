@@ -245,7 +245,8 @@ Training notes:
 - legacy `train_launcher` expects `training.backend: transformers`
 - the default `rollout.backend: openai_compatible` uses Chat Completions against `rollout.api_base_url`; `openai`, `openai-compatible`, and `openai_compatible` are accepted aliases
 - `rollout.api_model` must be the model name exposed by the server; when it is unset the resolved checkpoint path is sent as the model name
-- the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning and native tool parsing enabled; restarting or hot-swapping that server at an iteration boundary is an external orchestration responsibility
+- `rollout.enable_prefix_caching` defaults to `true`; `vllm_offline` passes it directly to the owned vLLM engine
+- the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning, native tool parsing, and `--enable-prefix-caching`; prefix caching is an engine-startup option and cannot be enabled by a Chat Completions request, while restarting or hot-swapping that server at an iteration boundary remains an external orchestration responsibility
 - legacy `rollout.backend: vllm_offline` and `rollout.backend: sglang` remain available; SGLang is an optional runtime dependency and must be installed separately
 - the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` consume the same cached trajectory contract
 - each iteration evaluates the selected checkpoint, collects its training trajectories, caches the exact collected token sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer

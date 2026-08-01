@@ -51,6 +51,7 @@ rollout:
   tensor_parallel_size: 2
   attention_backend:
   max_model_len: 40960
+  enable_prefix_caching: true
   # Limit 49k-token KV-cache residency on the two rollout GPUs.
   max_concurrent_episodes: 8
   overlap_judge: true

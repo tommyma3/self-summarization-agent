@@ -328,6 +328,7 @@ def _build_rollout_generator(config, checkpoint: Path) -> Any:
         if config.rollout.max_model_len is not None
         else config.model.max_model_len,
         language_model_only=True,
+        enable_prefix_caching=config.rollout.enable_prefix_caching,
         api_base_url=config.rollout.api_base_url,
         api_model=config.rollout.api_model,
         api_key_env=config.rollout.api_key_env,

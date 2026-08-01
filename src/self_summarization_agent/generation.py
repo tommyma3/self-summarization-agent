@@ -430,6 +430,7 @@ class VLLMGenerator:
     enable_thinking: bool = False
     chat_template_path: str | None = None
     language_model_only: bool = False
+    enable_prefix_caching: bool = False
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
     _sampling_params_cls: Any = field(init=False)
@@ -456,6 +457,7 @@ class VLLMGenerator:
             "tensor_parallel_size": self.tensor_parallel_size,
             "max_model_len": self.max_model_len,
             "language_model_only": self.language_model_only,
+            "enable_prefix_caching": self.enable_prefix_caching,
         }
         sig = inspect.signature(LLM)
         supported_kwargs = set(sig.parameters)
@@ -810,6 +812,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,
             language_model_only=model_config.language_model_only,
+            enable_prefix_caching=model_config.enable_prefix_caching,
         )
     if backend_name in {"sglang", "sglang_offline"}:
         return SGLangGenerator(

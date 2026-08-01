@@ -90,12 +90,45 @@ def test_build_generator_accepts_vllm_offline_backend(monkeypatch) -> None:
             model_path="/models/demo",
             tensor_parallel_size=2,
             attention_backend="FLASH_ATTN",
+            enable_prefix_caching=True,
         )
     )
 
     assert isinstance(generator, VLLMGenerator)
     assert generator.model_path == "/models/demo"
     assert generator.tensor_parallel_size == 2
+    assert generator.enable_prefix_caching is True
+
+
+def test_vllm_generator_enables_prefix_caching_in_offline_engine(monkeypatch) -> None:
+    engine_kwargs: dict = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs) -> None:
+            engine_kwargs.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        SimpleNamespace(LLM=FakeEngine, SamplingParams=FakeSamplingParams),
+    )
+    monkeypatch.setattr(generation, "_apply_vllm_subprocess_fix", lambda: None)
+    monkeypatch.setattr(
+        generation.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: FakeTokenizer(),
+    )
+
+    VLLMGenerator(
+        model_path="/models/demo",
+        max_new_tokens=16,
+        temperature=0.7,
+        top_p=0.95,
+        do_sample=True,
+        enable_prefix_caching=True,
+    )
+
+    assert engine_kwargs["enable_prefix_caching"] is True
 
 
 def test_build_generator_accepts_sglang_backend(monkeypatch) -> None:

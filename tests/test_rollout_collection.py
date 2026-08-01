@@ -3,6 +3,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+from self_summarization_agent import rollout_collection
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.config import (
     DatasetConfig,
@@ -326,6 +327,28 @@ def test_collect_eval_then_train_reuses_generator_and_overlaps_judging(tmp_path:
     assert len(eval_judged_rows) == 1
     assert len(train_judged_rows) == 4
     assert {row["policy_checkpoint_id"] for row in eval_rows + train_rows} == {"step-00001"}
+
+
+def test_build_rollout_generator_enables_prefix_caching_only_for_collection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = train_config(tmp_path)
+    config.rollout.gpu_ids = []
+    config.rollout.enable_prefix_caching = True
+    captured = {}
+    sentinel = object()
+
+    def fake_build_generator(model_config):
+        captured["model_config"] = model_config
+        return sentinel
+
+    monkeypatch.setattr(rollout_collection, "build_generator", fake_build_generator)
+
+    result = rollout_collection._build_rollout_generator(config, tmp_path / "checkpoint")
+
+    assert result is sentinel
+    assert captured["model_config"].enable_prefix_caching is True
+    assert config.model.enable_prefix_caching is False
 
 
 def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:
