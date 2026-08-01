@@ -5,6 +5,7 @@ from self_summarization_agent.trainer import (
     FSDP2ContextParallelPolicyTrainer,
     TransformersPolicyTrainer,
     _clipped_grpo_token_losses,
+    _encode_shifted_sample_from_text,
     compute_group_advantages,
 )
 from self_summarization_agent.trajectory import RLSample
@@ -116,6 +117,30 @@ def test_fsdp_context_parallel_encoding_leaves_aligned_sequence_unpadded() -> No
     assert input_ids.shape == labels.shape == completion_mask.shape == (1, 12)
     assert input_ids[0, -1].item() == 11
     assert labels[0, -1].item() == 12
+
+
+def test_exact_collection_ids_are_authoritative_and_not_retokenized() -> None:
+    class RejectingTokenizer:
+        pad_token_id = 99
+        eos_token_id = 100
+
+        def encode(self, *args, **kwargs):
+            raise AssertionError("exact collection samples must not be retokenized")
+
+    sample = make_sample()
+    sample.collection_full_token_ids = [7, 8, 9, 10]
+    sample.collection_assistant_token_mask = [False, False, True, True]
+
+    input_ids, labels, completion_mask = _encode_shifted_sample_from_text(
+        sample,
+        tokenizer=RejectingTokenizer(),
+        device=torch.device("cpu"),
+        max_sequence_length=16,
+    )
+
+    assert input_ids.tolist() == [7, 8, 9]
+    assert labels.tolist() == [8, 9, 10]
+    assert completion_mask.tolist() == [False, True, True]
 
 
 def test_transformers_trainer_reuses_batch_for_clipped_grpo_updates() -> None:

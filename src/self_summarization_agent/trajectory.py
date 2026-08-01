@@ -1,12 +1,14 @@
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 import math
 from typing import Any
 
 
-TOKEN_CACHE_VERSION = 3
+TOKEN_CACHE_VERSION = 4
 TOKEN_CACHE_FIELD = "training_cache"
-TRAJECTORY_SCHEMA_VERSION = 1
+TRAJECTORY_SCHEMA_VERSION = 2
+COLLECTION_TOKEN_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -17,7 +19,10 @@ class RLSample:
     completion: str
     reward: float
     trainable_kind: str
-    messages: list[dict[str, str]] | None = None
+    messages: list[dict[str, Any]] | None = None
+    tools: list[dict[str, Any]] | None = None
+    collection_full_token_ids: list[int] | None = None
+    collection_assistant_token_mask: list[bool] | None = None
     rollout_id: str | None = None
     input_ids: list[int] | None = None
     labels: list[int] | None = None
@@ -37,6 +42,13 @@ class RLSample:
     @property
     def has_token_reference_logprobs(self) -> bool:
         return self.has_training_cache and self.reference_logprobs is not None
+
+    @property
+    def has_exact_collection_tokens(self) -> bool:
+        return (
+            self.collection_full_token_ids is not None
+            and self.collection_assistant_token_mask is not None
+        )
 
 
 def _validate_int_list(value: Any, *, field_name: str, turn_id: str) -> list[int]:
@@ -124,10 +136,10 @@ def _extract_training_cache(
     return input_ids, labels, completion_mask, float(reference_logprob), reference_logprobs
 
 
-def _validate_messages(value: object, *, record_id: str) -> list[dict[str, str]]:
+def _validate_messages(value: object, *, record_id: str) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         raise ValueError(f"Trainable record {record_id} has invalid messages")
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     for index, message in enumerate(value):
         if not isinstance(message, Mapping):
             raise ValueError(f"Trainable record {record_id} has non-object messages[{index}]")
@@ -135,12 +147,89 @@ def _validate_messages(value: object, *, record_id: str) -> list[dict[str, str]]
         content = message.get("content")
         if role not in {"system", "user", "assistant", "tool"} or not isinstance(content, str):
             raise ValueError(f"Trainable record {record_id} has invalid messages[{index}]")
-        messages.append({"role": str(role), "content": content})
+        copied = deepcopy(dict(message))
+        reasoning = copied.get("reasoning_content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise ValueError(f"Trainable record {record_id} has invalid messages[{index}].reasoning_content")
+        tool_calls = copied.get("tool_calls", [])
+        if not isinstance(tool_calls, list):
+            raise ValueError(f"Trainable record {record_id} has invalid messages[{index}].tool_calls")
+        if role == "tool" and not isinstance(copied.get("tool_call_id"), str):
+            raise ValueError(f"Trainable record {record_id} has unlinked tool message[{index}]")
+        messages.append(copied)
     if messages[0]["role"] != "system":
         raise ValueError(f"Trainable record {record_id} must begin with a system message")
-    if not any(message["role"] == "assistant" and message["content"] for message in messages):
+    if not any(
+        message["role"] == "assistant"
+        and (message.get("content") or message.get("tool_calls") or message.get("reasoning_content"))
+        for message in messages
+    ):
         raise ValueError(f"Trainable record {record_id} has no assistant completion")
     return messages
+
+
+def _extract_collection_tokens(
+    record: Mapping[str, object],
+    *,
+    turn_id: str,
+) -> tuple[list[int] | None, list[bool] | None]:
+    payload = record.get("collection_tokens")
+    if payload is None:
+        return None, None
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"Trainable record {turn_id} has non-object collection_tokens")
+    if payload.get("version") != COLLECTION_TOKEN_VERSION:
+        raise ValueError(
+            f"Trainable record {turn_id} has unsupported collection token version: "
+            f"{payload.get('version')!r}"
+        )
+    full_token_ids = _validate_int_list(
+        payload.get("full_token_ids"),
+        field_name="collection_tokens.full_token_ids",
+        turn_id=turn_id,
+    )
+    assistant_token_mask = _validate_bool_list(
+        payload.get("assistant_token_mask"),
+        field_name="collection_tokens.assistant_token_mask",
+        turn_id=turn_id,
+    )
+    if len(full_token_ids) != len(assistant_token_mask):
+        raise ValueError(f"Trainable record {turn_id} has mismatched collection token lengths")
+    if len(full_token_ids) < 2:
+        raise ValueError(f"Trainable record {turn_id} has fewer than two collection tokens")
+    if not any(assistant_token_mask[1:]):
+        raise ValueError(f"Trainable record {turn_id} has no sampled collection tokens")
+    generations = payload.get("generations")
+    if not isinstance(generations, list) or not generations:
+        raise ValueError(f"Trainable record {turn_id} has no exact collection generations")
+    for generation_index, generation in enumerate(generations):
+        if not isinstance(generation, Mapping):
+            raise ValueError(
+                f"Trainable record {turn_id} has invalid collection generation {generation_index}"
+            )
+        generation_prompt_ids = _validate_int_list(
+            generation.get("prompt_token_ids"),
+            field_name=f"collection_tokens.generations[{generation_index}].prompt_token_ids",
+            turn_id=turn_id,
+        )
+        generation_completion_ids = _validate_int_list(
+            generation.get("completion_token_ids"),
+            field_name=f"collection_tokens.generations[{generation_index}].completion_token_ids",
+            turn_id=turn_id,
+        )
+        generation_full_ids = _validate_int_list(
+            generation.get("full_token_ids"),
+            field_name=f"collection_tokens.generations[{generation_index}].full_token_ids",
+            turn_id=turn_id,
+        )
+        if generation_full_ids != generation_prompt_ids + generation_completion_ids:
+            raise ValueError(
+                f"Trainable record {turn_id} has inconsistent collection generation {generation_index}"
+            )
+    final_generation = generations[-1]
+    if list(final_generation["full_token_ids"]) != full_token_ids:
+        raise ValueError(f"Trainable record {turn_id} final generation does not match full_token_ids")
+    return full_token_ids, assistant_token_mask
 
 
 def extract_trainable_samples(
@@ -177,16 +266,31 @@ def extract_trainable_samples(
             record,
             turn_id=record_id,
         )
-        assistant_outputs = [message["content"] for message in messages if message["role"] == "assistant"]
+        collection_full_token_ids, collection_assistant_token_mask = _extract_collection_tokens(
+            record,
+            turn_id=record_id,
+        )
+        raw_tools = record.get("tools")
+        if raw_tools is not None and not isinstance(raw_tools, list):
+            raise ValueError(f"Trainable record {record_id} has invalid tools")
+        tools = deepcopy(raw_tools) if isinstance(raw_tools, list) else None
+        assistant_outputs = [
+            str(message.get("content") or "")
+            for message in messages
+            if message["role"] == "assistant" and message.get("content")
+        ]
         samples.append(
             RLSample(
                 query_id=query_id,
                 turn_id=record_id,
                 prompt=str(record.get("prompt") or ""),
-                completion="\n".join(assistant_outputs),
+                completion=str(record.get("completion") or "\n".join(assistant_outputs)),
                 reward=float(reward),
                 trainable_kind=str(record.get("termination_kind") or "trajectory"),
                 messages=messages,
+                tools=tools,
+                collection_full_token_ids=collection_full_token_ids,
+                collection_assistant_token_mask=collection_assistant_token_mask,
                 rollout_id=rollout_id,
                 input_ids=input_ids,
                 labels=labels,
@@ -221,17 +325,18 @@ def _find_subsequence(haystack: Sequence[int], needle: Sequence[int], *, start: 
     return None
 
 
-def _render_fallback_messages(messages: list[dict[str, str]]) -> str:
+def _render_fallback_messages(messages: list[dict[str, Any]]) -> str:
     return "\n".join(f"### {message['role'].upper()}\n{message['content']}" for message in messages)
 
 
 def tokenize_interval_messages(
     tokenizer: Any,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     max_sequence_length: int | None,
     sample_id: str,
     enable_thinking: bool | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> tuple[list[int], list[int], list[bool]]:
     """Tokenize one append-only interval and mask only assistant content tokens."""
     full_ids: list[int]
@@ -239,6 +344,8 @@ def tokenize_interval_messages(
     if getattr(tokenizer, "chat_template", None):
         rendered = None
         template_kwargs = {} if enable_thinking is None else {"enable_thinking": enable_thinking}
+        if tools:
+            template_kwargs["tools"] = tools
         try:
             rendered = tokenizer.apply_chat_template(
                 messages,

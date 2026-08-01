@@ -112,6 +112,25 @@ def _analyze_training_lengths(
 
     results: list[dict[str, Any]] = []
     for record in trajectory_records:
+        collection_tokens = record.get("collection_tokens")
+        if isinstance(collection_tokens, Mapping):
+            full_ids = collection_tokens.get("full_token_ids")
+            assistant_mask = collection_tokens.get("assistant_token_mask")
+            if isinstance(full_ids, list) and isinstance(assistant_mask, list):
+                training_total = len(full_ids) - 1
+                results.append(
+                    {
+                        "training_total_tokens": training_total,
+                        "assistant_content_tokens": sum(bool(value) for value in assistant_mask[1:]),
+                        "fits": (
+                            None
+                            if max_sequence_length is None
+                            else training_total <= max_sequence_length
+                        ),
+                        "token_source": "collection",
+                    }
+                )
+                continue
         messages = record.get("messages", [])
         if not chat_template or not messages or not tokenizer:
             results.append(
@@ -126,6 +145,8 @@ def _analyze_training_lengths(
         full_ids: list[int] | None = None
         assistant_token_mask: list[bool] | None = None
         template_kwargs: dict[str, Any] = {} if enable_thinking is None else {"enable_thinking": enable_thinking}
+        if record.get("tools"):
+            template_kwargs["tools"] = record["tools"]
 
         try:
             rendered = tokenizer.apply_chat_template(

@@ -6,6 +6,8 @@ import main as cli_entrypoint
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.cli import build_smoke_run_record
 from self_summarization_agent.launcher_utils import serialize_runtime_result
+from self_summarization_agent.generation import GenerationResult
+from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import extract_trainable_samples
 
@@ -24,6 +26,26 @@ def tool_output(json_text: str, thinking: str = "thinking") -> str:
     return f"<think>{thinking}</think>\n{json_text}"
 
 
+class NativeMetadataModel:
+    supports_native_tools = True
+    require_exact_token_ids = True
+
+    def __init__(self, outputs: list[GenerationResult]) -> None:
+        self.outputs = outputs
+        self.prompts = []
+
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(str(prompt).split())
+
+    def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
+        self.prompts.extend(prompts)
+        outputs, self.outputs = self.outputs[: len(prompts)], self.outputs[len(prompts) :]
+        return outputs
+
+
 def test_fake_backend_returns_search_hits_and_document() -> None:
     backend = FakeBackend(
         search_index={"who won": ["doc-1"]},
@@ -32,6 +54,125 @@ def test_fake_backend_returns_search_hits_and_document() -> None:
 
     assert backend.search("who won") == [{"docid": "doc-1", "snippet": "doc-1 body"}]
     assert backend.get_document("doc-1") == "doc-1 body"
+
+
+def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
+    model = NativeMetadataModel(
+        [
+            GenerationResult(
+                text="raw search",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[10, 11],
+                message=Message(
+                    role="assistant",
+                    reasoning_content="search first",
+                    tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
+                ),
+                finish_reason="tool_calls",
+            ),
+            GenerationResult(
+                text="raw finish",
+                prompt_token_ids=[1, 2, 10, 11, 20],
+                completion_token_ids=[30, 31],
+                message=Message(
+                    role="assistant",
+                    reasoning_content="answer",
+                    tool_calls=[ToolCall(id="call-finish", name="finish", arguments={"answer": "done"})],
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={}),
+        context_threshold_tokens=1000,
+        max_context_tokens=2048,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.final_answer == "done"
+    trajectory = result.trajectory_records[0]
+    assert [message["role"] for message in trajectory["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert trajectory["messages"][3]["tool_call_id"] == "call-search"
+    assert trajectory["collection_tokens"]["full_token_ids"] == [1, 2, 10, 11, 20, 30, 31]
+    assert [generation["full_token_ids"] for generation in trajectory["collection_tokens"]["generations"]] == [
+        [1, 2, 10, 11],
+        [1, 2, 10, 11, 20, 30, 31],
+    ]
+    assert trajectory["collection_tokens"]["assistant_token_mask"] == [
+        False,
+        False,
+        True,
+        True,
+        False,
+        True,
+        True,
+    ]
+
+
+def test_native_summary_uses_no_tools_and_keeps_exact_interval_ids() -> None:
+    model = NativeMetadataModel(
+        [
+            GenerationResult(
+                text="raw search",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[10],
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
+                ),
+            ),
+            GenerationResult(
+                text="raw summary",
+                prompt_token_ids=[3, 10, 4],
+                completion_token_ids=[11],
+                message=Message(
+                    role="assistant",
+                    reasoning_content="compact",
+                    content="<summary>state</summary>",
+                ),
+            ),
+            GenerationResult(
+                text="raw finish",
+                prompt_token_ids=[5, 6],
+                completion_token_ids=[12],
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="call-finish", name="finish", arguments={"answer": "done"})],
+                ),
+            ),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={}),
+        context_threshold_tokens=1,
+        max_context_tokens=2048,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.final_answer == "done"
+    assert result.summary_turns == ["summary-1"]
+    summary_prompt = model.prompts[1]
+    assert summary_prompt.tools == ()
+    assert summary_prompt.tool_choice == "none"
+    assert "Do not call tools" in summary_prompt.messages[0].content
+    assert result.trajectory_records[0]["collection_tokens"]["full_token_ids"] == [3, 10, 4, 11]
+    assert result.trajectory_records[0]["collection_tokens"]["assistant_token_mask"] == [
+        False,
+        True,
+        False,
+        True,
+    ]
 
 
 def test_runtime_completes_without_summary_below_threshold() -> None:

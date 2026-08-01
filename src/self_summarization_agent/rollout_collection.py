@@ -57,6 +57,7 @@ def _load_completed_rollout_keys(
     *,
     checkpoint_id: str,
     expected_keys: set[tuple[str, int]],
+    require_exact_token_ids: bool = False,
 ) -> set[tuple[str, int]]:
     if not rollout_path.exists():
         return set()
@@ -87,6 +88,40 @@ def _load_completed_rollout_keys(
                 raise ValueError(
                     f"Cannot resume {rollout_path}: line {line_number} contains unexpected rollout key {key!r}"
                 )
+            if require_exact_token_ids:
+                trajectory_records = row.get("trajectory_records")
+                if not isinstance(trajectory_records, list) or not trajectory_records:
+                    raise ValueError(
+                        f"Cannot resume {rollout_path}: line {line_number} has no trajectory records "
+                        "for exact-token collection"
+                    )
+                for record_index, record in enumerate(trajectory_records):
+                    collection_tokens = record.get("collection_tokens") if isinstance(record, dict) else None
+                    if not isinstance(collection_tokens, dict):
+                        raise ValueError(
+                            f"Cannot resume {rollout_path}: line {line_number} trajectory "
+                            f"{record_index + 1} is missing exact collection_tokens"
+                        )
+                    full_ids = collection_tokens.get("full_token_ids")
+                    assistant_mask = collection_tokens.get("assistant_token_mask")
+                    generations = collection_tokens.get("generations")
+                    if (
+                        collection_tokens.get("version") != 1
+                        or not isinstance(full_ids, list)
+                        or not isinstance(assistant_mask, list)
+                        or not isinstance(generations, list)
+                        or not generations
+                        or len(full_ids) != len(assistant_mask)
+                        or not all(
+                            isinstance(token_id, int) and not isinstance(token_id, bool)
+                            for token_id in full_ids
+                        )
+                        or not all(isinstance(mask_value, bool) for mask_value in assistant_mask)
+                    ):
+                        raise ValueError(
+                            f"Cannot resume {rollout_path}: line {line_number} trajectory "
+                            f"{record_index + 1} has invalid exact collection_tokens"
+                        )
             completed_keys.add(key)
     return completed_keys
 
@@ -293,6 +328,14 @@ def _build_rollout_generator(config, checkpoint: Path) -> Any:
         if config.rollout.max_model_len is not None
         else config.model.max_model_len,
         language_model_only=True,
+        api_base_url=config.rollout.api_base_url,
+        api_model=config.rollout.api_model,
+        api_key_env=config.rollout.api_key_env,
+        api_timeout_seconds=config.rollout.api_timeout_seconds,
+        api_max_retries=config.rollout.api_max_retries,
+        api_max_concurrency=config.rollout.max_concurrent_episodes,
+        api_extra_body=dict(config.rollout.api_extra_body),
+        require_exact_token_ids=config.rollout.require_exact_token_ids,
     )
     return build_generator(rollout_model_config)
 
@@ -372,6 +415,10 @@ def collect_rollouts(
             rollout_path,
             checkpoint_id=checkpoint_id,
             expected_keys=expected_keys,
+            require_exact_token_ids=(
+                config.rollout.backend.lower().replace("-", "_") in {"openai", "openai_compatible"}
+                and config.rollout.require_exact_token_ids
+            ),
         )
         rollout_requests = [
             (example, rollout_index)

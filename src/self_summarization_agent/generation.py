@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import inspect
+import json
 import os
 import sys
 from typing import Any, Protocol
@@ -15,7 +17,8 @@ except ImportError:
     AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
 
 from self_summarization_agent.config import JudgeConfig, ModelConfig
-from self_summarization_agent.prompts import ConversationPrompt
+from self_summarization_agent.models import Message, ToolCall
+from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
 
 
 class TextGenerator(Protocol):
@@ -36,6 +39,9 @@ class GenerationResult:
     completion_token_ids: list[int] | None = None
     cumulative_logprob: float | None = None
     token_logprobs: list[float] | None = None
+    message: Message | None = None
+    finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
 
 
 def _resolve_torch_dtype(dtype_name: str):
@@ -128,6 +134,247 @@ class TransformersGenerator:
 
     def generate_batch(self, prompts: list[str]) -> list[str]:
         return [self.generate(prompt) for prompt in prompts]
+
+
+def _object_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if model_dump is not None:
+        dumped = model_dump()
+        if isinstance(dumped, dict):
+            model_extra = getattr(value, "model_extra", None)
+            if isinstance(model_extra, dict):
+                dumped.update(model_extra)
+            return dumped
+    raise ValueError(f"Expected an object-like API response, got {type(value).__name__}")
+
+
+def _required_int_list(value: object, *, field_name: str) -> list[int]:
+    if not isinstance(value, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+        raise RuntimeError(
+            f"OpenAI-compatible collection response is missing exact {field_name}. "
+            "For vLLM v0.19.1, enable the request extension return_token_ids=true."
+        )
+    return [int(item) for item in value]
+
+
+def _parse_api_message(payload: dict[str, Any]) -> Message:
+    content = payload.get("content")
+    if content is None:
+        content = ""
+    if not isinstance(content, str):
+        raise ValueError("OpenAI-compatible assistant content must be text or null")
+    reasoning = payload.get("reasoning_content", payload.get("reasoning"))
+    if reasoning is not None and not isinstance(reasoning, str):
+        raise ValueError("OpenAI-compatible assistant reasoning must be text or null")
+    tool_calls: list[ToolCall] = []
+    raw_tool_calls = payload.get("tool_calls") or []
+    if not isinstance(raw_tool_calls, list):
+        raise ValueError("OpenAI-compatible assistant tool_calls must be a list")
+    for index, raw_tool_call in enumerate(raw_tool_calls):
+        tool_call_payload = _object_payload(raw_tool_call)
+        function_payload = _object_payload(tool_call_payload.get("function"))
+        call_id = tool_call_payload.get("id")
+        name = function_payload.get("name")
+        raw_arguments = function_payload.get("arguments")
+        if not isinstance(call_id, str) or not isinstance(name, str) or not isinstance(raw_arguments, str):
+            raise ValueError(f"OpenAI-compatible tool_calls[{index}] is malformed")
+        try:
+            arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"OpenAI-compatible tool_calls[{index}] has invalid JSON arguments") from exc
+        if not isinstance(arguments, dict):
+            raise ValueError(f"OpenAI-compatible tool_calls[{index}] arguments must decode to an object")
+        tool_calls.append(ToolCall(id=call_id, name=name, arguments=arguments))
+    return Message(
+        role="assistant",
+        content=content,
+        reasoning_content=reasoning,
+        tool_calls=tool_calls,
+    )
+
+
+@dataclass(slots=True)
+class OpenAICompatibleGenerator:
+    """Chat Completions client for a Qwen-compatible vLLM server.
+
+    Exact server-side prompt and completion token IDs are mandatory by default.
+    The runtime persists those IDs as the authoritative GRPO training sequence.
+    """
+
+    model_path: str
+    max_new_tokens: int
+    temperature: float
+    top_p: float
+    do_sample: bool
+    api_base_url: str
+    api_model: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    api_timeout_seconds: float = 600.0
+    api_max_retries: int = 2
+    api_max_concurrency: int = 32
+    api_extra_body: dict[str, Any] = field(default_factory=dict)
+    require_exact_token_ids: bool = True
+    trust_remote_code: bool = False
+    enable_thinking: bool = True
+    tokenizer: Any = field(init=False)
+    client: Any = field(init=False)
+    supports_native_tools: bool = field(init=False, default=True)
+
+    def __post_init__(self) -> None:
+        if not self.api_base_url:
+            raise ValueError("model.api_base_url is required for backend='openai_compatible'")
+        if self.api_max_concurrency < 1:
+            raise ValueError("model.api_max_concurrency must be at least 1")
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ImportError(
+                "The openai package is required for backend='openai_compatible'."
+            ) from exc
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_path,
+            trust_remote_code=self.trust_remote_code,
+        )
+        self.client = OpenAI(
+            api_key=os.environ.get(self.api_key_env) or "EMPTY",
+            base_url=self.api_base_url,
+            timeout=self.api_timeout_seconds,
+            max_retries=self.api_max_retries,
+        )
+
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def _format_prompt(self, prompt: str) -> str:
+        if not isinstance(prompt, ConversationPrompt):
+            messages = [{"role": "user", "content": prompt}]
+            tools: list[dict[str, Any]] = []
+        else:
+            messages = serialize_messages(prompt.messages)
+            tools = list(prompt.tools)
+        kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": self.enable_thinking,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        try:
+            return self.tokenizer.apply_chat_template(messages, **kwargs)
+        except TypeError:
+            kwargs.pop("enable_thinking", None)
+            return self.tokenizer.apply_chat_template(messages, **kwargs)
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
+
+    def _request_payload(self, prompt: str) -> dict[str, Any]:
+        if not isinstance(prompt, ConversationPrompt):
+            messages = [{"role": "user", "content": prompt}]
+            tools: list[dict[str, Any]] = []
+            tool_choice: str | dict[str, Any] | None = None
+            parallel_tool_calls = False
+        else:
+            messages = serialize_messages(prompt.messages, for_api=True)
+            tools = list(prompt.tools)
+            tool_choice = prompt.tool_choice
+            parallel_tool_calls = prompt.parallel_tool_calls
+        payload: dict[str, Any] = {
+            "model": self.api_model or self.model_path,
+            "messages": messages,
+            "max_tokens": self.max_new_tokens,
+            "temperature": self.temperature if self.do_sample else 0.0,
+        }
+        if self.do_sample:
+            payload["top_p"] = self.top_p
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
+            payload["parallel_tool_calls"] = parallel_tool_calls
+        elif tool_choice == "none":
+            payload["tool_choice"] = "none"
+        extra_body = dict(self.api_extra_body)
+        template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        template_kwargs["enable_thinking"] = self.enable_thinking
+        extra_body["chat_template_kwargs"] = template_kwargs
+        if self.require_exact_token_ids:
+            extra_body["return_token_ids"] = True
+        if extra_body:
+            payload["extra_body"] = extra_body
+        return payload
+
+    def _generate_one(self, prompt: str) -> GenerationResult:
+        response = self.client.chat.completions.create(**self._request_payload(prompt))
+        response_payload = _object_payload(response)
+        raw_choices = response_payload.get("choices")
+        if not isinstance(raw_choices, list) or len(raw_choices) != 1:
+            raise RuntimeError("OpenAI-compatible collection requires exactly one response choice")
+        choice_payload = _object_payload(raw_choices[0])
+        message_payload = _object_payload(choice_payload.get("message"))
+        message = _parse_api_message(message_payload)
+
+        prompt_token_ids_value = response_payload.get("prompt_token_ids")
+        completion_token_ids_value = choice_payload.get("token_ids")
+        if self.require_exact_token_ids:
+            prompt_token_ids = _required_int_list(prompt_token_ids_value, field_name="prompt_token_ids")
+            completion_token_ids = _required_int_list(
+                completion_token_ids_value,
+                field_name="completion token_ids",
+            )
+        else:
+            prompt_token_ids = (
+                [int(item) for item in prompt_token_ids_value]
+                if isinstance(prompt_token_ids_value, list)
+                else None
+            )
+            completion_token_ids = (
+                [int(item) for item in completion_token_ids_value]
+                if isinstance(completion_token_ids_value, list)
+                else None
+            )
+        if completion_token_ids is not None:
+            # Keep the full sampled representation, including Qwen control tokens.
+            # Structured fields drive runtime behavior; this text is the immutable
+            # collection artifact and diagnostic view of the exact returned IDs.
+            raw_text = self.tokenizer.decode(completion_token_ids, skip_special_tokens=False)
+        else:
+            parts = []
+            if message.reasoning_content:
+                parts.append(f"<think>{message.reasoning_content}</think>")
+            if message.content:
+                parts.append(message.content)
+            parts.extend(
+                json.dumps(
+                    {"tool_name": call.name, "arguments": call.arguments},
+                    ensure_ascii=False,
+                )
+                for call in message.tool_calls
+            )
+            raw_text = "\n".join(parts)
+        usage = response_payload.get("usage")
+        return GenerationResult(
+            text=raw_text,
+            prompt_token_ids=prompt_token_ids,
+            completion_token_ids=completion_token_ids,
+            message=message,
+            finish_reason=choice_payload.get("finish_reason"),
+            usage=dict(usage) if isinstance(usage, dict) else None,
+        )
+
+    def generate(self, prompt: str) -> str:
+        return self._generate_one(prompt).text
+
+    def generate_batch(self, prompts: list[str]) -> list[str]:
+        return [result.text for result in self.generate_batch_with_metadata(prompts)]
+
+    def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
+        if not prompts:
+            return []
+        worker_count = min(len(prompts), self.api_max_concurrency)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            return list(executor.map(self._generate_one, prompts))
 
 
 def _apply_vllm_subprocess_fix() -> None:
@@ -522,6 +769,26 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             tensor_parallel_size=tensor_parallel_size,
             attention_backend=attention_backend,
             max_model_len=max_model_len,
+            trust_remote_code=model_config.trust_remote_code,
+            enable_thinking=model_config.enable_thinking,
+        )
+    if backend_name in {"openai", "openai_compatible", "openai-compatible"}:
+        if not model_config.api_base_url:
+            raise ValueError("model.api_base_url is required for backend='openai_compatible'")
+        return OpenAICompatibleGenerator(
+            model_path=model_path,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+            api_base_url=model_config.api_base_url,
+            api_model=model_config.api_model,
+            api_key_env=model_config.api_key_env,
+            api_timeout_seconds=model_config.api_timeout_seconds,
+            api_max_retries=model_config.api_max_retries,
+            api_max_concurrency=model_config.api_max_concurrency,
+            api_extra_body=dict(model_config.api_extra_body),
+            require_exact_token_ids=model_config.require_exact_token_ids,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
         )

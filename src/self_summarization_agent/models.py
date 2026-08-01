@@ -7,9 +7,20 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 
 @dataclass(slots=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    type: Literal["function"] = "function"
+
+
+@dataclass(slots=True)
 class Message:
     role: Role
-    content: str
+    content: str = ""
+    reasoning_content: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_call_id: str | None = None
 
 
 @dataclass(slots=True)

@@ -23,7 +23,7 @@ retrieval:
   max_length: 4096
 
 model:
-  backend: transformers
+  backend: openai_compatible
   model_path: /124090467/Qwen/Qwen3.5-9B
   dtype: bfloat16
   device_map: auto
@@ -34,6 +34,14 @@ model:
   do_sample: false
   trust_remote_code: false
   enable_thinking: true
+  api_base_url: http://127.0.0.1:8000/v1
+  api_model: /124090467/Qwen/Qwen3.5-9B
+  api_key_env: OPENAI_API_KEY
+  api_timeout_seconds: 600
+  api_max_retries: 2
+  api_max_concurrency: 10
+  api_extra_body: {}
+  require_exact_token_ids: true
 
 runtime:
   context_threshold_tokens: 16000

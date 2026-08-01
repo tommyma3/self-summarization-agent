@@ -12,7 +12,7 @@ Current scope:
 Partially implemented / still minimal:
 - the legacy training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
 - retrieval and judge dependencies still come from the local `bc-plus` environment
-- process-isolated rollout/training orchestration supports offline vLLM or SGLang rollout collection and checkpoint handoff
+- process-isolated rollout/training orchestration supports OpenAI-compatible vLLM serving, plus legacy offline vLLM or SGLang collection
 - the FSDP2/context-parallel full-training backend is represented in config and launcher contracts, but must be run in the GPU training environment
 
 ## Setup
@@ -26,7 +26,7 @@ Install dependencies with `uv`:
 uv sync --group dev
 ```
 
-The GPU training environment also needs the selected rollout engine (vLLM or SGLang) and an Accelerate release with FSDP2/context-parallel support available to the Python environment used for rollout and training subprocesses.
+The default Qwen3.5 rollout path expects an OpenAI-compatible vLLM server. The server must support native chat tool calls and vLLM's `return_token_ids` Chat Completions extension. The GPU training environment also needs an Accelerate release with FSDP2/context-parallel support available to the Python environment used for training subprocesses.
 
 For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
 
@@ -133,7 +133,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated offline rollout collection, judging, and clipped GRPO training updates
+- `iteration_launcher` for process-isolated API rollout collection, judging, and clipped GRPO training updates
 
 The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
@@ -185,7 +185,9 @@ What the runtime returns:
 - `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout
 - `summary_turns`, `retrieved_docids`, and `tool_call_counts`
 
-Each training interval begins with the system instructions and either the original user request or the latest compressed state. The runtime appends every generated reasoning/action and tool result without reconstructing the history. At a compaction or forced-answer boundary, it appends the boundary instruction to that same context and generates one more assistant completion. A compaction completion must finish thinking with `</think>` and then put its compressed state inside `<summary>...</summary>`; only the first complete wrapper body after `</think>` is installed as state, while the full raw completion remains part of the trainable interval. Missing wrappers are handled as malformed tool calls. All assistant tokens in the resulting interval are trainable; system/user state, tool results, and boundary instructions are masked out. Successful compaction then resets the next interval to only the system instructions plus the new compressed state.
+Each training interval begins with the system instructions and either the original user request or the latest compressed state. On the OpenAI-compatible path, `search`, `get_document`, and `finish` are native function tools; tool results are linked `role: tool` messages; and a forced answer is a request containing only the required `finish` tool. Summarization remains a normal assistant message with no tools and must contain `<summary>...</summary>`. The runtime preserves the structured assistant reasoning, tool calls, tool-call IDs, and full raw sampled completion.
+
+Every collection request asks vLLM to return its exact server-side prompt and completion token IDs. The runtime stores every request under `collection_tokens.generations`; at an interval boundary it also stores the final inference sequence as `collection_tokens.full_token_ids` plus an assistant-token mask. Earlier sampled completions must be exact subsequences of the final server-rendered prompt. Missing IDs or a mismatch terminates collection with an error; the cache step never substitutes locally retokenized text for these API trajectories. Cache v4 and training then use the stored IDs directly.
 
 ## How To Run Real Experiments
 
@@ -241,9 +243,20 @@ Training notes:
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
-- the process-isolated path supports `rollout.backend: vllm_offline` (the default) or `rollout.backend: sglang`; SGLang is an optional runtime dependency and must be installed separately
-- the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` can both consume trajectories collected by either offline rollout engine
-- in the new path, each iteration loads the latest checkpoint into the selected offline rollout engine once, evaluates that checkpoint, collects its training trajectories with the same loaded engine, caches tokenized trainable sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+- the default `rollout.backend: openai_compatible` uses Chat Completions against `rollout.api_base_url`; `openai`, `openai-compatible`, and `openai_compatible` are accepted aliases
+- `rollout.api_model` must be the model name exposed by the server; when it is unset the resolved checkpoint path is sent as the model name
+- the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning and native tool parsing enabled; restarting or hot-swapping that server at an iteration boundary is an external orchestration responsibility
+- legacy `rollout.backend: vllm_offline` and `rollout.backend: sglang` remain available; SGLang is an optional runtime dependency and must be installed separately
+- the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` consume the same cached trajectory contract
+- each iteration evaluates the selected checkpoint, collects its training trajectories, caches the exact collected token sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
+
+Before collection, verify the server with the included compatibility probe:
+
+```powershell
+uv run python scripts/probe_openai_compatible_runtime.py --base-url http://127.0.0.1:8000/v1 --model /path/to/checkpoint --tokenizer /path/to/checkpoint
+```
+
+The probe makes a forced native `finish` call and fails unless the response contains one structured tool call plus exact `prompt_token_ids` and completion `token_ids`. The client automatically sends `extra_body.return_token_ids: true` and `chat_template_kwargs.enable_thinking`.
 
 ### Process-isolated rollout/training loop
 
@@ -261,11 +274,11 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 For the intended GPU run:
 
 - each iteration's combined eval-then-train collection uses one phase-scoped FAISS worker; the embedding model is unloaded before fallback judging, caching, and policy weight updates
-- combined collection starts one overlap judge worker on GPU 1, then loads the policy checkpoint once in the selected offline rollout engine on GPUs 2-3 with tensor parallel size 2
+- combined collection starts one overlap judge worker, then reuses one OpenAI-compatible client for evaluation and training rollouts against the externally served policy checkpoint
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through the selected engine
 - rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` loads the rollout checkpoint and writes v3 sparse interval caches with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v3 rows are preserved and older cache versions are regenerated as v3
+- `cache_step` loads the rollout checkpoint and writes v4 sparse interval caches from the exact collection IDs, with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v4 rows are preserved and older cache versions are regenerated as v4
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs
@@ -273,7 +286,7 @@ For the intended GPU run:
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
-To use SGLang for policy rollouts, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
+To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 
 ```powershell
 python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer

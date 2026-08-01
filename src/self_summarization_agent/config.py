@@ -69,6 +69,14 @@ class ModelConfig:
     trust_remote_code: bool = False
     enable_thinking: bool = True
     language_model_only: bool = False
+    api_base_url: str | None = None
+    api_model: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    api_timeout_seconds: float = 600.0
+    api_max_retries: int = 2
+    api_max_concurrency: int = 32
+    api_extra_body: dict[str, Any] = field(default_factory=dict)
+    require_exact_token_ids: bool = True
 
 
 @dataclass(slots=True)
@@ -84,6 +92,13 @@ class RolloutConfig:
     temperature: float | None = None
     top_p: float | None = None
     do_sample: bool | None = None
+    api_base_url: str | None = None
+    api_model: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    api_timeout_seconds: float = 600.0
+    api_max_retries: int = 2
+    api_extra_body: dict[str, Any] = field(default_factory=dict)
+    require_exact_token_ids: bool = True
 
 
 @dataclass(slots=True)

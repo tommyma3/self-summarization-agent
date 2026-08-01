@@ -274,6 +274,22 @@ def _encode_shifted_sample_from_text(
     enable_thinking: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pad_token_id = _pad_token_id_from_tokenizer(tokenizer)
+    if sample.has_exact_collection_tokens:
+        full_ids = list(sample.collection_full_token_ids or [])
+        assistant_mask = list(sample.collection_assistant_token_mask or [])
+        if len(full_ids) != len(assistant_mask):
+            raise ValueError(f"Sample {sample.turn_id} has mismatched exact collection token lengths")
+        if max_sequence_length is not None and len(full_ids) - 1 > max_sequence_length:
+            raise ValueError(
+                f"Interval {sample.turn_id} exceeds training.max_sequence_length: "
+                f"{len(full_ids) - 1} > {max_sequence_length}; exact collection tokens are never truncated"
+            )
+        input_ids = torch.tensor(full_ids[:-1], dtype=torch.long, device=device)
+        labels = torch.tensor(full_ids[1:], dtype=torch.long, device=device)
+        completion_mask = torch.tensor(assistant_mask[1:], dtype=torch.bool, device=device)
+        if not bool(completion_mask.any()):
+            raise ValueError(f"Sample {sample.turn_id} has no exact sampled assistant tokens")
+        return input_ids, labels, completion_mask
     if sample.messages is not None:
         input_id_values, label_values, mask_values = tokenize_interval_messages(
             tokenizer,
@@ -281,6 +297,7 @@ def _encode_shifted_sample_from_text(
             max_sequence_length=max_sequence_length,
             sample_id=sample.turn_id,
             enable_thinking=enable_thinking,
+            tools=sample.tools,
         )
         return (
             torch.tensor(input_id_values, dtype=torch.long, device=device),

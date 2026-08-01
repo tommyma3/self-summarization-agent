@@ -3,7 +3,14 @@ from types import SimpleNamespace
 
 from self_summarization_agent.config import JudgeConfig, ModelConfig
 from self_summarization_agent import generation
-from self_summarization_agent.generation import SGLangGenerator, VLLMGenerator, build_generator
+from self_summarization_agent.generation import (
+    OpenAICompatibleGenerator,
+    SGLangGenerator,
+    VLLMGenerator,
+    build_generator,
+)
+from self_summarization_agent.models import Message
+from self_summarization_agent.prompts import ACTION_TOOLS, ConversationPrompt
 
 
 class FakeTokenizer:
@@ -270,3 +277,76 @@ def test_sglang_generator_batches_prompts_and_returns_metadata(monkeypatch) -> N
     assert generator.engine.prompts == ["first", "second"]
     assert generator.engine.params == {"max_new_tokens": 16, "temperature": 0.7, "top_p": 0.95}
     assert generator.engine.return_logprob is True
+
+
+def test_openai_compatible_generator_preserves_native_tools_and_exact_ids(monkeypatch) -> None:
+    requests: list[dict] = []
+
+    class ApiTokenizer:
+        def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
+            return [1, 2]
+
+        def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str:
+            assert token_ids == [11, 12]
+            assert skip_special_tokens is False
+            return "<think>search</think><tool_call>search</tool_call>"
+
+    class Completions:
+        def create(self, **kwargs):
+            requests.append(kwargs)
+            return {
+                "prompt_token_ids": [1, 2, 3],
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "token_ids": [11, 12],
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning": "search",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search",
+                                        "arguments": '{"query": "q"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            }
+
+    def fake_init(self) -> None:
+        self.tokenizer = ApiTokenizer()
+        self.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+
+    monkeypatch.setattr(OpenAICompatibleGenerator, "__post_init__", fake_init)
+    generator = OpenAICompatibleGenerator(
+        model_path="/models/demo",
+        max_new_tokens=16,
+        temperature=0.7,
+        top_p=0.95,
+        do_sample=True,
+        api_base_url="http://localhost:8000/v1",
+    )
+    prompt = ConversationPrompt(
+        [Message(role="system", content="system"), Message(role="user", content="question")],
+        tools=ACTION_TOOLS,
+        tool_choice="auto",
+    )
+
+    result = generator.generate_batch_with_metadata([prompt])[0]
+
+    assert result.prompt_token_ids == [1, 2, 3]
+    assert result.completion_token_ids == [11, 12]
+    assert result.message is not None
+    assert result.message.reasoning_content == "search"
+    assert result.message.tool_calls[0].name == "search"
+    assert result.message.tool_calls[0].arguments == {"query": "q"}
+    assert requests[0]["parallel_tool_calls"] is False
+    assert requests[0]["extra_body"]["return_token_ids"] is True
+    assert requests[0]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}

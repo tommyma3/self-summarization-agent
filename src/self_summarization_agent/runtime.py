@@ -8,12 +8,16 @@ LOGGER = logging.getLogger(__name__)
 
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
 from self_summarization_agent.context import ContextManager
-from self_summarization_agent.models import EpisodeState, Message, RuntimeResult
+from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCall
 from self_summarization_agent.prompts import (
+    ACTION_TOOLS,
     ConversationPrompt,
+    FORCED_ANSWER_TOOLS,
+    FORCED_FINISH_TOOL_CHOICE,
     build_compacted_messages,
     build_forced_answer_prompt,
     build_initial_messages,
+    build_native_summary_system_prompt,
     format_tool_result,
     serialize_messages,
 )
@@ -81,6 +85,16 @@ def _iter_json_objects(text: str):
         except json.JSONDecodeError:
             continue
         yield parsed
+
+
+def _find_token_subsequence(haystack: list[int], needle: list[int], *, start: int = 0) -> int | None:
+    if not needle:
+        return start
+    last_start = len(haystack) - len(needle)
+    for index in range(max(0, start), last_start + 1):
+        if haystack[index : index + len(needle)] == needle:
+            return index
+    return None
 
 
 def _action_text(raw_output: str) -> str:
@@ -166,6 +180,16 @@ def extract_summary_output(raw_output: str) -> SummaryExtraction | None:
     return SummaryExtraction(thinking=extracted.thinking, summary=summary_match.group(1).strip())
 
 
+def extract_structured_summary(message: Message) -> SummaryExtraction | None:
+    summary_match = _SUMMARY_BLOCK_RE.search(message.content)
+    if summary_match is None:
+        return None
+    return SummaryExtraction(
+        thinking=(message.reasoning_content or "").strip(),
+        summary=summary_match.group(1).strip(),
+    )
+
+
 @dataclass(slots=True)
 class ScriptedModel:
     outputs: list[str]
@@ -234,6 +258,7 @@ class _ActiveEpisode:
     turn_records: list[dict[str, Any]] = field(default_factory=list)
     trajectory_records: list[dict[str, Any]] = field(default_factory=list)
     interval_turn_ids: list[str] = field(default_factory=list)
+    interval_outputs: list["_GeneratedOutput"] = field(default_factory=list)
     interval_round_count: int = 0
     token_usage: _TokenUsage = field(default_factory=_TokenUsage)
     result: RuntimeResult | None = None
@@ -243,6 +268,11 @@ class _ActiveEpisode:
 class _GeneratedOutput:
     text: str
     completion_tokens: int
+    prompt_token_ids: list[int] | None = None
+    completion_token_ids: list[int] | None = None
+    message: Message | None = None
+    finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -255,6 +285,8 @@ class _PendingToolAction:
     arguments: dict[str, object]
     prompt_tokens: int
     completion_tokens: int
+    assistant_message: Message | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -271,6 +303,10 @@ class EpisodeRuntime:
     def __post_init__(self) -> None:
         if self.max_summary_tokens < 1:
             raise ValueError(f"max_summary_tokens must be at least 1, got {self.max_summary_tokens}")
+
+    @property
+    def _uses_native_tools(self) -> bool:
+        return bool(getattr(self.model, "supports_native_tools", False))
 
     def _tool_calls_used(self, active: _ActiveEpisode) -> int:
         return active.tool_call_counts.get("search", 0) + active.tool_call_counts.get("get_document", 0)
@@ -305,15 +341,100 @@ class EpisodeRuntime:
         )
 
     def _build_runtime_prompt(self, state: EpisodeState) -> ConversationPrompt:
-        return ConversationPrompt(state.messages)
+        if self._uses_native_tools:
+            return ConversationPrompt(
+                state.messages,
+                tools=ACTION_TOOLS,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+                generation_kind="action",
+            )
+        return ConversationPrompt(state.messages, generation_kind="action")
 
     def _build_forced_answer_prompt(self, active: _ActiveEpisode) -> ConversationPrompt:
         messages = list(active.state.messages)
+        if self._uses_native_tools:
+            messages.append(
+                Message(
+                    role="user",
+                    content=(
+                        "The final-answer boundary has been reached. Call finish now with the "
+                        "best-supported answer. Do not call any retrieval tool."
+                    ),
+                )
+            )
+            return ConversationPrompt(
+                messages,
+                tools=FORCED_ANSWER_TOOLS,
+                tool_choice=FORCED_FINISH_TOOL_CHOICE,
+                parallel_tool_calls=False,
+                generation_kind="forced_answer",
+            )
         messages.append(Message(role="user", content=build_forced_answer_prompt()))
-        return ConversationPrompt(messages)
+        return ConversationPrompt(messages, generation_kind="forced_answer")
 
     def _next_tool_turn_id(self, state: EpisodeState) -> str:
         return f"tool-{state.tool_turn_count + 1}"
+
+    def _collection_token_payload(self, active: _ActiveEpisode) -> dict[str, Any] | None:
+        if not active.interval_outputs:
+            return None
+        final_output = active.interval_outputs[-1]
+        require_exact = bool(getattr(self.model, "require_exact_token_ids", False))
+        if final_output.prompt_token_ids is None or final_output.completion_token_ids is None:
+            if require_exact:
+                raise RuntimeError(
+                    "Exact collection token IDs are required, but the final generation did not return them"
+                )
+            return None
+
+        prompt_token_ids = list(final_output.prompt_token_ids)
+        completion_token_ids = list(final_output.completion_token_ids)
+        full_token_ids = prompt_token_ids + completion_token_ids
+        assistant_token_mask = [False] * len(full_token_ids)
+        generations: list[dict[str, Any]] = []
+        for index, output in enumerate(active.interval_outputs):
+            if output.prompt_token_ids is None or output.completion_token_ids is None:
+                if require_exact:
+                    raise RuntimeError(
+                        f"Exact collection token IDs are missing for interval output {index + 1}"
+                    )
+                return None
+            generation_prompt_ids = list(output.prompt_token_ids)
+            generation_completion_ids = list(output.completion_token_ids)
+            generations.append(
+                {
+                    "index": index,
+                    "prompt_token_ids": generation_prompt_ids,
+                    "completion_token_ids": generation_completion_ids,
+                    "full_token_ids": generation_prompt_ids + generation_completion_ids,
+                    "finish_reason": output.finish_reason,
+                }
+            )
+        search_start = 0
+        for index, output in enumerate(active.interval_outputs[:-1]):
+            token_ids = output.completion_token_ids
+            assert token_ids is not None
+            token_start = _find_token_subsequence(prompt_token_ids, token_ids, start=search_start)
+            if token_start is None:
+                raise RuntimeError(
+                    "A sampled assistant completion is not an exact token subsequence of the final "
+                    "collection prompt; the server chat template or structured history changed"
+                )
+            for token_index in range(token_start, token_start + len(token_ids)):
+                assistant_token_mask[token_index] = True
+            search_start = token_start + len(token_ids)
+        completion_start = len(prompt_token_ids)
+        for token_index in range(completion_start, len(full_token_ids)):
+            assistant_token_mask[token_index] = True
+        return {
+            "version": 1,
+            "prompt_token_ids": prompt_token_ids,
+            "completion_token_ids": completion_token_ids,
+            "full_token_ids": full_token_ids,
+            "assistant_token_mask": assistant_token_mask,
+            "generations": generations,
+        }
 
     def _finalize_trajectory(
         self,
@@ -321,27 +442,35 @@ class EpisodeRuntime:
         messages: list[Message] | tuple[Message, ...],
         *,
         termination_kind: str,
+        prompt: ConversationPrompt | None = None,
     ) -> str:
         trajectory_id = f"trajectory-{len(active.trajectory_records) + 1}"
         serialized_messages = serialize_messages(messages)
-        assistant_outputs = [message.content for message in messages if message.role == "assistant"]
+        assistant_outputs = [output.text for output in active.interval_outputs]
+        if not assistant_outputs:
+            assistant_outputs = [message.content for message in messages if message.role == "assistant"]
         if not assistant_outputs:
             return trajectory_id
-        active.trajectory_records.append(
-            {
-                "schema_version": 1,
-                "query_id": active.state.query_id,
-                "turn_id": trajectory_id,
-                "kind": "trajectory",
-                "termination_kind": termination_kind,
-                "messages": serialized_messages,
-                "prompt": str(ConversationPrompt(messages)),
-                "completion": "\n".join(assistant_outputs),
-                "turn_ids": list(active.interval_turn_ids),
-                "assistant_completion_count": len(assistant_outputs),
-            }
-        )
+        record: dict[str, Any] = {
+            "schema_version": 2,
+            "query_id": active.state.query_id,
+            "turn_id": trajectory_id,
+            "kind": "trajectory",
+            "termination_kind": termination_kind,
+            "messages": serialized_messages,
+            "prompt": str(prompt) if prompt is not None else str(ConversationPrompt(messages)),
+            "completion": "\n".join(assistant_outputs),
+            "turn_ids": list(active.interval_turn_ids),
+            "assistant_completion_count": len(assistant_outputs),
+        }
+        if prompt is not None and prompt.tools:
+            record["tools"] = list(prompt.tools)
+        collection_tokens = self._collection_token_payload(active)
+        if collection_tokens is not None:
+            record["collection_tokens"] = collection_tokens
+        active.trajectory_records.append(record)
         active.interval_turn_ids.clear()
+        active.interval_outputs.clear()
         active.interval_round_count = 0
         return trajectory_id
 
@@ -375,8 +504,14 @@ class EpisodeRuntime:
             interval_messages = list(prompt.messages)
         else:
             interval_messages = list(active.state.messages)
-        interval_messages.append(Message(role="assistant", content=completion))
-        self._finalize_trajectory(active, interval_messages, termination_kind="malformed")
+        generated_message = active.interval_outputs[-1].message if active.interval_outputs else None
+        interval_messages.append(generated_message or Message(role="assistant", content=completion))
+        self._finalize_trajectory(
+            active,
+            interval_messages,
+            termination_kind="malformed",
+            prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
+        )
         return self._penalized_result(active, status="malformed_tool_call", turn_records=recorded_turns)
 
     def _penalized_result(
@@ -447,6 +582,40 @@ class EpisodeRuntime:
         self._record_retrieved_docids(retrieved_docids, doc_ids)
 
     def _generate_batch(self, prompts: list[str]) -> list[_GeneratedOutput]:
+        generate_batch_with_metadata = getattr(self.model, "generate_batch_with_metadata", None)
+        if generate_batch_with_metadata is not None:
+            results = generate_batch_with_metadata(prompts)
+            if len(results) != len(prompts):
+                raise ValueError(
+                    f"Batch generator returned {len(results)} metadata results for {len(prompts)} prompts"
+                )
+            generated: list[_GeneratedOutput] = []
+            for result in results:
+                text = str(getattr(result, "text", ""))
+                completion_token_ids = getattr(result, "completion_token_ids", None)
+                completion_tokens = (
+                    len(completion_token_ids)
+                    if completion_token_ids is not None
+                    else self._completion_token_count(text)
+                )
+                generated.append(
+                    _GeneratedOutput(
+                        text=text,
+                        completion_tokens=completion_tokens,
+                        prompt_token_ids=(
+                            list(result.prompt_token_ids)
+                            if getattr(result, "prompt_token_ids", None) is not None
+                            else None
+                        ),
+                        completion_token_ids=(
+                            list(completion_token_ids) if completion_token_ids is not None else None
+                        ),
+                        message=getattr(result, "message", None),
+                        finish_reason=getattr(result, "finish_reason", None),
+                        usage=getattr(result, "usage", None),
+                    )
+                )
+            return generated
         generate_batch = getattr(self.model, "generate_batch", None)
         if generate_batch is None:
             outputs = [self.model.generate(prompt) for prompt in prompts]
@@ -467,7 +636,7 @@ class EpisodeRuntime:
             query_id=query_id,
             user_prompt=user_prompt,
             context_threshold_tokens=self.context_threshold_tokens,
-            messages=build_initial_messages(user_prompt),
+            messages=build_initial_messages(user_prompt, native_tools=self._uses_native_tools),
         )
         return _ActiveEpisode(
             state=state,
@@ -500,6 +669,31 @@ class EpisodeRuntime:
             token_usage=self._token_usage_payload(active),
         )
 
+    def _parse_action_output(
+        self,
+        generated_output: _GeneratedOutput,
+    ) -> tuple[dict[str, object], str, Message | None, str | None] | None:
+        if not self._uses_native_tools:
+            parsed = parse_model_tool_call(generated_output.text)
+            if parsed is None:
+                return None
+            payload, normalized_output = parsed
+            return payload, normalized_output, None, None
+        message = generated_output.message
+        if message is None or len(message.tool_calls) != 1:
+            return None
+        tool_call = message.tool_calls[0]
+        payload: dict[str, object] = {
+            "tool_name": tool_call.name,
+            "arguments": tool_call.arguments,
+        }
+        return (
+            payload,
+            json.dumps(payload, ensure_ascii=False),
+            message,
+            tool_call.id,
+        )
+
     def _prepare_action_output(
         self,
         active: _ActiveEpisode,
@@ -512,12 +706,19 @@ class EpisodeRuntime:
         query_id = state.query_id
         prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
         prompt_tokens = prompt_tokens if prompt_tokens is not None else self._prompt_token_count(active, prompt)
+        if generated_output.prompt_token_ids is not None:
+            prompt_tokens = len(generated_output.prompt_token_ids)
+            active.token_usage.max_prompt_tokens_seen = max(
+                active.token_usage.max_prompt_tokens_seen,
+                prompt_tokens,
+            )
+        active.interval_outputs.append(generated_output)
         raw_output = generated_output.text
         if generation_kind == "forced_answer":
             active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
         else:
             active.token_usage.reasoning_generated_tokens += generated_output.completion_tokens
-        parsed_tool_call = parse_model_tool_call(raw_output)
+        parsed_tool_call = self._parse_action_output(generated_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
                 active,
@@ -528,7 +729,7 @@ class EpisodeRuntime:
                 generation_kind=generation_kind,
             )
             return
-        payload, normalized_output = parsed_tool_call
+        payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
         tool_name = payload["tool_name"]
         arguments = payload["arguments"]
 
@@ -555,11 +756,23 @@ class EpisodeRuntime:
                 "completion_tokens": generated_output.completion_tokens,
                 "generation_kind": generation_kind,
             }
+            if assistant_message is not None:
+                turn_record["assistant_message"] = serialize_messages([assistant_message])[0]
+                turn_record["reasoning"] = assistant_message.reasoning_content or ""
+            if tool_call_id is not None:
+                turn_record["tool_call_id"] = tool_call_id
             active.turn_records.append(turn_record)
             active.interval_turn_ids.append("final-answer")
             interval_messages = list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(state.messages)
-            interval_messages.append(Message(role="assistant", content=raw_output))
-            self._finalize_trajectory(active, interval_messages, termination_kind="final_answer")
+            interval_messages.append(
+                assistant_message or Message(role="assistant", content=raw_output)
+            )
+            self._finalize_trajectory(
+                active,
+                interval_messages,
+                termination_kind="final_answer",
+                prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
+            )
             active.result = self._completed_result(active, answer)
             return None
 
@@ -607,6 +820,8 @@ class EpisodeRuntime:
             arguments=arguments,
             prompt_tokens=prompt_tokens,
             completion_tokens=generated_output.completion_tokens,
+            assistant_message=assistant_message,
+            tool_call_id=tool_call_id,
         )
 
     def _search_many(self, queries: list[str]) -> list[list[SearchResult]]:
@@ -637,12 +852,29 @@ class EpisodeRuntime:
             "completion_tokens": action.completion_tokens,
             "generation_kind": "action",
         }
+        if action.assistant_message is not None:
+            turn_record["assistant_message"] = serialize_messages([action.assistant_message])[0]
+            turn_record["reasoning"] = action.assistant_message.reasoning_content or ""
+        if action.tool_call_id is not None:
+            turn_record["tool_call_id"] = action.tool_call_id
         active.turn_records.append(turn_record)
         active.interval_turn_ids.append(tool_turn_id)
         state.tool_turn_count += 1
         active.interval_round_count += 1
-        state.messages.append(Message(role="assistant", content=action.raw_output))
-        state.messages.append(Message(role="user", content=format_tool_result(tool_result)))
+        if self._uses_native_tools:
+            if action.assistant_message is None or action.tool_call_id is None:
+                raise RuntimeError("Native tool action is missing its assistant message or tool_call_id")
+            state.messages.append(action.assistant_message)
+            state.messages.append(
+                Message(
+                    role="tool",
+                    content=tool_result,
+                    tool_call_id=action.tool_call_id,
+                )
+            )
+        else:
+            state.messages.append(Message(role="assistant", content=action.raw_output))
+            state.messages.append(Message(role="user", content=format_tool_result(tool_result)))
 
     def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
         search_actions = [action for action in actions if action.tool_name == "search"]
@@ -684,9 +916,16 @@ class EpisodeRuntime:
     ) -> None:
         state = active.state
         query_id = state.query_id
+        if generated_output.prompt_token_ids is not None:
+            prompt_tokens = len(generated_output.prompt_token_ids)
+            active.token_usage.max_prompt_tokens_seen = max(
+                active.token_usage.max_prompt_tokens_seen,
+                prompt_tokens,
+            )
+        active.interval_outputs.append(generated_output)
         raw_output = generated_output.text
         active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
-        parsed_tool_call = parse_model_tool_call(raw_output)
+        parsed_tool_call = self._parse_action_output(generated_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
                 active,
@@ -698,7 +937,7 @@ class EpisodeRuntime:
             )
             return
 
-        payload, normalized_output = parsed_tool_call
+        payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
         tool_name = payload["tool_name"]
         arguments = payload["arguments"]
         if tool_name != "finish":
@@ -735,17 +974,32 @@ class EpisodeRuntime:
             "completion_tokens": generated_output.completion_tokens,
             "generation_kind": "forced_answer",
         }
+        if assistant_message is not None:
+            turn_record["assistant_message"] = serialize_messages([assistant_message])[0]
+            turn_record["reasoning"] = assistant_message.reasoning_content or ""
+        if tool_call_id is not None:
+            turn_record["tool_call_id"] = tool_call_id
         active.turn_records.append(turn_record)
         active.interval_turn_ids.append("final-answer")
         interval_messages = list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(state.messages)
-        interval_messages.append(Message(role="assistant", content=raw_output))
-        self._finalize_trajectory(active, interval_messages, termination_kind="forced_answer")
+        interval_messages.append(assistant_message or Message(role="assistant", content=raw_output))
+        self._finalize_trajectory(
+            active,
+            interval_messages,
+            termination_kind="forced_answer",
+            prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
+        )
         active.result = self._completed_result(active, answer)
 
     def _build_summary_prompt_for_active(self, active: _ActiveEpisode) -> ConversationPrompt | None:
         if self._generated_token_budget_exhausted(active):
             return None
-        if not active.context_manager.should_summarize(active.state):
+        current_prompt = self._build_runtime_prompt(active.state)
+        prompt_counter = getattr(self.model, "count_prompt_tokens", None)
+        current_prompt_tokens = (
+            prompt_counter(current_prompt) if prompt_counter is not None else self.token_counter(current_prompt)
+        )
+        if current_prompt_tokens < active.state.context_threshold_tokens:
             return None
         if active.interval_round_count == 0:
             return None
@@ -753,6 +1007,19 @@ class EpisodeRuntime:
             active.state,
             max_summary_tokens=self.max_summary_tokens,
         )
+        if self._uses_native_tools:
+            summary_messages = list(prompt.messages)
+            if summary_messages and summary_messages[0].role == "system":
+                summary_messages[0] = Message(
+                    role="system",
+                    content=build_native_summary_system_prompt(),
+                )
+            prompt = ConversationPrompt(
+                summary_messages,
+                tool_choice="none",
+                parallel_tool_calls=False,
+                generation_kind="summary",
+            )
         active.context_manager.assert_fits(prompt, reserved_tokens=self.max_summary_tokens)
         return prompt
 
@@ -764,8 +1031,19 @@ class EpisodeRuntime:
         generated_output: _GeneratedOutput,
     ) -> None:
         generated_summary = generated_output.text
+        if generated_output.prompt_token_ids is not None:
+            prompt_tokens = len(generated_output.prompt_token_ids)
+            active.token_usage.max_prompt_tokens_seen = max(
+                active.token_usage.max_prompt_tokens_seen,
+                prompt_tokens,
+            )
+        active.interval_outputs.append(generated_output)
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
-        summary_extraction = extract_summary_output(generated_summary)
+        summary_extraction = (
+            extract_structured_summary(generated_output.message)
+            if self._uses_native_tools and generated_output.message is not None
+            else extract_summary_output(generated_summary)
+        )
         summary_tokens = self._completion_token_count(summary_extraction.summary) if summary_extraction is not None else 0
         state = active.state
         state.summary_count += 1
@@ -788,11 +1066,14 @@ class EpisodeRuntime:
         active.interval_turn_ids.append(summary_turn_id)
         retired_count = active.interval_round_count
         interval_messages = list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(state.messages)
-        interval_messages.append(Message(role="assistant", content=generated_summary))
+        interval_messages.append(
+            generated_output.message or Message(role="assistant", content=generated_summary)
+        )
         self._finalize_trajectory(
             active,
             interval_messages,
             termination_kind="compaction" if summary_extraction is not None else "malformed",
+            prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
         )
         if summary_extraction is None:
             active.result = self._penalized_result(active, status="malformed_tool_call")
@@ -804,7 +1085,10 @@ class EpisodeRuntime:
             active.result = self._penalized_result(active, status="empty_summary")
             return
         state.latest_summary = summary_extraction.summary
-        state.messages = build_compacted_messages(summary_extraction.summary)
+        state.messages = build_compacted_messages(
+            summary_extraction.summary,
+            native_tools=self._uses_native_tools,
+        )
         active.token_usage.retired_round_count += retired_count
         active.summary_turns.append(summary_turn_id)
 
