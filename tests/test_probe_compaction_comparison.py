@@ -117,3 +117,32 @@ def test_exact_model_input_sequence_formatter_uses_collection_generation_ids() -
 
     assert "generation 0 input token IDs (count=3" in rendered
     assert "[1, 2, 3]" in rendered
+
+
+class _FakeTokenizer:
+    def decode(self, token_ids, skip_special_tokens=False):
+        return " ".join(f"t{int(i)}" for i in token_ids)
+
+
+def test_exact_model_input_sequence_formatter_decodes_with_tokenizer() -> None:
+    rendered = simulate_collection.format_exact_model_input_sequences(
+        [
+            {
+                "turn_id": "trajectory-1",
+                "collection_tokens": {
+                    "generations": [
+                        {
+                            "index": 0,
+                            "prompt_token_ids": [1, 2, 3],
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+            }
+        ],
+        tokenizer=_FakeTokenizer(),
+    )
+
+    assert "generation 0 input token IDs (count=3" in rendered
+    assert "t1 t2 t3" in rendered
+    assert "[1, 2, 3]" not in rendered

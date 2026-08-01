@@ -266,8 +266,16 @@ def write_prompt(
             handle.write("\n")
 
 
-def format_exact_model_input_sequences(trajectory_records: list[dict[str, Any]]) -> str:
-    """Render the authoritative token IDs supplied to every collected generation."""
+def format_exact_model_input_sequences(
+    trajectory_records: list[dict[str, Any]],
+    tokenizer: Any | None = None,
+) -> str:
+    """Render the authoritative token IDs supplied to every collected generation.
+
+    When ``tokenizer`` is provided, each generation's ``prompt_token_ids`` are
+    decoded with ``tokenizer.decode(..., skip_special_tokens=False)`` and the
+    decoded text is rendered in place of the raw JSON ID array.
+    """
     lines: list[str] = []
     found_per_generation_ids = False
     for trajectory_index, record in enumerate(trajectory_records, start=1):
@@ -282,9 +290,13 @@ def format_exact_model_input_sequences(trajectory_records: list[dict[str, Any]])
         if not isinstance(generations, list) or not generations:
             final_prompt_ids = collection_tokens.get("prompt_token_ids")
             if isinstance(final_prompt_ids, list):
+                if tokenizer is not None:
+                    body = tokenizer.decode(final_prompt_ids, skip_special_tokens=False)
+                else:
+                    body = json.dumps(final_prompt_ids, ensure_ascii=False)
                 lines.append(
                     f"trajectory {trajectory_index} ({trajectory_id}), final generation input token IDs:\n"
-                    + json.dumps(final_prompt_ids, ensure_ascii=False)
+                    + body
                 )
             else:
                 lines.append(
@@ -300,10 +312,14 @@ def format_exact_model_input_sequences(trajectory_records: list[dict[str, Any]])
             found_per_generation_ids = True
             generation_index = generation.get("index", "?")
             finish_reason = generation.get("finish_reason")
+            if tokenizer is not None:
+                body = tokenizer.decode(prompt_token_ids, skip_special_tokens=False)
+            else:
+                body = json.dumps(prompt_token_ids, ensure_ascii=False)
             lines.append(
                 f"trajectory {trajectory_index} ({trajectory_id}), generation {generation_index} "
                 f"input token IDs (count={len(prompt_token_ids)}, finish_reason={finish_reason!r}):\n"
-                + json.dumps(prompt_token_ids, ensure_ascii=False)
+                + body
             )
     if not lines:
         return "No trainable trajectories were produced."

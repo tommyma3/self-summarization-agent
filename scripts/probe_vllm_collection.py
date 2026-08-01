@@ -162,6 +162,15 @@ def write_decoded_tokens(
 
                 handle.write("\n")
 
+            # Append decoded training sequences for this trajectory.
+            handle.write("=" * 80 + "\n")
+            handle.write("Training Sequences (decoded prompt token IDs per generation)\n")
+            handle.write("=" * 80 + "\n\n")
+            handle.write(
+                format_exact_model_input_sequences([record], tokenizer)
+            )
+            handle.write("\n")
+
         print(f"Decoded tokens written to: {decoded_path}")
 
 
@@ -259,7 +268,8 @@ def main() -> None:
         training_config=getattr(config, "training", None),
         training_max_sequence_length=args.training_max_seq_len,
     )
-    print(format_exact_model_input_sequences(result.trajectory_records))
+    tokenizer = generator.tokenizer if hasattr(generator, "tokenizer") else None
+    print(format_exact_model_input_sequences(result.trajectory_records, tokenizer))
     print(output_path)
 
     # Decode per-generation token IDs back to strings and write to text files.
