@@ -238,11 +238,16 @@ def build_initial_messages(user_prompt: str, *, native_tools: bool = False) -> l
     ]
 
 
+def format_compacted_summary(summary: str) -> str:
+    """Mark a model-generated compressed state when it becomes the next user input."""
+    return f"<summary>\n{summary}\n</summary>"
+
+
 def build_compacted_messages(summary: str, *, native_tools: bool = False) -> list[Message]:
     return [
         Message(
             role="system",
             content=build_native_tool_system_prompt() if native_tools else build_system_prompt(),
         ),
-        Message(role="user", content=summary),
+        Message(role="user", content=format_compacted_summary(summary)),
     ]

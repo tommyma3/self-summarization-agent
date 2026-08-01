@@ -508,7 +508,7 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     assert compaction_prompt.rstrip().endswith("</summary_request>")
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
-    assert "### USER\nsummary of the task and old-doc" in acting_prompt_after_summary
+    assert "### USER\n<summary>\nsummary of the task and old-doc\n</summary>" in acting_prompt_after_summary
     assert "### USER\nquestion" not in acting_prompt_after_summary
     assert "retain this reasoning" not in acting_prompt_after_summary
     assert "<search>first</search>" not in acting_prompt_after_summary
@@ -544,10 +544,9 @@ def test_runtime_puts_only_post_think_summary_into_context() -> None:
     assert summary_record["thinking"] == "reason about old-doc"
     assert summary_record["summary"] == "summary body for context"
     acting_prompt_after_summary = model.prompts[2]
-    assert "### USER\nsummary body for context" in acting_prompt_after_summary
+    assert "### USER\n<summary>\nsummary body for context\n</summary>" in acting_prompt_after_summary
     assert "reason about old-doc" not in acting_prompt_after_summary
     assert "<think>" not in acting_prompt_after_summary
-    assert "<summary>" not in acting_prompt_after_summary
     assert "outside prefix" not in acting_prompt_after_summary
 
 
@@ -633,7 +632,10 @@ def test_runtime_records_one_training_trajectory_per_interval() -> None:
     second_interval = result.trajectory_records[1]
     assert second_interval["turn_ids"] == ["final-answer"]
     assert [message["role"] for message in second_interval["messages"]] == ["system", "user", "assistant"]
-    assert second_interval["messages"][1]["content"] == "summary of the task and old-doc"
+    assert second_interval["messages"][1]["content"] == (
+        "<summary>\nsummary of the task and old-doc\n</summary>"
+    )
+    assert result.turn_records[1]["summary"] == "summary of the task and old-doc"
     assert result.turn_rewards == {"trajectory-1": 1.0, "trajectory-2": 1.0}
 
 

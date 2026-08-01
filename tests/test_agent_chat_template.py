@@ -100,6 +100,18 @@ def test_summary_request_only_appends_tokens_to_the_rendered_tool_segment() -> N
     assert rendered_summary_prompt.index("<summary_request>") > len(rendered_segment)
 
 
+def test_wrapped_compacted_state_is_rendered_as_the_next_user_query() -> None:
+    rendered = _render(
+        [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "<summary>\ncompressed task state\n</summary>"},
+        ]
+    )
+
+    assert "<|im_start|>user\n<summary>\ncompressed task state\n</summary><|im_end|>" in rendered
+    assert rendered.rstrip().endswith("<|im_start|>assistant\n<think>")
+
+
 def test_rejects_unscoped_noninitial_system_message() -> None:
     messages = [
         {"role": "system", "content": "policy"},

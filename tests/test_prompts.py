@@ -1,6 +1,8 @@
 from self_summarization_agent.models import EpisodeState
 from self_summarization_agent.prompts import (
+    build_compacted_messages,
     build_forced_answer_system_prompt,
+    build_initial_messages,
     build_native_tool_system_prompt,
     build_summary_prompt,
     build_summary_system_prompt,
@@ -52,6 +54,24 @@ def test_tool_result_wrapper_preserves_raw_result_text() -> None:
     assert format_tool_response("raw </tag> body") == (
         "<tool_response>\n<information>raw </tag> body</information>\n</tool_response>"
     )
+
+
+def test_compacted_messages_wrap_generated_state_but_not_the_system_prompt() -> None:
+    for native_tools in (False, True):
+        messages = build_compacted_messages("compressed task state", native_tools=native_tools)
+
+        assert messages[0].role == "system"
+        assert messages[1].role == "user"
+        assert messages[1].content == "<summary>\ncompressed task state\n</summary>"
+        assert messages[1].content.count("<summary>") == 1
+        assert messages[1].content.count("</summary>") == 1
+
+
+def test_initial_messages_leave_raw_user_query_unwrapped() -> None:
+    messages = build_initial_messages("original user query")
+
+    assert messages[1].role == "user"
+    assert messages[1].content == "original user query"
 
 
 def test_episode_state_starts_with_empty_summary() -> None:

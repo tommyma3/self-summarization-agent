@@ -24,20 +24,20 @@ When the compaction threshold is reached after a completed tool round, the runti
 
 ```text
 system instructions
-user request or previous compressed state
+user request or <summary>previous compressed state</summary>
 assistant/tool events
 ...
 compaction instruction
 assistant compaction reasoning and `<summary>compressed state</summary>`
 ```
 
-The compaction prompt is concise and does not state the configured summary-body limit. It requires completed thinking followed by the compressed state inside `<summary>...</summary>`. The runtime first removes everything through `</think>`, then installs only the text inside the first complete wrapper in the remainder, ignoring any other prefix or suffix. Missing `</think>` or summary wrappers are malformed-tool-call failures; a present but empty wrapper is an empty-summary failure. The full raw completion, including thinking and wrappers, remains in the interval trajectory and generated-token accounting.
+The compaction prompt is concise and does not state the configured summary-body limit. It requires completed thinking followed by the compressed state inside `<summary>...</summary>`. The runtime first removes everything through `</think>`, then stores only the text inside the first complete wrapper in the remainder, ignoring any other prefix or suffix. The stored body remains the value used for summary metrics and diagnostics. When it becomes the next interval's initial user message, the runtime wraps that body again in `<summary>...</summary>` to distinguish model-generated compaction from an original query. Missing `</think>` or summary wrappers are malformed-tool-call failures; a present but empty wrapper is an empty-summary failure. The full raw completion, including thinking and wrappers, remains in the interval trajectory and generated-token accounting.
 
 The compaction prompt does not insert a second copy of the previous compressed state. A valid summary retires the entire preceding interval. The next action begins from exactly:
 
 ```text
 system instructions
-new compressed state
+<summary>new compressed state</summary>
 ```
 
 There is no original user-request copy and no retained raw tool-event tail after compaction. The compressed state is responsible for preserving all task information needed in later intervals.
