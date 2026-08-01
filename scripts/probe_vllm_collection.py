@@ -162,9 +162,9 @@ def write_decoded_tokens(
 
                 handle.write("\n")
 
-            # Append decoded training sequences for this trajectory.
+            # Append decoded model input sequences for this trajectory.
             handle.write("=" * 80 + "\n")
-            handle.write("Training Sequences (decoded prompt token IDs per generation)\n")
+            handle.write("Model Input Sequences (decoded prompt token IDs per generation)\n")
             handle.write("=" * 80 + "\n\n")
             handle.write(
                 format_exact_model_input_sequences([record], tokenizer)

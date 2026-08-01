@@ -210,7 +210,7 @@ What the runtime returns:
 - `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout
 - `summary_turns`, `retrieved_docids`, and `tool_call_counts`
 
-Each training interval begins with the system instructions and either the original user request or the latest compressed state. On the OpenAI-compatible path, `search`, `get_document`, and `finish` are native function tools; tool results are linked `role: tool` messages; and a forced answer is a request containing only the required `finish` tool. Summarization remains a normal assistant message with no tools and must contain `<summary>...</summary>`. The runtime preserves the structured assistant reasoning, tool calls, tool-call IDs, and full raw sampled completion.
+Each training interval begins with the system instructions and either the original user request or the latest compressed state. On the OpenAI-compatible path, `search`, `get_document`, and `finish` are native function tools and tool results are linked `role: tool` messages. Summary and forced-answer boundaries are terminal runtime-control `system` messages appended without changing the earlier system/tool prefix; API `tool_choice` disables tools for a summary or requires `finish` for a forced answer. The generated summary remains a normal assistant message and must contain `<summary>...</summary>`. The runtime preserves the structured assistant reasoning, tool calls, tool-call IDs, and full raw sampled completion.
 
 Every collection request asks vLLM to return its exact server-side prompt and completion token IDs. The runtime stores every request under `collection_tokens.generations`; at an interval boundary it also stores the final inference sequence as `collection_tokens.full_token_ids` plus an assistant-token mask. Earlier sampled completions must be exact subsequences of the final server-rendered prompt. Missing IDs or a mismatch terminates collection with an error; the cache step never substitutes locally retokenized text for these API trajectories. Cache v4 and training then use the stored IDs directly.
 
@@ -343,6 +343,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 - Summarization happens only after a completed tool round.
 - `runtime.generated_token_budget` counts all model completion tokens, including thinking, actions, summaries, and forced answers; tool-result text is excluded. Budget exhaustion takes priority over compaction.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
+- `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template permits only tagged summary/forced-answer system controls at the end of an interval and preserves all reasoning since the interval's real user query.
 - A successful compaction starts a fresh interval with only the system instructions and compressed state; no raw tail is retained.
-- RL training data is produced as one sparse-masked sample per interval, with all model-generated assistant tokens trainable.
+- RL training data is produced as one sparse-masked sample per interval: action, tool-call, summary, and final-answer tokens are trainable, while tool results and runtime-control prompts are context-only.
 - Malformed tool calls terminate the rollout immediately and assign negative reward to every interval in that failed rollout.

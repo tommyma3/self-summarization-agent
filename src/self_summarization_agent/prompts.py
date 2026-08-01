@@ -182,7 +182,7 @@ def format_tool_response(tool_result: str) -> str:
 
 
 def build_system_prompt() -> str:
-    return """You are an expert research agent. Output exactly one action:
+    return """You are an expert research agent. Think first, then output exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
 (3) Provide your final answer within <answer> </answer> tags."""

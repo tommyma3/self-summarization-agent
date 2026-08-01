@@ -4,6 +4,7 @@ src/self_summarization_agent/__init__.py
 src/self_summarization_agent/backend.py
 src/self_summarization_agent/bcplus_backend.py
 src/self_summarization_agent/cache_step.py
+src/self_summarization_agent/chat_template.py
 src/self_summarization_agent/checkpoints.py
 src/self_summarization_agent/cli.py
 src/self_summarization_agent/config.py
@@ -35,6 +36,8 @@ src/self_summarization_agent.egg-info/SOURCES.txt
 src/self_summarization_agent.egg-info/dependency_links.txt
 src/self_summarization_agent.egg-info/requires.txt
 src/self_summarization_agent.egg-info/top_level.txt
+src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
+tests/test_agent_chat_template.py
 tests/test_bcplus_backend.py
 tests/test_cache_step.py
 tests/test_checkpoints.py

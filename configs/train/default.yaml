@@ -68,7 +68,7 @@ rollout:
   require_exact_token_ids: true
 
 runtime:
-  context_threshold_tokens: 16000
+  context_threshold_tokens: 12000
   max_context_tokens: 24000
   # Summary-body cap. An overlong summary terminates the rollout with a negative reward.
   max_summary_tokens: 6400
