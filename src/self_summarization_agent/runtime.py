@@ -417,10 +417,12 @@ class EpisodeRuntime:
             assert token_ids is not None
             token_start = _find_token_subsequence(prompt_token_ids, token_ids, start=search_start)
             if token_start is None:
-                raise RuntimeError(
-                    "A sampled assistant completion is not an exact token subsequence of the final "
-                    "collection prompt; the server chat template or structured history changed"
-                )
+                if require_exact:
+                    raise RuntimeError(
+                        "A sampled assistant completion is not an exact token subsequence of the final "
+                        "collection prompt; the server chat template or structured history changed"
+                    )
+                return None
             for token_index in range(token_start, token_start + len(token_ids)):
                 assistant_token_mask[token_index] = True
             search_start = token_start + len(token_ids)
