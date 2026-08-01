@@ -467,7 +467,26 @@ class VLLMGenerator:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
         if isinstance(prompt, ConversationPrompt):
-            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+            messages = []
+            for message in prompt.messages:
+                item: dict[str, Any] = {"role": message.role, "content": message.content}
+                if message.reasoning_content is not None:
+                    item["reasoning_content"] = message.reasoning_content
+                if message.tool_calls:
+                    item["tool_calls"] = [
+                        {
+                            "id": tool_call.id,
+                            "type": tool_call.type,
+                            "function": {
+                                "name": tool_call.name,
+                                "arguments": tool_call.arguments,
+                            },
+                        }
+                        for tool_call in message.tool_calls
+                    ]
+                if message.tool_call_id is not None:
+                    item["tool_call_id"] = message.tool_call_id
+                messages.append(item)
         else:
             messages = [{"role": "user", "content": prompt}]
         try:
@@ -588,7 +607,26 @@ class SGLangGenerator:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
         if isinstance(prompt, ConversationPrompt):
-            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+            messages = []
+            for message in prompt.messages:
+                item: dict[str, Any] = {"role": message.role, "content": message.content}
+                if message.reasoning_content is not None:
+                    item["reasoning_content"] = message.reasoning_content
+                if message.tool_calls:
+                    item["tool_calls"] = [
+                        {
+                            "id": tool_call.id,
+                            "type": tool_call.type,
+                            "function": {
+                                "name": tool_call.name,
+                                "arguments": tool_call.arguments,
+                            },
+                        }
+                        for tool_call in message.tool_calls
+                    ]
+                if message.tool_call_id is not None:
+                    item["tool_call_id"] = message.tool_call_id
+                messages.append(item)
         else:
             messages = [{"role": "user", "content": prompt}]
         try:

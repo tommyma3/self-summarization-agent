@@ -22,6 +22,9 @@ from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir
 from simulate_collection import format_exact_model_input_sequences, trace_collection
 
+from collections.abc import Mapping
+from typing import Any
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -101,6 +104,65 @@ def default_output_path(config: Any, query_id: str) -> Path:
     output_dir = ensure_dir(Path(config.experiment.output_root) / "artifacts" / "vllm_collection_probe" / config.experiment.name)
     safe_query_id = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in query_id)
     return output_dir / f"{safe_query_id}.txt"
+
+
+def write_decoded_tokens(
+    trajectory_records: list[dict[str, Any]],
+    tokenizer: Any,
+    output_dir: Path,
+) -> None:
+    """Decode per-generation token IDs to text and write them to files."""
+    output_dir = ensure_dir(output_dir)
+    for trajectory_index, record in enumerate(trajectory_records, start=1):
+        trajectory_id = record.get("turn_id", f"trajectory-{trajectory_index}")
+        collection_tokens = record.get("collection_tokens")
+        if not isinstance(collection_tokens, Mapping):
+            continue
+        generations = collection_tokens.get("generations")
+        if not isinstance(generations, list):
+            continue
+
+        decoded_path = output_dir / f"{trajectory_id}_decoded_tokens.txt"
+        with open(decoded_path, "w", encoding="utf-8") as handle:
+            handle.write(f"Decoded token sequences for {trajectory_id}\n")
+            handle.write(f"Query ID: {record.get('query_id', '?')}\n")
+            handle.write("=" * 80 + "\n\n")
+
+            for generation in generations:
+                if not isinstance(generation, Mapping):
+                    continue
+                gen_index = generation.get("index", "?")
+                finish_reason = generation.get("finish_reason")
+                prompt_ids = generation.get("prompt_token_ids")
+                completion_ids = generation.get("completion_token_ids")
+                full_ids = generation.get("full_token_ids")
+
+                handle.write(f"--- Generation {gen_index}")
+                if finish_reason:
+                    handle.write(f" (finish_reason={finish_reason!r})")
+                handle.write(" ---\n\n")
+
+                if isinstance(prompt_ids, list) and prompt_ids:
+                    prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=False)
+                    handle.write(f"[PROMPT] ({len(prompt_ids)} tokens):\n")
+                    handle.write(prompt_text)
+                    handle.write("\n\n")
+
+                if isinstance(completion_ids, list) and completion_ids:
+                    completion_text = tokenizer.decode(completion_ids, skip_special_tokens=False)
+                    handle.write(f"[COMPLETION] ({len(completion_ids)} tokens):\n")
+                    handle.write(completion_text)
+                    handle.write("\n\n")
+
+                if isinstance(full_ids, list) and full_ids:
+                    full_text = tokenizer.decode(full_ids, skip_special_tokens=False)
+                    handle.write(f"[FULL] ({len(full_ids)} tokens, prompt+completion):\n")
+                    handle.write(full_text)
+                    handle.write("\n\n")
+
+                handle.write("\n")
+
+        print(f"Decoded tokens written to: {decoded_path}")
 
 
 def build_rollout_model_config(config: Any, args: argparse.Namespace):
@@ -199,6 +261,11 @@ def main() -> None:
     )
     print(format_exact_model_input_sequences(result.trajectory_records))
     print(output_path)
+
+    # Decode per-generation token IDs back to strings and write to text files.
+    if hasattr(generator, "tokenizer"):
+        decoded_dir = output_path.parent
+        write_decoded_tokens(result.trajectory_records, generator.tokenizer, decoded_dir)
 
 
 if __name__ == "__main__":

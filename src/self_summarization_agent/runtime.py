@@ -422,7 +422,9 @@ class EpisodeRuntime:
                         "A sampled assistant completion is not an exact token subsequence of the final "
                         "collection prompt; the server chat template or structured history changed"
                     )
-                return None
+                # Rebuild a degraded mask that only covers the final completion.
+                assistant_token_mask = [False] * len(full_token_ids)
+                break
             for token_index in range(token_start, token_start + len(token_ids)):
                 assistant_token_mask[token_index] = True
             search_start = token_start + len(token_ids)
