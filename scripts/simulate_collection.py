@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Simulate one training collection rollout and write every packed context, "
-            "tool result, and summary output to a text trace."
+            "tool result, summary output, and exact model-input token sequence to a text trace."
         )
     )
     parser.add_argument("--config", default="configs/train/default.yaml", help="Path to the train YAML config.")
@@ -264,6 +264,66 @@ def write_prompt(
             handle.write("\n--- Prompt after tokenizer chat template ---\n")
             handle.write(formatted)
             handle.write("\n")
+
+
+def format_exact_model_input_sequences(trajectory_records: list[dict[str, Any]]) -> str:
+    """Render the authoritative token IDs supplied to every collected generation."""
+    lines: list[str] = []
+    found_per_generation_ids = False
+    for trajectory_index, record in enumerate(trajectory_records, start=1):
+        trajectory_id = record.get("turn_id", f"trajectory-{trajectory_index}")
+        collection_tokens = record.get("collection_tokens")
+        if not isinstance(collection_tokens, Mapping):
+            lines.append(
+                f"trajectory {trajectory_index} ({trajectory_id}): exact model-input token IDs unavailable"
+            )
+            continue
+        generations = collection_tokens.get("generations")
+        if not isinstance(generations, list) or not generations:
+            final_prompt_ids = collection_tokens.get("prompt_token_ids")
+            if isinstance(final_prompt_ids, list):
+                lines.append(
+                    f"trajectory {trajectory_index} ({trajectory_id}), final generation input token IDs:\n"
+                    + json.dumps(final_prompt_ids, ensure_ascii=False)
+                )
+            else:
+                lines.append(
+                    f"trajectory {trajectory_index} ({trajectory_id}): exact model-input token IDs unavailable"
+                )
+            continue
+        for generation in generations:
+            if not isinstance(generation, Mapping):
+                continue
+            prompt_token_ids = generation.get("prompt_token_ids")
+            if not isinstance(prompt_token_ids, list):
+                continue
+            found_per_generation_ids = True
+            generation_index = generation.get("index", "?")
+            finish_reason = generation.get("finish_reason")
+            lines.append(
+                f"trajectory {trajectory_index} ({trajectory_id}), generation {generation_index} "
+                f"input token IDs (count={len(prompt_token_ids)}, finish_reason={finish_reason!r}):\n"
+                + json.dumps(prompt_token_ids, ensure_ascii=False)
+            )
+    if not lines:
+        return "No trainable trajectories were produced."
+    if not found_per_generation_ids:
+        lines.append(
+            "Note: no per-generation server/engine token trace was available; displayed final prompt IDs "
+            "are the best available artifact."
+        )
+    return "\n\n".join(lines)
+
+
+def write_exact_model_input_sequences(
+    handle: TextIO,
+    trajectory_records: list[dict[str, Any]],
+) -> None:
+    write_section(
+        handle,
+        "Exact Model Input Token Sequences",
+        format_exact_model_input_sequences(trajectory_records),
+    )
 
 
 def write_context_timeline(
@@ -668,7 +728,7 @@ def trace_collection(
     judge: RewardJudge | None = None,
     training_config: Any | None = None,
     training_max_sequence_length: int | None = None,
-) -> None:
+) -> Any:
     result = runtime.run(query_id=example.query_id, user_prompt=example.query)
 
     # Resolve the training max_sequence_length: CLI override > config > None
@@ -741,6 +801,7 @@ def trace_collection(
                 prompt=prompt,
                 include_formatted_prompt=include_formatted_prompt,
             )
+        write_exact_model_input_sequences(handle, result.trajectory_records)
         write_training_sequences(
             handle,
             runtime=runtime,
@@ -757,6 +818,7 @@ def trace_collection(
             max_sequence_length=max_sequence_length,
         )
         _write_judge_output(handle, judge, example, result.status, result.final_answer or "")
+    return result
 
 
 def main() -> None:
@@ -775,7 +837,7 @@ def main() -> None:
     runtime = build_runtime(generator, backend, config.runtime)
     output_path = Path(args.output) if args.output else default_output_path(config, example.query_id)
 
-    trace_collection(
+    result = trace_collection(
         runtime=runtime,
         generator=generator,
         example=example,
@@ -785,6 +847,7 @@ def main() -> None:
         training_config=getattr(config, "training", None),
         training_max_sequence_length=args.training_max_seq_len,
     )
+    print(format_exact_model_input_sequences(result.trajectory_records))
     print(output_path)
 
 

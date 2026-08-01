@@ -20,7 +20,7 @@ from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir
-from simulate_collection import trace_collection
+from simulate_collection import format_exact_model_input_sequences, trace_collection
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Probe one training rollout with offline vLLM on 4 GPUs. "
             "Runs one query until finish, malformed output, or tool budget exhaustion with forced answer, "
-            "and writes every trainable prompt/completion sequence to the trace."
+            "prints every exact model-input token sequence, and writes the trace."
         )
     )
     parser.add_argument("--config", default="configs/train/default.yaml", help="Path to the train YAML config.")
@@ -186,7 +186,7 @@ def main() -> None:
             judge = RewardJudge(judge_generator)
     runtime = build_runtime(generator, backend, config.runtime)
     output_path = Path(args.output) if args.output else default_output_path(config, example.query_id)
-    trace_collection(
+    result = trace_collection(
         runtime=runtime,
         generator=generator,
         example=example,
@@ -197,6 +197,7 @@ def main() -> None:
         training_config=getattr(config, "training", None),
         training_max_sequence_length=args.training_max_seq_len,
     )
+    print(format_exact_model_input_sequences(result.trajectory_records))
     print(output_path)
 
 

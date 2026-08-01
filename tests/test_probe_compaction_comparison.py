@@ -94,3 +94,26 @@ def test_trace_collection_forces_answer_after_generated_token_budget(tmp_path: P
     assert '"status": "completed"' in trace
     assert '"final_answer": "best available"' in trace
     assert "Compact the entire preceding task trajectory" not in trace
+    assert "Exact Model Input Token Sequences" in trace
+
+
+def test_exact_model_input_sequence_formatter_uses_collection_generation_ids() -> None:
+    rendered = simulate_collection.format_exact_model_input_sequences(
+        [
+            {
+                "turn_id": "trajectory-1",
+                "collection_tokens": {
+                    "generations": [
+                        {
+                            "index": 0,
+                            "prompt_token_ids": [1, 2, 3],
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+
+    assert "generation 0 input token IDs (count=3" in rendered
+    assert "[1, 2, 3]" in rendered
