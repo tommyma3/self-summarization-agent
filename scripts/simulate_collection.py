@@ -4,6 +4,7 @@ import argparse
 import json
 import random
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -150,7 +151,7 @@ def _analyze_training_lengths(
                     add_generation_prompt=False,
                 )
 
-        if isinstance(rendered, dict):
+        if isinstance(rendered, Mapping):
             full_ids = _coerce_token_ids(rendered.get("input_ids"))
             raw_mask = rendered.get("assistant_masks", rendered.get("assistant_mask"))
             if raw_mask is not None:
