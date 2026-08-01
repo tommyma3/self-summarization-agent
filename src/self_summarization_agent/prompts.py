@@ -182,15 +182,19 @@ def format_tool_response(tool_result: str) -> str:
 
 
 def build_system_prompt() -> str:
-    return """You are an expert research agent. Think first, then output exactly one action:
+    return """You are an expert research agent. Normally, think first, then output exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
-(3) Provide your final answer within <answer> </answer> tags."""
+(3) Provide your final answer within <answer> </answer> tags.
+
+The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not take an action or answer the original question. Compact the preceding task state and, after thinking, output exactly one <summary>...</summary> block. Normal action mode resumes afterward."""
 
 
 def build_native_tool_system_prompt() -> str:
-    return """You are an expert research agent. Use exactly one provided function per turn.
-Use search to find relevant passages, get_document to inspect a selected document, and finish only when you can submit the best-supported final answer."""
+    return """You are an expert research agent. Normally, use exactly one provided function per turn.
+Use search to find relevant passages, get_document to inspect a selected document, and finish only when you can submit the best-supported final answer.
+
+The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not call a function or answer the original question. Compact the preceding task state and output exactly one <summary>...</summary> block. Normal function-calling mode resumes afterward."""
 
 
 def build_forced_answer_prompt() -> str:
@@ -209,7 +213,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """<summary_request>
-Compact the preceding task state into a summary for future steps. Put the summary inside <summary> </summary> tags.
+Compact the preceding task state into a summary for future steps. Put the summary inside <summary>...</summary> tags.
 </summary_request>"""
 
 

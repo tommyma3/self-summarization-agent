@@ -37,7 +37,7 @@ def test_summary_instruction_is_appended_to_unchanged_context() -> None:
     prompt = manager.build_summary_context(state, max_summary_tokens=32)
 
     assert list(prompt.messages[:-1]) == state.messages
-    assert prompt.messages[-1].role == "system"
+    assert prompt.messages[-1].role == "user"
     assert prompt.messages[-1].content.startswith("<summary_request>")
     assert prompt.messages[-1].content.endswith("</summary_request>")
     assert "Compact the preceding task state" in prompt.messages[-1].content

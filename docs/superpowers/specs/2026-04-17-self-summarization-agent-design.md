@@ -194,6 +194,9 @@ The acting prompt should be short and stable. It should instruct the model to:
 - ground claims in retrieved evidence
 - avoid unsupported guesses
 - provide a concise final answer once sufficient evidence has been collected
+- recognize a terminal user `<summary_request>` as a one-turn compaction mode that suppresses normal tool use
+
+The system prompt and tool introduction remain fixed for the entire segment. Compaction does not rerender or remove that prefix; the runtime only appends the user control message and the model's summary completion.
 
 ### Summary Prompt
 
@@ -202,6 +205,8 @@ The summary prompt should be minimal and avoid over-specifying the output. It sh
 - write a clean summary containing only essential information for continuing the task
 - preserve normalized facts, current hypotheses, unresolved questions, and useful next steps
 - keep evidence-grounded facts tied to `doc_id` citations
+
+The runtime appends the summary prompt as a user-role control message. The chat template must not treat that control message as a new task query, so all assistant reasoning since the preceding query or summary remains available to the compaction completion.
 
 There is no explicit summary token cap in the prompt. Overall context budget is enforced by the runtime.
 

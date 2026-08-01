@@ -118,7 +118,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
     ]
 
 
-def test_native_summary_appends_system_control_without_changing_tools_and_keeps_exact_interval_ids() -> None:
+def test_native_summary_appends_user_control_without_changing_tools_and_keeps_exact_interval_ids() -> None:
     model = NativeMetadataModel(
         [
             GenerationResult(
@@ -166,14 +166,14 @@ def test_native_summary_appends_system_control_without_changing_tools_and_keeps_
     assert len(summary_prompt.tools) == 3
     assert summary_prompt.tool_choice == "none"
     assert summary_prompt.messages[0].content == model.prompts[0].messages[0].content
-    assert summary_prompt.messages[-1].role == "system"
+    assert summary_prompt.messages[-1].role == "user"
     assert summary_prompt.messages[-1].content.startswith("<summary_request>")
     assert [message["role"] for message in result.trajectory_records[0]["messages"]] == [
         "system",
         "user",
         "assistant",
         "tool",
-        "system",
+        "user",
         "assistant",
     ]
     assert result.trajectory_records[0]["collection_tokens"]["full_token_ids"] == [3, 10, 4, 11]
@@ -504,7 +504,7 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     compaction_prompt = model.prompts[1]
     assert "retain this reasoning" in compaction_prompt
     assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in compaction_prompt
-    assert "### SYSTEM\n<summary_request>" in compaction_prompt
+    assert "### USER\n<summary_request>" in compaction_prompt
     assert compaction_prompt.rstrip().endswith("</summary_request>")
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary

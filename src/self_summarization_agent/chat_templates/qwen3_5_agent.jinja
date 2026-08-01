@@ -69,7 +69,9 @@
     {%- set index = (messages|length - 1) - loop.index0 %}
     {%- if ns.multi_step_tool and message.role == "user" %}
         {%- set content = render_content(message.content, false)|trim %}
-        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}
+        {%- set is_tool_response = content.startswith('<tool_response>') and content.endswith('</tool_response>') %}
+        {%- set is_summary_request = content.startswith('<summary_request>') and content.endswith('</summary_request>') %}
+        {%- if not is_tool_response and not is_summary_request %}
             {%- set ns.multi_step_tool = false %}
             {%- set ns.last_query_index = index %}
         {%- endif %}
@@ -94,6 +96,16 @@
             {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
         {%- endif %}
     {%- elif message.role == "user" %}
+        {%- set is_summary_request = content.startswith('<summary_request>') and content.endswith('</summary_request>') %}
+        {%- if is_summary_request %}
+            {%- set is_terminal_input = loop.last %}
+            {%- if not loop.last %}
+                {%- set is_terminal_input = loop.index0 == messages|length - 2 and loop.nextitem.role == 'assistant' %}
+            {%- endif %}
+            {%- if not is_terminal_input %}
+                {{- raise_exception('A summary request is allowed only as a terminal runtime-control user message.') }}
+            {%- endif %}
+        {%- endif %}
         {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
     {%- elif message.role == "assistant" %}
         {%- set reasoning_content = '' %}

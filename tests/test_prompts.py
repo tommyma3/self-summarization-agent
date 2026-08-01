@@ -1,6 +1,7 @@
 from self_summarization_agent.models import EpisodeState
 from self_summarization_agent.prompts import (
     build_forced_answer_system_prompt,
+    build_native_tool_system_prompt,
     build_summary_prompt,
     build_summary_system_prompt,
     build_system_prompt,
@@ -33,6 +34,17 @@ def test_system_prompt_lists_normal_action_formats() -> None:
     assert "<search> your query </search>" in prompt
     assert "<document> docid </document>" in prompt
     assert "<answer> </answer>" in prompt
+    assert "<summary_request>" in prompt
+    assert "do not take an action" in prompt
+
+
+def test_native_tool_system_prompt_defines_stable_compaction_exception() -> None:
+    prompt = build_native_tool_system_prompt()
+
+    assert "Normally, use exactly one provided function per turn" in prompt
+    assert "<summary_request>" in prompt
+    assert "do not call a function" in prompt
+    assert "Normal function-calling mode resumes afterward" in prompt
 
 
 def test_tool_result_wrapper_preserves_raw_result_text() -> None:

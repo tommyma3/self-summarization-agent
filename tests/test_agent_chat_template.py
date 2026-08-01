@@ -9,21 +9,31 @@ from self_summarization_agent.prompts import build_forced_answer_prompt, build_s
 TEMPLATE_PATH = "src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja"
 
 
-def _render(messages: list[dict], *, add_generation_prompt: bool = True) -> str:
+def _render(
+    messages: list[dict],
+    *,
+    add_generation_prompt: bool = True,
+    tools: list[dict] | None = None,
+) -> str:
     environment = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
     environment.filters["tojson"] = lambda value: json.dumps(value, ensure_ascii=False)
     environment.globals["raise_exception"] = lambda message: (_ for _ in ()).throw(ValueError(message))
     template = environment.from_string(load_chat_template(TEMPLATE_PATH) or "")
     return template.render(
         messages=messages,
-        tools=None,
+        tools=tools,
         add_generation_prompt=add_generation_prompt,
         enable_thinking=True,
         add_vision_id=False,
     )
 
 
-def _history(control: str, *, reasoning_key: str = "reasoning_content") -> list[dict]:
+def _history(
+    control: str,
+    *,
+    control_role: str = "user",
+    reasoning_key: str = "reasoning_content",
+) -> list[dict]:
     return [
         {"role": "system", "content": "policy"},
         {"role": "user", "content": "question"},
@@ -33,12 +43,12 @@ def _history(control: str, *, reasoning_key: str = "reasoning_content") -> list[
             "content": "<tool_response>\n<information>result one</information>\n</tool_response>",
         },
         {"role": "assistant", "content": "<search>second</search>", reasoning_key: "reason two"},
-        {"role": "system", "content": control},
+        {"role": control_role, "content": control},
     ]
 
 
 @pytest.mark.parametrize("reasoning_key", ["reasoning_content", "reasoning"])
-def test_terminal_summary_system_message_preserves_all_interval_reasoning(reasoning_key: str) -> None:
+def test_terminal_summary_user_message_preserves_all_interval_reasoning(reasoning_key: str) -> None:
     rendered = _render(_history(build_summary_prompt(), reasoning_key=reasoning_key))
 
     assert rendered.index("reason one") < rendered.index("result one") < rendered.index("reason two")
@@ -47,7 +57,7 @@ def test_terminal_summary_system_message_preserves_all_interval_reasoning(reason
 
 
 def test_terminal_forced_answer_system_message_preserves_reasoning() -> None:
-    rendered = _render(_history(build_forced_answer_prompt()))
+    rendered = _render(_history(build_forced_answer_prompt(), control_role="system"))
 
     assert "reason one" in rendered
     assert "reason two" in rendered
@@ -70,6 +80,26 @@ def test_completed_segment_allows_control_only_before_final_assistant() -> None:
     assert rendered.rstrip().endswith("<|im_end|>")
 
 
+def test_summary_request_only_appends_tokens_to_the_rendered_tool_segment() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search for evidence.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    messages = _history(build_summary_prompt())
+    rendered_segment = _render(messages[:-1], add_generation_prompt=False, tools=tools)
+    rendered_summary_prompt = _render(messages, tools=tools)
+
+    assert rendered_summary_prompt.startswith(rendered_segment)
+    assert rendered_summary_prompt.count("# Tools") == 1
+    assert rendered_summary_prompt.index("<summary_request>") > len(rendered_segment)
+
+
 def test_rejects_unscoped_noninitial_system_message() -> None:
     messages = [
         {"role": "system", "content": "policy"},
@@ -78,6 +108,14 @@ def test_rejects_unscoped_noninitial_system_message() -> None:
     ]
 
     with pytest.raises(ValueError, match="terminal runtime-control"):
+        _render(messages)
+
+
+def test_rejects_nonterminal_summary_user_message() -> None:
+    messages = _history(build_summary_prompt())
+    messages.append({"role": "user", "content": "continue instead"})
+
+    with pytest.raises(ValueError, match="terminal runtime-control user message"):
         _render(messages)
 
 
