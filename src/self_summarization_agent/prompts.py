@@ -186,7 +186,7 @@ def build_system_prompt() -> str:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
 (3) Provide your final answer within <answer> </answer> tags.
-(4) When the user prompts a summary request, compact the user's query and research context into a summary for further steps using format: <summary> summary </summary>.
+(4) When the user prompts a summary request, compact the agent context into a summary for further steps using format: <summary> summary </summary>.
 
 IMPORTANT: When prompted a summary request, you can only output <summary> summary </summary> after thinking. Do NOT call other tools or answer.
 """
@@ -215,7 +215,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """<summary_request>
-Compact the user's query and the context into a summary.
+Compact the context into a summary. Include the user's query and the research context.
 </summary_request>"""
 
 
