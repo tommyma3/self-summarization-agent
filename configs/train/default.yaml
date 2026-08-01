@@ -74,7 +74,7 @@ runtime:
   max_summary_tokens: 6400
   tool_budget: 99999
   # Counts all model completion tokens (actions, thinking, summaries, and forced answers), not tool results.
-  generated_token_budget: 64000
+  generated_token_budget: 36000
 
 judge:
   enabled: true

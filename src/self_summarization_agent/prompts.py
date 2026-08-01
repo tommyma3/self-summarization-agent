@@ -182,12 +182,14 @@ def format_tool_response(tool_result: str) -> str:
 
 
 def build_system_prompt() -> str:
-    return """You are an expert research agent. Normally, think first, then output exactly one action:
+    return """You are an expert research agent. Think first, then output exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
 (3) Provide your final answer within <answer> </answer> tags.
+(4) When the user prompts a summary request, compact the user's query and research context into a summary for further steps using format: <summary> summary </summary>.
 
-The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not take an action or answer the original question. Compact the preceding task state and, after thinking, output exactly one <summary>...</summary> block. Normal action mode resumes afterward."""
+IMPORTANT: When prompted a summary request, you can only output <summary> summary </summary> after thinking. Do NOT call other tools or answer.
+"""
 
 
 def build_native_tool_system_prompt() -> str:
@@ -213,7 +215,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """<summary_request>
-Compact the preceding task state into a summary for future steps. Put the summary inside <summary>...</summary> tags.
+Compact the user's query and the context into a summary.
 </summary_request>"""
 
 
