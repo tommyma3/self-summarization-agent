@@ -118,7 +118,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
     ]
 
 
-def test_native_summary_uses_no_tools_and_keeps_exact_interval_ids() -> None:
+def test_native_summary_appends_system_control_without_changing_tools_and_keeps_exact_interval_ids() -> None:
     model = NativeMetadataModel(
         [
             GenerationResult(
@@ -163,9 +163,19 @@ def test_native_summary_uses_no_tools_and_keeps_exact_interval_ids() -> None:
     assert result.final_answer == "done"
     assert result.summary_turns == ["summary-1"]
     summary_prompt = model.prompts[1]
-    assert summary_prompt.tools == ()
+    assert len(summary_prompt.tools) == 3
     assert summary_prompt.tool_choice == "none"
-    assert "Do not call tools" in summary_prompt.messages[0].content
+    assert summary_prompt.messages[0].content == model.prompts[0].messages[0].content
+    assert summary_prompt.messages[-1].role == "system"
+    assert summary_prompt.messages[-1].content.startswith("<summary_request>")
+    assert [message["role"] for message in result.trajectory_records[0]["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "system",
+        "assistant",
+    ]
     assert result.trajectory_records[0]["collection_tokens"]["full_token_ids"] == [3, 10, 4, 11]
     assert result.trajectory_records[0]["collection_tokens"]["assistant_token_mask"] == [
         False,
@@ -494,9 +504,8 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     compaction_prompt = model.prompts[1]
     assert "retain this reasoning" in compaction_prompt
     assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in compaction_prompt
-    assert compaction_prompt.rstrip().endswith(
-        "Think first. After </think>, put only the compressed state inside <summary>...</summary>."
-    )
+    assert "### SYSTEM\n<summary_request>" in compaction_prompt
+    assert compaction_prompt.rstrip().endswith("</summary_request>")
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
     assert "### USER\nsummary of the task and old-doc" in acting_prompt_after_summary
@@ -652,6 +661,9 @@ def test_runtime_completed_result_feeds_trajectory_extraction() -> None:
 
     assert [sample.turn_id for sample in samples] == ["trajectory-1", "trajectory-2"]
     assert [sample.reward for sample in samples] == [1.0, 1.0]
+    assert [record["segment_index"] for record in result.trajectory_records] == [1, 2]
+    assert result.trajectory_records[0]["prefix_summary_turn_id"] is None
+    assert result.trajectory_records[1]["prefix_summary_turn_id"] == "summary-1"
 
 
 def test_runtime_forces_final_answer_after_tool_limit() -> None:
@@ -678,10 +690,10 @@ def test_runtime_forces_final_answer_after_tool_limit() -> None:
     assert result.turn_records[-1]["kind"] == "final_answer"
     assert "final-answer boundary" in model.prompts[1]
     assert "Tool Budget Remaining" not in model.prompts[1]
-    assert "Search and document actions are no longer available" in model.prompts[1]
+    assert "### SYSTEM\n<forced_answer_request>" in model.prompts[1]
     interval_messages = result.trajectory_records[0]["messages"]
     assert [message["role"] for message in interval_messages] == [
-        "system", "user", "assistant", "user", "user", "assistant"
+        "system", "user", "assistant", "user", "system", "assistant"
     ]
     assert "final-answer boundary" in interval_messages[-2]["content"]
 
@@ -729,7 +741,7 @@ def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.turn_records[0]["generation_kind"] == "action"
     assert result.turn_records[1]["generation_kind"] == "forced_answer"
-    assert "Search and document actions are no longer available" in model.prompts[1]
+    assert "### SYSTEM\n<forced_answer_request>" in model.prompts[1]
 
 
 def test_runtime_counts_summary_tokens_toward_generated_token_budget() -> None:

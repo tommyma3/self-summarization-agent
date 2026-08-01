@@ -5,6 +5,7 @@ from self_summarization_agent.prompts import (
     build_summary_system_prompt,
     build_system_prompt,
     format_tool_result,
+    format_tool_response,
 )
 
 
@@ -12,8 +13,9 @@ def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     prompt = build_forced_answer_system_prompt()
     assert "final-answer boundary" in prompt
     assert "Tool Budget Remaining" not in prompt
-    assert "Search and document actions are no longer available" in prompt
     assert "<answer>best supported answer</answer>" in prompt
+    assert prompt.startswith("<forced_answer_request>")
+    assert prompt.endswith("</forced_answer_request>")
 
 
 def test_build_summary_system_prompt_is_concise_and_requires_wrappers() -> None:
@@ -21,7 +23,8 @@ def test_build_summary_system_prompt_is_concise_and_requires_wrappers() -> None:
 
     assert "2048" not in prompt
     assert "<summary>...</summary>" in prompt
-    assert "compressed state" in prompt
+    assert prompt.startswith("<summary_request>")
+    assert prompt.endswith("</summary_request>")
 
 
 def test_system_prompt_lists_normal_action_formats() -> None:
@@ -34,6 +37,9 @@ def test_system_prompt_lists_normal_action_formats() -> None:
 
 def test_tool_result_wrapper_preserves_raw_result_text() -> None:
     assert format_tool_result("raw </tag> body") == "<information>raw </tag> body</information>"
+    assert format_tool_response("raw </tag> body") == (
+        "<tool_response>\n<information>raw </tag> body</information>\n</tool_response>"
+    )
 
 
 def test_episode_state_starts_with_empty_summary() -> None:

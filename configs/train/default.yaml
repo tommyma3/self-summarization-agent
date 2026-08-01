@@ -43,6 +43,7 @@ model:
   do_sample: true
   trust_remote_code: false
   enable_thinking: true
+  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
 
 rollout:
   backend: openai_compatible

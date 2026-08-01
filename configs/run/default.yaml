@@ -34,6 +34,7 @@ model:
   do_sample: false
   trust_remote_code: false
   enable_thinking: true
+  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
   api_base_url: http://127.0.0.1:8000/v1
   api_model: /124090467/Qwen/Qwen3.5-9B
   api_key_env: OPENAI_API_KEY

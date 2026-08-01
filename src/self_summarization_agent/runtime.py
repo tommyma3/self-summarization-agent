@@ -12,13 +12,11 @@ from self_summarization_agent.models import EpisodeState, Message, RuntimeResult
 from self_summarization_agent.prompts import (
     ACTION_TOOLS,
     ConversationPrompt,
-    FORCED_ANSWER_TOOLS,
     FORCED_FINISH_TOOL_CHOICE,
     build_compacted_messages,
     build_forced_answer_prompt,
     build_initial_messages,
-    build_native_summary_system_prompt,
-    format_tool_result,
+    format_tool_response,
     serialize_messages,
 )
 from self_summarization_agent.rewards import (
@@ -353,24 +351,15 @@ class EpisodeRuntime:
 
     def _build_forced_answer_prompt(self, active: _ActiveEpisode) -> ConversationPrompt:
         messages = list(active.state.messages)
+        messages.append(Message(role="system", content=build_forced_answer_prompt()))
         if self._uses_native_tools:
-            messages.append(
-                Message(
-                    role="user",
-                    content=(
-                        "The final-answer boundary has been reached. Call finish now with the "
-                        "best-supported answer. Do not call any retrieval tool."
-                    ),
-                )
-            )
             return ConversationPrompt(
                 messages,
-                tools=FORCED_ANSWER_TOOLS,
+                tools=ACTION_TOOLS,
                 tool_choice=FORCED_FINISH_TOOL_CHOICE,
                 parallel_tool_calls=False,
                 generation_kind="forced_answer",
             )
-        messages.append(Message(role="user", content=build_forced_answer_prompt()))
         return ConversationPrompt(messages, generation_kind="forced_answer")
 
     def _next_tool_turn_id(self, state: EpisodeState) -> str:
@@ -459,6 +448,8 @@ class EpisodeRuntime:
             "schema_version": 2,
             "query_id": active.state.query_id,
             "turn_id": trajectory_id,
+            "segment_index": len(active.trajectory_records) + 1,
+            "prefix_summary_turn_id": active.summary_turns[-1] if active.summary_turns else None,
             "kind": "trajectory",
             "termination_kind": termination_kind,
             "messages": serialized_messages,
@@ -878,7 +869,7 @@ class EpisodeRuntime:
             )
         else:
             state.messages.append(Message(role="assistant", content=action.raw_output))
-            state.messages.append(Message(role="user", content=format_tool_result(tool_result)))
+            state.messages.append(Message(role="user", content=format_tool_response(tool_result)))
 
     def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
         search_actions = [action for action in actions if action.tool_name == "search"]
@@ -1012,14 +1003,9 @@ class EpisodeRuntime:
             max_summary_tokens=self.max_summary_tokens,
         )
         if self._uses_native_tools:
-            summary_messages = list(prompt.messages)
-            if summary_messages and summary_messages[0].role == "system":
-                summary_messages[0] = Message(
-                    role="system",
-                    content=build_native_summary_system_prompt(),
-                )
             prompt = ConversationPrompt(
-                summary_messages,
+                prompt.messages,
+                tools=ACTION_TOOLS,
                 tool_choice="none",
                 parallel_tool_calls=False,
                 generation_kind="summary",

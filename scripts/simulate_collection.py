@@ -20,7 +20,7 @@ from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir, utc_timestamp
-from self_summarization_agent.models import Message
+from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import ConversationPrompt
 from self_summarization_agent.runtime import EpisodeRuntime
 
@@ -219,6 +219,27 @@ def write_section(handle: TextIO, title: str, body: str = "") -> None:
         handle.write(body)
         if not body.endswith("\n"):
             handle.write("\n")
+
+
+def _message_from_record(message: Mapping[str, Any]) -> Message:
+    tool_calls: list[ToolCall] = []
+    for raw_tool_call in message.get("tool_calls") or []:
+        function = raw_tool_call.get("function") or {}
+        arguments = function.get("arguments") or {}
+        tool_calls.append(
+            ToolCall(
+                id=str(raw_tool_call.get("id") or ""),
+                name=str(function.get("name") or ""),
+                arguments=dict(arguments) if isinstance(arguments, Mapping) else {},
+            )
+        )
+    return Message(
+        role=message["role"],
+        content=str(message.get("content") or ""),
+        reasoning_content=message.get("reasoning_content"),
+        tool_calls=tool_calls,
+        tool_call_id=message.get("tool_call_id"),
+    )
 
 
 def write_key_values(handle: TextIO, values: dict[str, Any]) -> None:
@@ -807,7 +828,7 @@ def trace_collection(
         write_context_summary(handle, result=result, runtime=runtime)
 
         for index, record in enumerate(result.trajectory_records, start=1):
-            messages = [Message(role=message["role"], content=message["content"]) for message in record["messages"]]
+            messages = [_message_from_record(message) for message in record["messages"]]
             prompt = ConversationPrompt(messages)
             write_prompt(
                 handle,

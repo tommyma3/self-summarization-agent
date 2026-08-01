@@ -17,7 +17,8 @@ except ImportError:
     AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
-from self_summarization_agent.prompts import ConversationPrompt
+from self_summarization_agent.chat_template import configure_tokenizer_chat_template
+from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
 from self_summarization_agent.trajectory import RLSample, TOKEN_CACHE_VERSION, tokenize_interval_messages
 
 
@@ -435,6 +436,7 @@ class TransformersPolicyTrainer:
             self.model_config.model_path,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+        configure_tokenizer_chat_template(self.tokenizer, self.model_config.chat_template_path)
         if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         self.model = AutoModelForMultimodalLM.from_pretrained(
@@ -480,7 +482,7 @@ class TransformersPolicyTrainer:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
         if isinstance(prompt, ConversationPrompt):
-            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+            messages = serialize_messages(prompt.messages)
         else:
             messages = [{"role": "user", "content": prompt}]
         try:
@@ -748,6 +750,7 @@ class FSDP2ContextParallelPolicyTrainer:
             self.model_config.model_path,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+        configure_tokenizer_chat_template(self.tokenizer, self.model_config.chat_template_path)
         if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         self.model = AutoModelForMultimodalLM.from_pretrained(

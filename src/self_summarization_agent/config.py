@@ -68,6 +68,7 @@ class ModelConfig:
     max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = True
+    chat_template_path: str | None = None
     language_model_only: bool = False
     api_base_url: str | None = None
     api_model: str | None = None

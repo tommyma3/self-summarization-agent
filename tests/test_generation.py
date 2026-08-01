@@ -323,6 +323,7 @@ def test_openai_compatible_generator_preserves_native_tools_and_exact_ids(monkey
     def fake_init(self) -> None:
         self.tokenizer = ApiTokenizer()
         self.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+        self.chat_template = "custom agent template"
 
     monkeypatch.setattr(OpenAICompatibleGenerator, "__post_init__", fake_init)
     generator = OpenAICompatibleGenerator(
@@ -350,3 +351,4 @@ def test_openai_compatible_generator_preserves_native_tools_and_exact_ids(monkey
     assert requests[0]["parallel_tool_calls"] is False
     assert requests[0]["extra_body"]["return_token_ids"] is True
     assert requests[0]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert requests[0]["extra_body"]["chat_template"] == "custom agent template"

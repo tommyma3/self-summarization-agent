@@ -17,6 +17,7 @@ except ImportError:
     AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
 
 from self_summarization_agent.config import JudgeConfig, ModelConfig
+from self_summarization_agent.chat_template import configure_tokenizer_chat_template
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
 
@@ -67,6 +68,7 @@ class TransformersGenerator:
     device_map: str = "auto"
     trust_remote_code: bool = False
     enable_thinking: bool = False
+    chat_template_path: str | None = None
     tokenizer: Any = field(init=False)
     model: Any = field(init=False)
 
@@ -76,6 +78,7 @@ class TransformersGenerator:
             self.model_path,
             trust_remote_code=self.trust_remote_code,
         )
+        configure_tokenizer_chat_template(self.tokenizer, self.chat_template_path)
         if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         self.model = _load_transformers_model(
@@ -96,7 +99,7 @@ class TransformersGenerator:
         if not getattr(self.tokenizer, "chat_template", None):
             return prompt
         if isinstance(prompt, ConversationPrompt):
-            messages = [{"role": message.role, "content": message.content} for message in prompt.messages]
+            messages = serialize_messages(prompt.messages)
         else:
             messages = [{"role": "user", "content": prompt}]
         try:
@@ -218,8 +221,10 @@ class OpenAICompatibleGenerator:
     require_exact_token_ids: bool = True
     trust_remote_code: bool = False
     enable_thinking: bool = True
+    chat_template_path: str | None = None
     tokenizer: Any = field(init=False)
     client: Any = field(init=False)
+    chat_template: str | None = field(init=False, default=None)
     supports_native_tools: bool = field(init=False, default=True)
 
     def __post_init__(self) -> None:
@@ -237,6 +242,7 @@ class OpenAICompatibleGenerator:
             self.model_path,
             trust_remote_code=self.trust_remote_code,
         )
+        self.chat_template = configure_tokenizer_chat_template(self.tokenizer, self.chat_template_path)
         self.client = OpenAI(
             api_key=os.environ.get(self.api_key_env) or "EMPTY",
             base_url=self.api_base_url,
@@ -299,6 +305,9 @@ class OpenAICompatibleGenerator:
         template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
         template_kwargs["enable_thinking"] = self.enable_thinking
         extra_body["chat_template_kwargs"] = template_kwargs
+        chat_template = getattr(self, "chat_template", None)
+        if chat_template is not None:
+            extra_body["chat_template"] = chat_template
         if self.require_exact_token_ids:
             extra_body["return_token_ids"] = True
         if extra_body:
@@ -419,6 +428,7 @@ class VLLMGenerator:
     max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = False
+    chat_template_path: str | None = None
     language_model_only: bool = False
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
@@ -439,6 +449,7 @@ class VLLMGenerator:
             self.model_path,
             trust_remote_code=self.trust_remote_code,
         )
+        configure_tokenizer_chat_template(self.tokenizer, self.chat_template_path)
         llm_kwargs = {
             "model": self.model_path,
             "trust_remote_code": self.trust_remote_code,
@@ -573,6 +584,7 @@ class SGLangGenerator:
     max_model_len: int | None = None
     trust_remote_code: bool = False
     enable_thinking: bool = False
+    chat_template_path: str | None = None
     tokenizer: Any = field(init=False)
     engine: Any = field(init=False)
 
@@ -587,6 +599,7 @@ class SGLangGenerator:
             self.model_path,
             trust_remote_code=self.trust_remote_code,
         )
+        configure_tokenizer_chat_template(self.tokenizer, self.chat_template_path)
         engine_kwargs = {
             "model_path": self.model_path,
             "dtype": self.dtype,
@@ -781,6 +794,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             device_map=model_config.device_map,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
+            chat_template_path=model_config.chat_template_path,
         )
     if backend_name in {"vllm", "vllm_offline"}:
         return VLLMGenerator(
@@ -794,6 +808,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             max_model_len=max_model_len,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
+            chat_template_path=model_config.chat_template_path,
             language_model_only=model_config.language_model_only,
         )
     if backend_name in {"sglang", "sglang_offline"}:
@@ -809,6 +824,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             max_model_len=max_model_len,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
+            chat_template_path=model_config.chat_template_path,
         )
     if backend_name in {"openai", "openai_compatible", "openai-compatible"}:
         if not model_config.api_base_url:
@@ -829,6 +845,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             require_exact_token_ids=model_config.require_exact_token_ids,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
+            chat_template_path=model_config.chat_template_path,
         )
     raise ValueError(f"Unsupported model backend: {model_config.backend}")
 
