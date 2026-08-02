@@ -77,6 +77,16 @@ def _per_1k(correct: int, tokens: float) -> float:
     return correct / (tokens / 1000.0) if tokens > 0 else 0.0
 
 
+def _common_row_value(rows: list[dict[str, Any]], field: str) -> Any:
+    values = [row.get(field) for row in rows]
+    if not values:
+        return None
+    first = values[0]
+    if any(value != first for value in values[1:]):
+        raise ValueError(f"Eval rollouts contain multiple {field} values")
+    return first
+
+
 def write_eval_metrics(
     *,
     judged_rollout_path: str | Path,
@@ -85,12 +95,19 @@ def write_eval_metrics(
     policy_checkpoint_id: str,
 ) -> dict[str, Any]:
     output = Path(metrics_path)
+    rows = _load_rows(judged_rollout_path)
+    sampling_profile_id = _common_row_value(rows, "sampling_profile_id")
+    sampling_profile = _common_row_value(rows, "sampling_profile")
+    samples_per_task = _common_row_value(rows, "rollout_samples_per_task")
     if output.exists():
         for row in _load_rows(output):
-            if row.get("iteration") == iteration and row.get("policy_checkpoint_id") == policy_checkpoint_id:
+            if (
+                row.get("iteration") == iteration
+                and row.get("policy_checkpoint_id") == policy_checkpoint_id
+                and row.get("eval_sampling_profile_id") == sampling_profile_id
+            ):
                 return row
 
-    rows = _load_rows(judged_rollout_path)
     correct = 0
     malformed = 0
     empty_summary = 0
@@ -134,6 +151,9 @@ def write_eval_metrics(
         "iteration": iteration,
         "timestamp_utc": utc_timestamp(),
         "policy_checkpoint_id": policy_checkpoint_id,
+        "eval_sampling_profile_id": sampling_profile_id,
+        "eval_sampling_profile": sampling_profile,
+        "eval_samples_per_task": samples_per_task,
         "eval_accuracy": correct / total if total else 0.0,
         "eval_correct": correct,
         "eval_total": total,

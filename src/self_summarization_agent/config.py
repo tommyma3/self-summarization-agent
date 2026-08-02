@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 from dataclasses import asdict, dataclass, field
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +122,16 @@ class CollectionConfig:
 
 
 @dataclass(slots=True)
+class EvaluationConfig:
+    samples_per_task: int = 1
+    max_new_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    do_sample: bool | None = None
+    extra_sampling_params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class JudgeConfig:
     enabled: bool = True
     backend: str | None = None
@@ -213,6 +225,7 @@ class TrainConfig:
     training: TrainingConfig
     collection: CollectionConfig = field(default_factory=CollectionConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
 
 
 def _parse_override_value(raw_value: str) -> Any:
@@ -323,8 +336,48 @@ def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None)
         training=training,
         collection=CollectionConfig(**_require_section(raw, "collection")),
         rollout=_derive_rollout_config(raw, training),
+        evaluation=EvaluationConfig(**_require_section(raw, "evaluation")),
     )
 
 
 def config_to_dict(config: RunConfig | TrainConfig) -> dict[str, Any]:
     return asdict(config)
+
+
+def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dict[str, Any]:
+    if split not in {"train", "eval"}:
+        raise ValueError(f"Unsupported rollout split: {split}")
+
+    profile = {
+        "max_new_tokens": (
+            config.rollout.max_new_tokens
+            if config.rollout.max_new_tokens is not None
+            else config.model.max_new_tokens
+        ),
+        "temperature": (
+            config.rollout.temperature
+            if config.rollout.temperature is not None
+            else config.model.temperature
+        ),
+        "top_p": config.rollout.top_p if config.rollout.top_p is not None else config.model.top_p,
+        "do_sample": (
+            config.rollout.do_sample
+            if config.rollout.do_sample is not None
+            else config.model.do_sample
+        ),
+        "api_extra_body": dict(config.rollout.api_extra_body),
+        "extra_sampling_params": {},
+    }
+    if split == "eval":
+        evaluation = config.evaluation
+        for key in ("max_new_tokens", "temperature", "top_p", "do_sample"):
+            value = getattr(evaluation, key)
+            if value is not None:
+                profile[key] = value
+        profile["extra_sampling_params"].update(evaluation.extra_sampling_params)
+    return profile
+
+
+def sampling_profile_id(profile: dict[str, Any]) -> str:
+    canonical = json.dumps(profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

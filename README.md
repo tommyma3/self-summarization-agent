@@ -278,6 +278,9 @@ For the intended GPU run:
 - combined collection starts one overlap judge worker, then reuses one OpenAI-compatible client for evaluation and training rollouts against the externally served policy checkpoint
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through the selected engine
 - rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
+- `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; the default Qwen3.5 thinking profile uses `temperature: 1.0`, `top_p: 0.95`, and the documented `top_k`, `min_p`, presence-penalty, and repetition-penalty settings
+- eval sampling overrides are applied to the already-loaded rollout generator and restored before training collection, so specialization does not reload the policy model or change the shared-engine phase order
+- raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` loads the rollout checkpoint and writes v4 sparse interval caches from the exact collection IDs, with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v4 rows are preserved and older cache versions are regenerated as v4
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias

@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from self_summarization_agent.config import load_run_config, load_train_config
+from self_summarization_agent.config import (
+    load_run_config,
+    load_train_config,
+    resolved_rollout_sampling_profile,
+)
 
 
 def test_load_run_config_applies_overrides(tmp_path: Path) -> None:
@@ -85,6 +89,14 @@ judge:
 collection:
   train_task_count: 25
   eval_task_count: 5
+evaluation:
+  samples_per_task: 2
+  temperature: 1.0
+  top_p: 0.95
+  do_sample: true
+  extra_sampling_params:
+    top_k: 20
+    presence_penalty: 1.5
 training:
   backend: fsdp2_context_parallel
   gpu_ids: [0, 1, 2, 3]
@@ -107,6 +119,15 @@ training:
     assert config.runtime.generated_token_budget == 16
     assert config.collection.train_task_count == 25
     assert config.collection.eval_task_count == 5
+    assert config.evaluation.samples_per_task == 2
+    assert resolved_rollout_sampling_profile(config, split="eval") == {
+        "max_new_tokens": 512,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "do_sample": True,
+        "api_extra_body": {},
+        "extra_sampling_params": {"top_k": 20, "presence_penalty": 1.5},
+    }
     assert config.training.steps == 3
     assert config.training.batch_size == 2
     assert config.training.group_size == 2
@@ -222,6 +243,14 @@ def test_load_no_compact_32k_training_preset() -> None:
     assert config.runtime.generated_token_budget == 32_768
     assert config.rollout.max_model_len == 49_152
     assert config.rollout.max_concurrent_episodes == 8
+    assert config.evaluation.temperature == 1.0
+    assert config.evaluation.top_p == 0.95
+    assert config.evaluation.extra_sampling_params == {
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.0,
+    }
     assert config.training.backend == "verl_ray"
     assert config.training.verl.worker_backend == "verl_fsdp"
     assert config.training.max_sequence_length == 49_152

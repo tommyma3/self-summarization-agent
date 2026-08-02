@@ -7,6 +7,7 @@ from self_summarization_agent import rollout_collection
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.config import (
     DatasetConfig,
+    EvaluationConfig,
     ExperimentConfig,
     JudgeConfig,
     ModelConfig,
@@ -72,12 +73,27 @@ class FinishingGenerator:
 class BatchRecordingFinishingGenerator:
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
+        self.sampling_profiles: list[dict] = []
+        self.max_new_tokens = 64
+        self.temperature = 0.7
+        self.top_p = 0.95
+        self.do_sample = True
+        self.api_extra_body: dict = {}
 
     def generate(self, prompt: str) -> str:
         return self.generate_batch([prompt])[0]
 
     def generate_batch(self, prompts: list[str]) -> list[str]:
         self.batch_sizes.append(len(prompts))
+        self.sampling_profiles.append(
+            {
+                "max_new_tokens": self.max_new_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "do_sample": self.do_sample,
+                "api_extra_body": dict(self.api_extra_body),
+            }
+        )
         return [tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}') for _ in prompts]
 
     def count_tokens(self, text: str) -> int:
@@ -260,6 +276,7 @@ def test_collect_rollouts_uses_collection_eval_task_count(tmp_path: Path) -> Non
     config.dataset.eval_limit = 3
     config.training.group_size = 1
     config.collection.eval_task_count = 2
+    config.evaluation.samples_per_task = 2
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     examples = [
@@ -279,7 +296,13 @@ def test_collect_rollouts_uses_collection_eval_task_count(tmp_path: Path) -> Non
     )
 
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert [row["query_id"] for row in rows] == ["q2", "q3"]
+    assert [(row["query_id"], row["rollout_index"]) for row in rows] == [
+        ("q2", 0),
+        ("q2", 1),
+        ("q3", 0),
+        ("q3", 1),
+    ]
+    assert {row["rollout_samples_per_task"] for row in rows} == {2}
 
 
 def test_collect_eval_then_train_reuses_generator_and_overlaps_judging(tmp_path: Path) -> None:
@@ -288,6 +311,16 @@ def test_collect_eval_then_train_reuses_generator_and_overlaps_judging(tmp_path:
     config.dataset.train_limit = 2
     config.dataset.eval_limit = 1
     config.training.group_size = 2
+    config.rollout.max_new_tokens = 64
+    config.rollout.temperature = 0.7
+    config.rollout.top_p = 0.95
+    config.rollout.do_sample = True
+    config.evaluation = EvaluationConfig(
+        temperature=1.0,
+        top_p=0.95,
+        do_sample=True,
+        extra_sampling_params={"top_k": 20, "presence_penalty": 1.5},
+    )
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     examples = [
@@ -314,6 +347,24 @@ def test_collect_eval_then_train_reuses_generator_and_overlaps_judging(tmp_path:
     )
 
     assert generator.batch_sizes == [1, 4]
+    assert generator.sampling_profiles == [
+        {
+            "max_new_tokens": 64,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "do_sample": True,
+            "api_extra_body": {"top_k": 20, "presence_penalty": 1.5},
+        },
+        {
+            "max_new_tokens": 64,
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "do_sample": True,
+            "api_extra_body": {},
+        },
+    ]
+    assert generator.temperature == 0.7
+    assert generator.api_extra_body == {}
     eval_rows = [json.loads(line) for line in eval_output.read_text(encoding="utf-8").splitlines()]
     train_rows = [json.loads(line) for line in train_output.read_text(encoding="utf-8").splitlines()]
     eval_judged_rows = [
@@ -327,6 +378,53 @@ def test_collect_eval_then_train_reuses_generator_and_overlaps_judging(tmp_path:
     assert len(eval_judged_rows) == 1
     assert len(train_judged_rows) == 4
     assert {row["policy_checkpoint_id"] for row in eval_rows + train_rows} == {"step-00001"}
+    assert {row["sampling_profile"]["temperature"] for row in eval_rows} == {1.0}
+    assert {row["sampling_profile"]["temperature"] for row in train_rows} == {0.7}
+    assert {row["sampling_profile_id"] for row in eval_rows}.isdisjoint(
+        {row["sampling_profile_id"] for row in train_rows}
+    )
+
+
+def test_eval_resume_rejects_a_different_sampling_profile(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.dataset.limit = 2
+    config.dataset.train_limit = 1
+    config.dataset.eval_limit = 1
+    config.evaluation.temperature = 1.0
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    examples = [
+        QueryExample(query_id=f"q{index}", query=f"question {index}", answer="done")
+        for index in range(2)
+    ]
+    output_path = tmp_path / "eval.raw.jsonl"
+
+    collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=output_path,
+        examples=examples,
+        backend=FakeBackend(search_index={}, documents={}),
+        generator=FinishingGenerator(),
+        split="eval",
+    )
+    config.evaluation.temperature = 0.6
+
+    try:
+        collect_rollouts(
+            config,
+            checkpoint_path=checkpoint,
+            output_path=output_path,
+            examples=examples,
+            backend=FakeBackend(search_index={}, documents={}),
+            generator=FinishingGenerator(),
+            split="eval",
+            resume=True,
+        )
+    except ValueError as exc:
+        assert "sampling profile" in str(exc)
+    else:
+        raise AssertionError("Expected resume to reject eval rows from another sampling profile")
 
 
 def test_build_rollout_generator_enables_prefix_caching_only_for_collection(

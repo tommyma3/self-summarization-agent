@@ -64,6 +64,7 @@ class TransformersGenerator:
     temperature: float
     top_p: float
     do_sample: bool
+    sampling_extra: dict[str, Any] = field(default_factory=dict)
     dtype: str = "auto"
     device_map: str = "auto"
     trust_remote_code: bool = False
@@ -127,6 +128,7 @@ class TransformersGenerator:
         if self.do_sample:
             generation_kwargs["temperature"] = self.temperature
             generation_kwargs["top_p"] = self.top_p
+            generation_kwargs.update(self.sampling_extra)
         with torch.no_grad():
             output_ids = self.model.generate(
                 **encoded,
@@ -423,6 +425,7 @@ class VLLMGenerator:
     temperature: float
     top_p: float
     do_sample: bool
+    sampling_extra: dict[str, Any] = field(default_factory=dict)
     tensor_parallel_size: int = 1
     attention_backend: str | None = None
     max_model_len: int | None = None
@@ -527,6 +530,7 @@ class VLLMGenerator:
         }
         if self.do_sample:
             sampling_kwargs["top_p"] = self.top_p
+            sampling_kwargs.update(self.sampling_extra)
         if include_logprobs:
             sampling_kwargs["logprobs"] = 1
         return sampling_kwargs
@@ -580,6 +584,7 @@ class SGLangGenerator:
     temperature: float
     top_p: float
     do_sample: bool
+    sampling_extra: dict[str, Any] = field(default_factory=dict)
     dtype: str = "auto"
     tensor_parallel_size: int = 1
     attention_backend: str | None = None
@@ -669,6 +674,7 @@ class SGLangGenerator:
         }
         if self.do_sample:
             sampling_params["top_p"] = self.top_p
+            sampling_params.update(self.sampling_extra)
         return sampling_params
 
     def _generate_outputs(self, prompts: list[str], *, return_logprob: bool = False) -> list[dict[str, Any]]:

@@ -16,7 +16,12 @@ from self_summarization_agent.checkpoints import (
     is_vllm_loadable_checkpoint,
     resolve_latest_checkpoint,
 )
-from self_summarization_agent.config import load_train_config, parse_cli_overrides
+from self_summarization_agent.config import (
+    load_train_config,
+    parse_cli_overrides,
+    resolved_rollout_sampling_profile,
+    sampling_profile_id,
+)
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir, utc_timestamp
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
@@ -220,14 +225,14 @@ def _expected_train_rollout_count(config) -> int | None:
 
 def _expected_eval_rollout_count(config) -> int:
     if config.collection.eval_task_count is not None:
-        return config.collection.eval_task_count
+        return config.collection.eval_task_count * config.evaluation.samples_per_task
     if config.dataset.train_limit is None:
         return 0
     if config.dataset.limit is None:
         available_after_train = config.dataset.eval_limit
     else:
         available_after_train = max(0, config.dataset.limit - config.dataset.train_limit)
-    return min(config.dataset.eval_limit, available_after_train)
+    return min(config.dataset.eval_limit, available_after_train) * config.evaluation.samples_per_task
 
 
 def _has_complete_raw_rollouts(
@@ -235,6 +240,7 @@ def _has_complete_raw_rollouts(
     *,
     checkpoint_id: str,
     expected_count: int | None,
+    expected_sampling_profile_id: str | None = None,
 ) -> bool:
     if not path.exists():
         return False
@@ -249,6 +255,11 @@ def _has_complete_raw_rollouts(
                 f"Cannot resume from {path}: row {index} has checkpoint "
                 f"{row.get('policy_checkpoint_id')!r}, expected {checkpoint_id!r}"
             )
+        if (
+            expected_sampling_profile_id is not None
+            and row.get("sampling_profile_id") != expected_sampling_profile_id
+        ):
+            return False
         if "turn_rewards" in row:
             raise ValueError(f"Cannot resume from {path}: row {index} is already judged")
         if not isinstance(row.get("query_id"), str):
@@ -270,6 +281,7 @@ def _has_complete_judged_rollouts(
     checkpoint_id: str,
     expected_count: int | None,
     require_judge: bool,
+    expected_sampling_profile_id: str | None = None,
 ) -> bool:
     if not path.exists():
         return False
@@ -284,6 +296,11 @@ def _has_complete_judged_rollouts(
                 f"Cannot resume from {path}: row {index} has checkpoint "
                 f"{row.get('policy_checkpoint_id')!r}, expected {checkpoint_id!r}"
             )
+        if (
+            expected_sampling_profile_id is not None
+            and row.get("sampling_profile_id") != expected_sampling_profile_id
+        ):
+            return False
         if not isinstance(row.get("turn_records"), list):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_records")
         if not isinstance(row.get("trajectory_records"), list):
@@ -437,11 +454,21 @@ def _has_inline_cached_rollouts(
     return True
 
 
-def _has_eval_metrics(metrics_path: Path, *, iteration: int, policy_checkpoint_id: str) -> bool:
+def _has_eval_metrics(
+    metrics_path: Path,
+    *,
+    iteration: int,
+    policy_checkpoint_id: str,
+    expected_sampling_profile_id: str,
+) -> bool:
     if not metrics_path.exists():
         return False
     for row in _load_jsonl(metrics_path):
-        if row.get("iteration") == iteration and row.get("policy_checkpoint_id") == policy_checkpoint_id:
+        if (
+            row.get("iteration") == iteration
+            and row.get("policy_checkpoint_id") == policy_checkpoint_id
+            and row.get("eval_sampling_profile_id") == expected_sampling_profile_id
+        ):
             return True
     return False
 
@@ -493,11 +520,15 @@ def run_checkpoint_evaluation(
     phase_timings_path = train_dir / "phase_timings.jsonl"
     eval_raw_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.raw.jsonl"
     eval_judged_rollout_path = rollouts_dir / f"iteration-{iteration:05d}.eval.jsonl"
+    eval_sampling_profile_id = sampling_profile_id(
+        resolved_rollout_sampling_profile(config, split="eval")
+    )
 
     if resume and _has_eval_metrics(
         eval_metrics_path,
         iteration=iteration,
         policy_checkpoint_id=current.checkpoint_id,
+        expected_sampling_profile_id=eval_sampling_profile_id,
     ):
         return current.path
 
@@ -517,7 +548,6 @@ def run_checkpoint_evaluation(
     if config.rollout.overlap_judge and config.judge.enabled:
         eval_rollout_command.extend(["--judged-output", str(eval_judged_rollout_path)])
     _append_cli_overrides(eval_rollout_command, overrides)
-    eval_rollout_command.extend(["--set", "training.group_size=1"])
     if resume:
         eval_rollout_command.append("--resume")
 
@@ -556,6 +586,7 @@ def run_checkpoint_evaluation(
         eval_raw_rollout_path,
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_count,
+        expected_sampling_profile_id=eval_sampling_profile_id,
     )
     retrieval_worker_process = None
     retrieval_worker_url = None
@@ -587,6 +618,7 @@ def run_checkpoint_evaluation(
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_count,
         require_judge=True,
+        expected_sampling_profile_id=eval_sampling_profile_id,
     )
     if not judged_complete and config.rollout.overlap_judge and config.judge.enabled:
         judged_complete = _has_complete_judged_rollouts(
@@ -594,6 +626,7 @@ def run_checkpoint_evaluation(
             checkpoint_id=current.checkpoint_id,
             expected_count=expected_count,
             require_judge=True,
+            expected_sampling_profile_id=eval_sampling_profile_id,
         )
     _run_or_skip_phase(
         phase="eval_judge",
@@ -608,6 +641,7 @@ def run_checkpoint_evaluation(
         eval_metrics_path,
         iteration=iteration,
         policy_checkpoint_id=current.checkpoint_id,
+        expected_sampling_profile_id=eval_sampling_profile_id,
     )
     _run_or_skip_phase(
         phase="eval_metrics",
@@ -649,6 +683,9 @@ def run_training_iteration(
     eval_iteration = iteration - 1
     eval_raw_rollout_path = rollouts_dir / f"iteration-{eval_iteration:05d}.eval.raw.jsonl"
     eval_judged_rollout_path = rollouts_dir / f"iteration-{eval_iteration:05d}.eval.jsonl"
+    eval_sampling_profile_id = sampling_profile_id(
+        resolved_rollout_sampling_profile(config, split="eval")
+    )
     next_checkpoint = checkpoints_dir / f"iteration-{iteration:05d}"
     training_already_advanced = should_resume and current.checkpoint_id == checkpoint_id_from_path(next_checkpoint)
     eval_checkpoint = current.path
@@ -738,6 +775,7 @@ def run_training_iteration(
             eval_raw_rollout_path,
             checkpoint_id=eval_checkpoint_id,
             expected_count=_expected_eval_rollout_count(config),
+            expected_sampling_profile_id=eval_sampling_profile_id,
         )
     )
     collection_complete = train_raw_complete and eval_raw_complete
@@ -806,6 +844,7 @@ def run_training_iteration(
                 checkpoint_id=eval_checkpoint_id,
                 expected_count=eval_expected_count,
                 require_judge=True,
+                expected_sampling_profile_id=eval_sampling_profile_id,
             )
             if not eval_judged_complete and config.rollout.overlap_judge and config.judge.enabled:
                 eval_judged_complete = _has_complete_judged_rollouts(
@@ -813,6 +852,7 @@ def run_training_iteration(
                     checkpoint_id=eval_checkpoint_id,
                     expected_count=eval_expected_count,
                     require_judge=True,
+                    expected_sampling_profile_id=eval_sampling_profile_id,
                 )
             _run_or_skip_phase(
                 phase="eval_judge",
@@ -827,6 +867,7 @@ def run_training_iteration(
                 eval_metrics_path,
                 iteration=eval_iteration,
                 policy_checkpoint_id=eval_checkpoint_id,
+                expected_sampling_profile_id=eval_sampling_profile_id,
             )
             _run_or_skip_phase(
                 phase="eval_metrics",

@@ -60,6 +60,19 @@ rollout:
   top_p: 0.95
   do_sample: true
 
+evaluation:
+  samples_per_task: 1
+  # Keep checkpoint evaluation on the same Qwen3.5 general-task thinking
+  # profile as the compact training preset.
+  temperature: 1.0
+  top_p: 0.95
+  do_sample: true
+  extra_sampling_params:
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+
 runtime:
   # Effectively disable runtime summarization for the no-compaction baseline.
   context_threshold_tokens: 1000000000

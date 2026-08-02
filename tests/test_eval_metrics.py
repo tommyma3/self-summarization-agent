@@ -54,6 +54,22 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
             ],
         },
     ]
+    sampling_profile = {
+        "max_new_tokens": 8192,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "do_sample": True,
+        "api_extra_body": {},
+        "extra_sampling_params": {"top_k": 20},
+    }
+    for row in rows:
+        row.update(
+            {
+                "sampling_profile_id": "eval-profile-v1",
+                "sampling_profile": sampling_profile,
+                "rollout_samples_per_task": 1,
+            }
+        )
     judged_rollouts.write_text(
         "".join(json.dumps(row) + "\n" for row in rows),
         encoding="utf-8",
@@ -69,6 +85,9 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
 
     assert record["iteration"] == 3
     assert record["policy_checkpoint_id"] == "iteration-00003"
+    assert record["eval_sampling_profile_id"] == "eval-profile-v1"
+    assert record["eval_sampling_profile"] == sampling_profile
+    assert record["eval_samples_per_task"] == 1
     assert record["eval_accuracy"] == 1 / 3
     assert record["eval_correct"] == 1
     assert record["eval_total"] == 3

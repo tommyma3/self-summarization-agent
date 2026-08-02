@@ -85,7 +85,7 @@ def test_build_rollout_command_uses_overlap_judged_output() -> None:
         raw_path=Path("raw.jsonl"),
         judged_path=Path("judged.jsonl"),
         split="eval",
-        overrides={"training.group_size": 1, "rollout.overlap_judge": True},
+        overrides={"evaluation.samples_per_task": 1, "rollout.overlap_judge": True},
         resume=True,
     )
 
@@ -94,7 +94,7 @@ def test_build_rollout_command_uses_overlap_judged_output() -> None:
     assert "--judge-inline" not in command
     assert "--no-overlap-judge" not in command
     assert "--resume" in command
-    assert "training.group_size=1" in command
+    assert "evaluation.samples_per_task=1" in command
     assert "rollout.overlap_judge=true" in command
 
 
@@ -106,7 +106,7 @@ def test_build_judge_command_is_available_as_resume_fallback() -> None:
         raw_path=Path("raw.jsonl"),
         judged_path=Path("judged.jsonl"),
         split="eval",
-        overrides={"training.group_size": 1},
+        overrides={"evaluation.samples_per_task": 1},
     )
 
     assert "self_summarization_agent.judge_step" in command
@@ -114,7 +114,7 @@ def test_build_judge_command_is_available_as_resume_fallback() -> None:
     assert "raw.jsonl" in command
     assert "--output" in command
     assert "judged.jsonl" in command
-    assert "training.group_size=1" in command
+    assert "evaluation.samples_per_task=1" in command
 
 
 def test_run_comparison_writes_manifest_and_summary_with_overlap_commands(tmp_path: Path) -> None:

@@ -236,13 +236,20 @@ def test_vllm_generator_batches_prompts(monkeypatch) -> None:
         temperature=0.7,
         top_p=0.95,
         do_sample=True,
+        sampling_extra={"top_k": 20, "presence_penalty": 1.5},
     )
 
     outputs = generator.generate_batch(["first", "second"])
 
     assert outputs == ["response:first", "response:second"]
     assert generator.llm.prompts == ["first", "second"]
-    assert generator.llm.params.kwargs == {"max_tokens": 16, "temperature": 0.7, "top_p": 0.95}
+    assert generator.llm.params.kwargs == {
+        "max_tokens": 16,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+    }
 
 
 def test_vllm_generator_can_return_generation_metadata(monkeypatch) -> None:

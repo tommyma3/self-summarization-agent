@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import multiprocessing as mp
 from queue import Empty
 from dataclasses import replace
@@ -12,7 +13,12 @@ from typing import Any
 
 from self_summarization_agent.bcplus_backend import build_backend
 from self_summarization_agent.checkpoints import checkpoint_id_from_path, resolve_latest_checkpoint
-from self_summarization_agent.config import load_train_config, parse_cli_overrides
+from self_summarization_agent.config import (
+    load_train_config,
+    parse_cli_overrides,
+    resolved_rollout_sampling_profile,
+    sampling_profile_id,
+)
 from self_summarization_agent.dataset import QueryExample, load_query_examples, split_train_eval_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
@@ -57,6 +63,7 @@ def _load_completed_rollout_keys(
     *,
     checkpoint_id: str,
     expected_keys: set[tuple[str, int]],
+    expected_sampling_profile_id: str | None = None,
     require_exact_token_ids: bool = False,
 ) -> set[tuple[str, int]]:
     if not rollout_path.exists():
@@ -87,6 +94,14 @@ def _load_completed_rollout_keys(
             if key not in expected_keys:
                 raise ValueError(
                     f"Cannot resume {rollout_path}: line {line_number} contains unexpected rollout key {key!r}"
+                )
+            if (
+                expected_sampling_profile_id is not None
+                and row.get("sampling_profile_id") != expected_sampling_profile_id
+            ):
+                raise ValueError(
+                    f"Cannot resume {rollout_path}: line {line_number} has sampling profile "
+                    f"{row.get('sampling_profile_id')!r}, expected {expected_sampling_profile_id!r}"
                 )
             if require_exact_token_ids:
                 trajectory_records = row.get("trajectory_records")
@@ -341,6 +356,30 @@ def _build_rollout_generator(config, checkpoint: Path) -> Any:
     return build_generator(rollout_model_config)
 
 
+@contextmanager
+def _temporary_sampling_profile(generator: Any, profile: dict[str, Any]):
+    previous: dict[str, Any] = {}
+    for field_name in ("max_new_tokens", "temperature", "top_p", "do_sample"):
+        if not hasattr(generator, field_name):
+            continue
+        previous[field_name] = getattr(generator, field_name)
+        setattr(generator, field_name, profile[field_name])
+    extra_sampling_params = dict(profile["extra_sampling_params"])
+    if hasattr(generator, "api_extra_body"):
+        previous["api_extra_body"] = getattr(generator, "api_extra_body")
+        api_extra_body = dict(profile["api_extra_body"])
+        api_extra_body.update(extra_sampling_params)
+        generator.api_extra_body = api_extra_body
+    elif hasattr(generator, "sampling_extra"):
+        previous["sampling_extra"] = getattr(generator, "sampling_extra")
+        generator.sampling_extra = extra_sampling_params
+    try:
+        yield
+    finally:
+        for field_name, value in previous.items():
+            setattr(generator, field_name, value)
+
+
 def collect_rollouts(
     config,
     *,
@@ -405,10 +444,20 @@ def collect_rollouts(
     if not should_overlap_judge:
         overlap_judge_client = None
 
+    rollout_group_size = (
+        config.evaluation.samples_per_task if split == "eval" else config.training.group_size
+    )
+    if rollout_group_size < 1:
+        group_size_key = (
+            "evaluation.samples_per_task" if split == "eval" else "training.group_size"
+        )
+        raise ValueError(f"{group_size_key} must be at least 1, got {rollout_group_size}")
+    sampling_profile = resolved_rollout_sampling_profile(config, split=split)
+    profile_id = sampling_profile_id(sampling_profile)
     rollout_requests = [
         (example, rollout_index)
         for example in selected_examples
-        for rollout_index in range(config.training.group_size)
+        for rollout_index in range(rollout_group_size)
     ]
     expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
     if resume:
@@ -416,6 +465,7 @@ def collect_rollouts(
             rollout_path,
             checkpoint_id=checkpoint_id,
             expected_keys=expected_keys,
+            expected_sampling_profile_id=profile_id if split == "eval" else None,
             require_exact_token_ids=(
                 config.rollout.backend.lower().replace("-", "_") in {"openai", "openai_compatible"}
                 and config.rollout.require_exact_token_ids
@@ -456,47 +506,60 @@ def collect_rollouts(
     generator = generator or _build_rollout_generator(config, checkpoint)
     if judge_inline:
         judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
-    runtime = build_runtime(generator, backend, config.runtime)
-
     try:
-        for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
-            results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
-            overlap_rows: list[dict[str, Any]] = []
-            overlap_examples: list[QueryExample] = []
-            for (example, rollout_index), result in zip(request_batch, results):
-                judge_payload = None
-                trainable_sample_count = None
-                include_rewards = False
-                if judge_inline:
-                    judge_payload = apply_judged_rewards(result, example, judge)
-                    include_rewards = True
-                    trainable_sample_count = len(
-                        extract_trainable_samples(
-                            result.trajectory_records,
-                            result.turn_rewards,
-                            rollout_id=f"{example.query_id}:{rollout_index}",
+        with _temporary_sampling_profile(generator, sampling_profile):
+            runtime = build_runtime(generator, backend, config.runtime)
+            for request_batch in iter_batches(
+                rollout_requests,
+                config.rollout.max_concurrent_episodes,
+            ):
+                results = runtime.run_many(
+                    (example.query_id, example.query) for example, _ in request_batch
+                )
+                overlap_rows: list[dict[str, Any]] = []
+                overlap_examples: list[QueryExample] = []
+                for (example, rollout_index), result in zip(request_batch, results):
+                    judge_payload = None
+                    trainable_sample_count = None
+                    include_rewards = False
+                    if judge_inline:
+                        judge_payload = apply_judged_rewards(result, example, judge)
+                        include_rewards = True
+                        trainable_sample_count = len(
+                            extract_trainable_samples(
+                                result.trajectory_records,
+                                result.turn_rewards,
+                                rollout_id=f"{example.query_id}:{rollout_index}",
+                            )
                         )
-                    )
-                row = {
-                    "policy_checkpoint_id": checkpoint_id,
-                    "policy_checkpoint_path": str(checkpoint),
-                    "rollout_index": rollout_index,
-                    "trainable_sample_count": trainable_sample_count,
-                    **serialize_runtime_result(
-                        result,
-                        query_text=example.query,
-                        judge={**judge_payload, "rollout_index": rollout_index} if judge_payload else None,
-                        include_rewards=include_rewards,
-                    ),
-                }
-                append_jsonl(rollout_path, row)
-                if overlap_judge_client is not None:
-                    overlap_rows.append(row)
-                    overlap_examples.append(example)
-            if overlap_judge_client is not None and overlap_rows:
-                overlap_judge_client.submit(overlap_rows, overlap_examples)
-                for judged_row in overlap_judge_client.drain_available():
-                    append_jsonl(judged_path, judged_row)
+                    row = {
+                        "policy_checkpoint_id": checkpoint_id,
+                        "policy_checkpoint_path": str(checkpoint),
+                        "rollout_split": split,
+                        "rollout_index": rollout_index,
+                        "rollout_samples_per_task": rollout_group_size,
+                        "sampling_profile": sampling_profile,
+                        "sampling_profile_id": profile_id,
+                        "trainable_sample_count": trainable_sample_count,
+                        **serialize_runtime_result(
+                            result,
+                            query_text=example.query,
+                            judge=(
+                                {**judge_payload, "rollout_index": rollout_index}
+                                if judge_payload
+                                else None
+                            ),
+                            include_rewards=include_rewards,
+                        ),
+                    }
+                    append_jsonl(rollout_path, row)
+                    if overlap_judge_client is not None:
+                        overlap_rows.append(row)
+                        overlap_examples.append(example)
+                if overlap_judge_client is not None and overlap_rows:
+                    overlap_judge_client.submit(overlap_rows, overlap_examples)
+                    for judged_row in overlap_judge_client.drain_available():
+                        append_jsonl(judged_path, judged_row)
         if overlap_judge_client is not None:
             for judged_row in overlap_judge_client.finish():
                 append_jsonl(judged_path, judged_row)
@@ -555,11 +618,9 @@ def collect_eval_then_train_rollouts(
             checkpoint_id=checkpoint_id,
         )
     generator = generator or _build_rollout_generator(config, checkpoint)
-    eval_config = replace(config, training=replace(config.training, group_size=1))
-
     try:
         eval_path = collect_rollouts(
-            eval_config,
+            config,
             checkpoint_path=checkpoint,
             output_path=eval_output_path,
             examples=examples,

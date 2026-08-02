@@ -8,6 +8,7 @@ from self_summarization_agent.checkpoints import (
 )
 from self_summarization_agent.config import (
     DatasetConfig,
+    EvaluationConfig,
     ExperimentConfig,
     JudgeConfig,
     ModelConfig,
@@ -16,12 +17,25 @@ from self_summarization_agent.config import (
     RuntimeConfig,
     TrainConfig,
     TrainingConfig,
+    sampling_profile_id,
 )
 from self_summarization_agent.iteration_launcher import (
+    _expected_eval_rollout_count,
     _has_complete_cached_rollouts,
     run_checkpoint_evaluation,
     run_training_iteration,
 )
+
+
+TEST_EVAL_PROFILE = {
+    "max_new_tokens": 512,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "do_sample": True,
+    "api_extra_body": {},
+    "extra_sampling_params": {"top_k": 20},
+}
+TEST_EVAL_PROFILE_ID = sampling_profile_id(TEST_EVAL_PROFILE)
 
 
 def write_fake_checkpoint(path: Path) -> None:
@@ -38,6 +52,8 @@ def write_raw_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
             "policy_checkpoint_id": checkpoint_id,
             "rollout_index": index,
             "query_id": f"q{index}",
+            "sampling_profile": TEST_EVAL_PROFILE,
+            "sampling_profile_id": TEST_EVAL_PROFILE_ID,
             "turn_records": [],
             "trajectory_records": [],
         }
@@ -53,6 +69,8 @@ def write_judged_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
             "policy_checkpoint_id": checkpoint_id,
             "rollout_index": index,
             "query_id": f"q{index}",
+            "sampling_profile": TEST_EVAL_PROFILE,
+            "sampling_profile_id": TEST_EVAL_PROFILE_ID,
             "turn_records": [],
             "trajectory_records": [],
             "turn_rewards": {},
@@ -128,12 +146,21 @@ def test_complete_cached_rollouts_requires_v4_training_cache(tmp_path: Path) -> 
     )
 
 
+def test_expected_eval_rollout_count_includes_samples_per_task(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.collection.eval_task_count = 3
+    config.evaluation.samples_per_task = 2
+
+    assert _expected_eval_rollout_count(config) == 6
+
+
 def write_eval_metric(path: Path, iteration: int, checkpoint_id: str) -> None:
     path.write_text(
         json.dumps(
             {
                 "iteration": iteration,
                 "policy_checkpoint_id": checkpoint_id,
+                "eval_sampling_profile_id": TEST_EVAL_PROFILE_ID,
                 "eval_accuracy": 0.0,
             }
         )
@@ -152,6 +179,12 @@ def train_config(tmp_path: Path) -> TrainConfig:
         runtime=RuntimeConfig(context_threshold_tokens=1000, max_context_tokens=1024, tool_budget=4),
         judge=JudgeConfig(enabled=True),
         training=TrainingConfig(group_size=2),
+        evaluation=EvaluationConfig(
+            temperature=1.0,
+            top_p=0.95,
+            do_sample=True,
+            extra_sampling_params={"top_k": 20},
+        ),
     )
 
 
