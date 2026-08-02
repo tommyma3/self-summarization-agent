@@ -188,7 +188,7 @@ def build_system_prompt() -> str:
 (3) Provide your final answer within <answer> </answer> tags.
 (4) When the user prompts a summary request, compact the agent context into a summary for further steps using format: <summary> summary </summary>.
 
-IMPORTANT: When prompted a summary request, you can only output <summary> summary </summary> after thinking. Do NOT call other tools or answer.
+IMPORTANT: When prompted the summary request, you can only output <summary> summary </summary> after thinking. Do NOT call other tools or answer.
 """
 
 
