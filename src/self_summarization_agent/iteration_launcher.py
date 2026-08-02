@@ -707,15 +707,34 @@ def run_training_iteration(
         "--sample-seed",
         str(config.experiment.seed + iteration),
     ]
-    if config.dataset.eval_limit > 0:
-        rollout_command.extend(["--eval-output", str(eval_raw_rollout_path)])
     if config.rollout.overlap_judge and config.judge.enabled:
         rollout_command.extend(["--judged-output", str(judged_rollout_path)])
-        if config.dataset.eval_limit > 0:
-            rollout_command.extend(["--eval-judged-output", str(eval_judged_rollout_path)])
     _append_cli_overrides(rollout_command, overrides)
     if should_resume:
         rollout_command.append("--resume")
+    # Keep eval and training collection in separate processes. In particular,
+    # vllm_offline must construct a fresh engine from each split's resolved
+    # sampling configuration instead of reusing and mutating one generator.
+    eval_rollout_command = None
+    if config.dataset.eval_limit > 0:
+        eval_rollout_command = [
+            python_executable,
+            "-m",
+            "self_summarization_agent.rollout_collection",
+            "--config",
+            str(config_path),
+            "--checkpoint",
+            str(eval_checkpoint),
+            "--output",
+            str(eval_raw_rollout_path),
+            "--split",
+            "eval",
+        ]
+        if config.rollout.overlap_judge and config.judge.enabled:
+            eval_rollout_command.extend(["--judged-output", str(eval_judged_rollout_path)])
+        _append_cli_overrides(eval_rollout_command, overrides)
+        if should_resume:
+            eval_rollout_command.append("--resume")
     judge_command = [
         python_executable,
         "-m",
@@ -793,15 +812,27 @@ def run_training_iteration(
     try:
         if retrieval_worker_url:
             rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
+            if eval_rollout_command is not None:
+                eval_rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
         try:
+            if eval_rollout_command is not None:
+                _run_or_skip_phase(
+                    phase="eval_rollout",
+                    iteration=iteration,
+                    command=eval_rollout_command,
+                    command_runner=command_runner,
+                    timings_path=phase_timings_path,
+                    completed=eval_raw_complete,
+                    error_message="Eval rollout subprocess",
+                )
             _run_or_skip_phase(
-                phase="eval_train_rollout" if config.dataset.eval_limit > 0 else "train_rollout",
+                phase="train_rollout",
                 iteration=iteration,
                 command=rollout_command,
                 command_runner=command_runner,
                 timings_path=phase_timings_path,
-                completed=collection_complete,
-                error_message="Rollout subprocess",
+                completed=train_raw_complete,
+                error_message="Train rollout subprocess",
             )
         finally:
             _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)

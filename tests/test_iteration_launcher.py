@@ -334,7 +334,9 @@ def test_iteration_launcher_forwards_cli_overrides_to_subprocesses(tmp_path: Pat
     assert all("training.update_epochs=2" in command for command in calls[:4])
 
 
-def test_iteration_launcher_collects_eval_then_train_before_update(tmp_path: Path) -> None:
+def test_iteration_launcher_loads_eval_and_train_rollouts_in_separate_processes(
+    tmp_path: Path,
+) -> None:
     config = train_config(tmp_path)
     config.dataset.train_limit = 1
     config.dataset.eval_limit = 1
@@ -362,15 +364,17 @@ def test_iteration_launcher_collects_eval_then_train_before_update(tmp_path: Pat
 
     assert "self_summarization_agent.rollout_collection" in calls[0]
     assert str(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl") in calls[0]
-    assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[0]
-    assert "--eval-output" in calls[0]
-    assert "self_summarization_agent.judge_step" in calls[1]
-    assert "eval" in calls[1]
-    assert str(initial_checkpoint.resolve()) in calls[1]
-    assert "self_summarization_agent.eval_metrics" in calls[2]
-    assert str(latest_root / "eval_metrics.jsonl") in calls[2]
-    assert calls[2][calls[2].index("--iteration") + 1] == "0"
-    assert calls[2][calls[2].index("--policy-checkpoint-id") + 1] == "iteration-00000"
+    assert "--split" in calls[0] and "eval" in calls[0]
+    assert "self_summarization_agent.rollout_collection" in calls[1]
+    assert str(latest_root / "rollouts" / "iteration-00001.raw.jsonl") in calls[1]
+    assert "--split" not in calls[1]
+    assert "self_summarization_agent.judge_step" in calls[2]
+    assert "eval" in calls[2]
+    assert str(initial_checkpoint.resolve()) in calls[2]
+    assert "self_summarization_agent.eval_metrics" in calls[3]
+    assert str(latest_root / "eval_metrics.jsonl") in calls[3]
+    assert calls[3][calls[3].index("--iteration") + 1] == "0"
+    assert calls[3][calls[3].index("--policy-checkpoint-id") + 1] == "iteration-00000"
     assert "self_summarization_agent.train_step" in calls[-1]
 
 
@@ -472,9 +476,10 @@ def test_iteration_launcher_scopes_retrieval_workers_to_rollout_phases(
     rollout_calls = [command for command in calls if "self_summarization_agent.rollout_collection" in command]
     assert len(worker_starts) == 1
     assert len(worker_stops) == 1
-    assert len(rollout_calls) == 1
+    assert len(rollout_calls) == 2
     assert all("--retrieval-worker-url" in command for command in rollout_calls)
     assert "http://127.0.0.1:12345" in rollout_calls[0]
+    assert "http://127.0.0.1:12345" in rollout_calls[1]
     judge_events = [index for index, event in enumerate(events) if event == "run:self_summarization_agent.judge_step"]
     assert events.index("stop:1") < judge_events[0]
     assert events.index("stop:1") < events.index("run:self_summarization_agent.train_step")
@@ -517,7 +522,7 @@ def test_iteration_launcher_stops_retrieval_worker_when_train_rollout_fails(
             python_executable="python",
         )
     except RuntimeError as exc:
-        assert "Rollout subprocess failed with exit code 7" in str(exc)
+        assert "Train rollout subprocess failed with exit code 7" in str(exc)
     else:
         raise AssertionError("Expected train rollout failure")
 
@@ -797,7 +802,7 @@ def test_iteration_launcher_resume_with_completed_update_collects_missing_preupd
     )
 
     assert "self_summarization_agent.rollout_collection" in calls[0]
-    assert "--eval-output" in calls[0]
+    assert "--split" in calls[0] and "eval" in calls[0]
     assert str(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl") in calls[0]
     assert "--resume" in calls[0]
     assert "self_summarization_agent.judge_step" in calls[1]

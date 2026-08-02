@@ -763,7 +763,13 @@ def _extract_completion_token_logprobs(completion: Any) -> list[float] | None:
     return values
 
 
-def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | None = None) -> TextGenerator:
+def build_generator(
+    model_config: ModelConfig,
+    *,
+    judge_config: JudgeConfig | None = None,
+    sampling_extra: dict[str, Any] | None = None,
+) -> TextGenerator:
+    sampling_extra = dict(sampling_extra or {})
     max_new_tokens = judge_config.max_new_tokens if judge_config else model_config.max_new_tokens
     temperature = judge_config.temperature if judge_config else model_config.temperature
     top_p = judge_config.top_p if judge_config else model_config.top_p
@@ -798,6 +804,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
+            sampling_extra=sampling_extra,
             dtype=model_config.dtype,
             device_map=model_config.device_map,
             trust_remote_code=model_config.trust_remote_code,
@@ -811,6 +818,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
+            sampling_extra=sampling_extra,
             tensor_parallel_size=tensor_parallel_size,
             attention_backend=attention_backend,
             max_model_len=max_model_len,
@@ -827,6 +835,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             temperature=temperature,
             top_p=top_p,
             do_sample=do_sample,
+            sampling_extra=sampling_extra,
             dtype=model_config.dtype,
             tensor_parallel_size=tensor_parallel_size,
             attention_backend=attention_backend,
@@ -850,7 +859,7 @@ def build_generator(model_config: ModelConfig, *, judge_config: JudgeConfig | No
             api_timeout_seconds=model_config.api_timeout_seconds,
             api_max_retries=model_config.api_max_retries,
             api_max_concurrency=model_config.api_max_concurrency,
-            api_extra_body=dict(model_config.api_extra_body),
+            api_extra_body={**model_config.api_extra_body, **sampling_extra},
             require_exact_token_ids=model_config.require_exact_token_ids,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,

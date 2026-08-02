@@ -320,23 +320,18 @@ def _build_overlap_judge_client(
     )
 
 
-def _build_rollout_generator(config, checkpoint: Path) -> Any:
+def _build_rollout_generator(config, checkpoint: Path, *, split: str) -> Any:
     if config.rollout.gpu_ids:
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in config.rollout.gpu_ids)
+    sampling_profile = resolved_rollout_sampling_profile(config, split=split)
     rollout_model_config = replace(
         config.model,
         backend=config.rollout.backend,
         model_path=str(checkpoint),
-        max_new_tokens=config.rollout.max_new_tokens
-        if config.rollout.max_new_tokens is not None
-        else config.model.max_new_tokens,
-        temperature=config.rollout.temperature
-        if config.rollout.temperature is not None
-        else config.model.temperature,
-        top_p=config.rollout.top_p if config.rollout.top_p is not None else config.model.top_p,
-        do_sample=config.rollout.do_sample
-        if config.rollout.do_sample is not None
-        else config.model.do_sample,
+        max_new_tokens=sampling_profile["max_new_tokens"],
+        temperature=sampling_profile["temperature"],
+        top_p=sampling_profile["top_p"],
+        do_sample=sampling_profile["do_sample"],
         tensor_parallel_size=config.rollout.tensor_parallel_size,
         attention_backend=config.rollout.attention_backend,
         max_model_len=config.rollout.max_model_len
@@ -353,7 +348,10 @@ def _build_rollout_generator(config, checkpoint: Path) -> Any:
         api_extra_body=dict(config.rollout.api_extra_body),
         require_exact_token_ids=config.rollout.require_exact_token_ids,
     )
-    return build_generator(rollout_model_config)
+    return build_generator(
+        rollout_model_config,
+        sampling_extra=sampling_profile["extra_sampling_params"],
+    )
 
 
 @contextmanager
@@ -503,7 +501,7 @@ def collect_rollouts(
                 checkpoint_id=checkpoint_id,
             )
             owns_overlap_judge_client = True
-    generator = generator or _build_rollout_generator(config, checkpoint)
+    generator = generator or _build_rollout_generator(config, checkpoint, split=split)
     if judge_inline:
         judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
     try:
@@ -569,106 +567,12 @@ def collect_rollouts(
     return rollout_path
 
 
-def collect_eval_then_train_rollouts(
-    config,
-    *,
-    checkpoint_path: str | Path,
-    eval_output_path: str | Path,
-    train_output_path: str | Path,
-    eval_judged_output_path: str | Path | None = None,
-    train_judged_output_path: str | Path | None = None,
-    examples: list[QueryExample] | None = None,
-    backend: Any | None = None,
-    generator: Any | None = None,
-    judge: Any | None = None,
-    resume: bool = False,
-    overlap_judge: bool | None = None,
-    config_path: str | Path | None = None,
-    overrides: list[str] | None = None,
-    sample_seed: int | None = None,
-    retrieval_worker_url: str | None = None,
-) -> tuple[Path, Path]:
-    checkpoint = Path(checkpoint_path).resolve()
-    checkpoint_id = checkpoint_id_from_path(checkpoint)
-    overrides = list(overrides or [])
-    examples = examples or load_query_examples(
-        config.experiment.bc_plus_root,
-        config.dataset,
-        require_answers=True,
-        seed=config.experiment.seed,
-    )
-
-    # Resource construction order is intentional: retrieval and the judge worker
-    # must start before CUDA visibility is narrowed to the policy rollout GPUs.
-    backend = backend or build_backend(
-        config.experiment.bc_plus_root,
-        config.retrieval,
-        worker_url=retrieval_worker_url,
-    )
-    should_overlap_judge = bool(
-        (eval_judged_output_path is not None or train_judged_output_path is not None)
-        and (config.rollout.overlap_judge if overlap_judge is None else overlap_judge)
-    )
-    shared_judge_client = None
-    if should_overlap_judge:
-        shared_judge_client = _build_overlap_judge_client(
-            judge=judge,
-            config_path=config_path,
-            overrides=overrides,
-            checkpoint_id=checkpoint_id,
-        )
-    generator = generator or _build_rollout_generator(config, checkpoint)
-    try:
-        eval_path = collect_rollouts(
-            config,
-            checkpoint_path=checkpoint,
-            output_path=eval_output_path,
-            examples=examples,
-            backend=backend,
-            generator=generator,
-            resume=resume,
-            judged_output_path=eval_judged_output_path,
-            overlap_judge=overlap_judge,
-            config_path=config_path,
-            overrides=overrides,
-            split="eval",
-            retrieval_worker_url=retrieval_worker_url,
-            overlap_judge_client=shared_judge_client,
-        )
-        train_path = collect_rollouts(
-            config,
-            checkpoint_path=checkpoint,
-            output_path=train_output_path,
-            examples=examples,
-            backend=backend,
-            generator=generator,
-            resume=resume,
-            judged_output_path=train_judged_output_path,
-            overlap_judge=overlap_judge,
-            config_path=config_path,
-            overrides=overrides,
-            sample_seed=sample_seed,
-            split="train",
-            retrieval_worker_url=retrieval_worker_url,
-            overlap_judge_client=shared_judge_client,
-        )
-    finally:
-        if shared_judge_client is not None:
-            shared_judge_client.close()
-    return eval_path, train_path
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect one training pass with the configured offline rollout engine.")
     parser.add_argument("--config", required=True, help="Path to the train YAML config.")
     parser.add_argument("--checkpoint", default=None, help="Checkpoint path. Defaults to latest under train dir.")
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
     parser.add_argument("--output", required=True, help="Rollout JSONL output path.")
-    parser.add_argument(
-        "--eval-output",
-        default=None,
-        help="Optional eval JSONL output. When set, collect eval then train with one loaded policy model.",
-    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -680,7 +584,6 @@ def parse_args() -> argparse.Namespace:
         help="Judge rollouts during collection instead of writing raw rows.",
     )
     parser.add_argument("--judged-output", default=None, help="Optional judged JSONL output path for overlap judging.")
-    parser.add_argument("--eval-judged-output", default=None, help="Optional judged eval JSONL output path.")
     parser.add_argument(
         "--no-overlap-judge",
         action="store_true",
@@ -709,45 +612,21 @@ def main() -> None:
             or Path(config.experiment.output_root) / "artifacts" / "train" / config.experiment.name
         )
         checkpoint = resolve_latest_checkpoint(latest_root).path
-    if args.eval_output is not None:
-        if args.split != "train":
-            raise ValueError("--eval-output cannot be combined with --split=eval")
-        if args.judge_inline:
-            raise ValueError("--eval-output cannot be combined with --judge-inline")
-        eval_path, train_path = collect_eval_then_train_rollouts(
-            config,
-            checkpoint_path=checkpoint,
-            eval_output_path=args.eval_output,
-            train_output_path=args.output,
-            eval_judged_output_path=args.eval_judged_output,
-            train_judged_output_path=args.judged_output,
-            resume=args.resume,
-            overlap_judge=not args.no_overlap_judge,
-            config_path=args.config,
-            overrides=args.overrides,
-            sample_seed=args.sample_seed,
-            retrieval_worker_url=args.retrieval_worker_url,
-        )
-        print(eval_path)
-        print(train_path)
-    else:
-        if args.eval_judged_output is not None:
-            raise ValueError("--eval-judged-output requires --eval-output")
-        rollout_path = collect_rollouts(
-            config,
-            checkpoint_path=checkpoint,
-            output_path=args.output,
-            resume=args.resume,
-            judge_inline=args.judge_inline,
-            judged_output_path=args.judged_output,
-            overlap_judge=not args.no_overlap_judge,
-            config_path=args.config,
-            overrides=args.overrides,
-            sample_seed=args.sample_seed,
-            split=args.split,
-            retrieval_worker_url=args.retrieval_worker_url,
-        )
-        print(rollout_path)
+    rollout_path = collect_rollouts(
+        config,
+        checkpoint_path=checkpoint,
+        output_path=args.output,
+        resume=args.resume,
+        judge_inline=args.judge_inline,
+        judged_output_path=args.judged_output,
+        overlap_judge=not args.no_overlap_judge,
+        config_path=args.config,
+        overrides=args.overrides,
+        sample_seed=args.sample_seed,
+        split=args.split,
+        retrieval_worker_url=args.retrieval_worker_url,
+    )
+    print(rollout_path)
 
 
 if __name__ == "__main__":

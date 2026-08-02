@@ -91,13 +91,15 @@ def test_build_generator_accepts_vllm_offline_backend(monkeypatch) -> None:
             tensor_parallel_size=2,
             attention_backend="FLASH_ATTN",
             enable_prefix_caching=True,
-        )
+        ),
+        sampling_extra={"top_k": 20},
     )
 
     assert isinstance(generator, VLLMGenerator)
     assert generator.model_path == "/models/demo"
     assert generator.tensor_parallel_size == 2
     assert generator.enable_prefix_caching is True
+    assert generator.sampling_extra == {"top_k": 20}
 
 
 def test_vllm_generator_enables_prefix_caching_in_offline_engine(monkeypatch) -> None:
