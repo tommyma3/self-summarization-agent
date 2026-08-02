@@ -69,12 +69,14 @@ def test_summarize_judged_rollouts_reports_behavior_metrics(tmp_path: Path) -> N
     assert summary["avg_reasoning_generated_tokens"] == 75
     assert summary["avg_tool_result_tokens"] == 10
     assert summary["avg_summary_generated_tokens"] == 12.5
+    assert summary["avg_budget_consumed_tokens"] == 97.5
     assert summary["summary_overhead_ratio"] == 25 / 175
     assert summary["avg_search_calls"] == 2
     assert summary["avg_document_calls"] == 1
     assert summary["avg_cot_tokens_per_episode"] == 6
     assert summary["avg_action_cot_tokens_per_episode"] == 6
     assert summary["avg_final_answer_tokens"] == 1.5
+    assert summary["correct_per_1k_budget_consumed_tokens"] == 1 / 0.195
 
 
 def test_build_rollout_command_uses_overlap_judged_output() -> None:

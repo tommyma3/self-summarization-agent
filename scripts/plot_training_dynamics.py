@@ -46,6 +46,18 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
+def _budget_efficiency(record: dict[str, Any]) -> float:
+    value = record.get("eval_correct_per_1k_budget_consumed_tokens")
+    if isinstance(value, int | float):
+        return float(value)
+    budget_tokens = float(record.get("eval_total_budget_consumed_tokens", 0))
+    if budget_tokens <= 0:
+        budget_tokens = float(record.get("eval_total_generated_tokens", 0)) + float(
+            record.get("eval_tool_result_tokens", 0)
+        )
+    return float(record.get("eval_correct", 0)) / (budget_tokens / 1000.0) if budget_tokens > 0 else 0.0
+
+
 def load_eval_metrics(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -66,6 +78,13 @@ def load_eval_metrics(path: Path) -> list[dict[str, Any]]:
                     "avg_forced_answer_tokens": float(rec.get("eval_avg_forced_answer_generated_tokens", 0)),
                     "avg_tool_result_tokens": float(rec.get("eval_avg_tool_result_tokens", 0)),
                     "avg_total_tokens": float(rec.get("eval_avg_total_generated_tokens", 0)),
+                    "avg_budget_tokens": float(
+                        rec.get(
+                            "eval_avg_budget_consumed_tokens",
+                            float(rec.get("eval_avg_total_generated_tokens", 0))
+                            + float(rec.get("eval_avg_tool_result_tokens", 0)),
+                        )
+                    ),
                     "avg_max_prompt_tokens": float(rec.get("eval_avg_max_prompt_tokens_seen", 0)),
                     "max_prompt_tokens": float(rec.get("eval_max_prompt_tokens_seen", 0)),
                     "avg_search_calls": float(rec.get("eval_avg_search_calls", 0)),
@@ -73,6 +92,7 @@ def load_eval_metrics(path: Path) -> list[dict[str, Any]]:
                     "avg_summary_count": float(rec.get("eval_avg_summary_count", 0)),
                     "correct_per_1k_reasoning": float(rec.get("eval_correct_per_1k_reasoning_tokens", 0)),
                     "correct_per_1k_total": float(rec.get("eval_correct_per_1k_total_generated_tokens", 0)),
+                    "correct_per_1k_budget": _budget_efficiency(rec),
                 }
             )
     if not rows:
@@ -278,6 +298,7 @@ def plot_tokens(rows: list[dict[str, Any]]) -> str:
         ("summary", "#dc2626", [r["avg_summary_tokens"] for r in rows]),
         ("tool results", "#16a34a", [r["avg_tool_result_tokens"] for r in rows]),
         ("forced answer", "#9333ea", [r["avg_forced_answer_tokens"] for r in rows]),
+        ("budget total", "#111827", [r["avg_budget_tokens"] for r in rows]),
     ]
 
     all_y = [v for _, _, ys in series for v in ys]
@@ -310,6 +331,7 @@ def plot_efficiency(rows: list[dict[str, Any]]) -> str:
     series = [
         ("per 1k reasoning", "#2563eb", [r["correct_per_1k_reasoning"] for r in rows]),
         ("per 1k total", "#dc2626", [r["correct_per_1k_total"] for r in rows]),
+        ("per 1k budget", "#111827", [r["correct_per_1k_budget"] for r in rows]),
     ]
 
     all_y = [v for _, _, ys in series for v in ys]

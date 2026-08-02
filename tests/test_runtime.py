@@ -116,6 +116,9 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
         True,
         True,
     ]
+    assert result.token_usage["budget_consumed_tokens"] == (
+        result.token_usage["total_generated_tokens"] + result.token_usage["tool_result_tokens"]
+    )
 
 
 def test_native_summary_appends_user_control_without_changing_tools_and_keeps_exact_interval_ids() -> None:
@@ -740,6 +743,7 @@ def test_runtime_forces_final_answer_after_generated_token_budget() -> None:
     assert result.token_usage["tool_result_tokens"] == 1
     assert result.token_usage["forced_answer_generated_tokens"] == 1
     assert result.token_usage["total_generated_tokens"] == 3
+    assert result.token_usage["budget_consumed_tokens"] == 4
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.turn_records[0]["generation_kind"] == "action"
     assert result.turn_records[1]["generation_kind"] == "forced_answer"
@@ -773,7 +777,7 @@ def test_runtime_counts_summary_tokens_toward_generated_token_budget() -> None:
         context_threshold_tokens=1,
         max_context_tokens=1024,
         max_summary_tokens=128,
-        generated_token_budget=3,
+        generated_token_budget=4,
         token_counter=count_tokens,
     )
 
@@ -786,6 +790,7 @@ def test_runtime_counts_summary_tokens_toward_generated_token_budget() -> None:
     assert result.token_usage["summary_generated_tokens"] == 50
     assert result.token_usage["forced_answer_generated_tokens"] == 1
     assert result.token_usage["total_generated_tokens"] == 53
+    assert result.token_usage["budget_consumed_tokens"] == 54
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
     assert result.token_usage["summary_count"] == 1
     assert result.token_usage["retired_round_count"] == 2
@@ -793,7 +798,7 @@ def test_runtime_counts_summary_tokens_toward_generated_token_budget() -> None:
     assert result.turn_records[3]["generation_kind"] == "forced_answer"
 
 
-def test_runtime_excludes_tool_result_tokens_from_generated_token_budget() -> None:
+def test_runtime_counts_tool_result_tokens_toward_generated_token_budget() -> None:
     search_output = tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')
     answer_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}')
     backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "large tool result"})
@@ -819,9 +824,43 @@ def test_runtime_excludes_tool_result_tokens_from_generated_token_budget() -> No
 
     assert result.status == "completed"
     assert result.final_answer == "best available"
-    assert result.token_usage["reasoning_generated_tokens"] == 2
+    assert result.token_usage["reasoning_generated_tokens"] == 1
     assert result.token_usage["tool_result_tokens"] == 10
     assert result.token_usage["total_generated_tokens"] == 2
+    assert result.token_usage["budget_consumed_tokens"] == 12
+    assert result.token_usage["forced_answer_generated_tokens"] == 1
+    assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
+    assert result.turn_records[1]["generation_kind"] == "forced_answer"
+
+
+def test_runtime_continues_when_combined_budget_is_not_exhausted() -> None:
+    search_output = tool_output('{"tool_name": "search", "arguments": {"query": "q"}}')
+    answer_output = tool_output('{"tool_name": "finish", "arguments": {"answer": "best available"}}')
+    backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "small tool result"})
+    model = RecordingModel(outputs=[search_output, answer_output])
+
+    def count_tokens(text: str) -> int:
+        if text in {search_output, answer_output}:
+            return 1
+        if "small tool result" in text:
+            return 3
+        return 1
+
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1000,
+        max_context_tokens=1024,
+        generated_token_budget=5,
+        token_counter=count_tokens,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "completed"
+    assert result.token_usage["total_generated_tokens"] == 2
+    assert result.token_usage["tool_result_tokens"] == 3
+    assert result.token_usage["budget_consumed_tokens"] == 5
     assert result.token_usage["forced_answer_reasons"] == []
     assert result.turn_records[1]["generation_kind"] == "action"
 
@@ -845,7 +884,7 @@ def test_generated_token_budget_has_priority_over_compaction_threshold() -> None
         context_threshold_tokens=1,
         max_context_tokens=1024,
         max_summary_tokens=128,
-        generated_token_budget=2,
+        generated_token_budget=3,
         token_counter=count_tokens,
     )
 
@@ -855,6 +894,7 @@ def test_generated_token_budget_has_priority_over_compaction_threshold() -> None
     assert result.summary_turns == []
     assert [record["generation_kind"] for record in result.turn_records] == ["action", "forced_answer"]
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
+    assert result.token_usage["budget_consumed_tokens"] == 4
     assert "final-answer boundary" in model.prompts[1]
     assert "Compact the entire preceding task trajectory" not in model.prompts[1]
 

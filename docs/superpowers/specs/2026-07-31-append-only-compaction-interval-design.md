@@ -44,7 +44,7 @@ There is no original user-request copy and no retained raw tool-event tail after
 
 ## Forced-Answer Contract
 
-When a tool or generated-token budget forces an answer, the runtime leaves the active interval unchanged, appends the forced-answer instruction, and generates the answer as the next assistant message. It does not switch system prompts or reconstruct a special final-answer context.
+When a tool-call or episode-token budget forces an answer, the runtime leaves the active interval unchanged, appends the forced-answer instruction, and generates the answer as the next assistant message. The episode-token budget counts model completions and each raw appended tool result once. It does not switch system prompts or reconstruct a special final-answer context.
 
 ## Training Sequence Contract
 

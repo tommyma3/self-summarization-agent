@@ -488,9 +488,13 @@ def write_context_summary(
     max_ctx = runtime.max_context_tokens
     gen_budget = runtime.generated_token_budget
     total_gen = token_usage.get("total_generated_tokens", 0)
+    budget_consumed = token_usage.get(
+        "budget_consumed_tokens",
+        total_gen + token_usage.get("tool_result_tokens", 0),
+    )
 
     peak_util = f"{max_prompt / max_ctx * 100:.1f}%" if max_prompt > 0 else "n/a"
-    budget_util = f"{total_gen / gen_budget * 100:.1f}%" if gen_budget else "n/a"
+    budget_util = f"{budget_consumed / gen_budget * 100:.1f}%" if gen_budget else "n/a"
     headroom = max_ctx - max_prompt if max_prompt > 0 else None
     threshold_crossed = max_prompt >= ctx_threshold if max_prompt > 0 else None
 
@@ -524,6 +528,7 @@ def write_context_summary(
             "forced_answer_generated_tokens": token_usage.get("forced_answer_generated_tokens", 0),
             "tool_result_tokens": token_usage.get("tool_result_tokens", 0),
             "total_generated_tokens": total_gen,
+            "budget_consumed_tokens": budget_consumed,
             "generated_token_budget": gen_budget,
             "budget_utilization": budget_util,
             "forced_answer_reasons": token_usage.get("forced_answer_reasons", []),

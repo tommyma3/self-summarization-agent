@@ -148,6 +148,7 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
     forced_answer_tokens = 0.0
     tool_result_tokens = 0.0
     total_generated_tokens = 0.0
+    budget_consumed_tokens = 0.0
     max_prompt_sum = 0.0
     max_prompt_max = 0.0
     summary_count = 0.0
@@ -186,6 +187,13 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
         forced_answer_tokens += _number(token_usage.get("forced_answer_generated_tokens"))
         tool_result_tokens += _number(token_usage.get("tool_result_tokens"))
         total_generated_tokens += _number(token_usage.get("total_generated_tokens"))
+        recorded_budget_tokens = token_usage.get("budget_consumed_tokens")
+        budget_consumed_tokens += (
+            _number(recorded_budget_tokens)
+            if isinstance(recorded_budget_tokens, int | float)
+            else _number(token_usage.get("total_generated_tokens"))
+            + _number(token_usage.get("tool_result_tokens"))
+        )
         max_prompt = _number(token_usage.get("max_prompt_tokens_seen"))
         max_prompt_sum += max_prompt
         max_prompt_max = max(max_prompt_max, max_prompt)
@@ -233,11 +241,13 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
         "forced_answer_generated_tokens": forced_answer_tokens,
         "tool_result_tokens": tool_result_tokens,
         "total_generated_tokens": total_generated_tokens,
+        "budget_consumed_tokens": budget_consumed_tokens,
         "avg_reasoning_generated_tokens": _average(reasoning_tokens, total),
         "avg_summary_generated_tokens": _average(summary_tokens, total),
         "avg_forced_answer_generated_tokens": _average(forced_answer_tokens, total),
         "avg_tool_result_tokens": _average(tool_result_tokens, total),
         "avg_total_generated_tokens": _average(total_generated_tokens, total),
+        "avg_budget_consumed_tokens": _average(budget_consumed_tokens, total),
         "avg_max_prompt_tokens_seen": _average(max_prompt_sum, total),
         "max_prompt_tokens_seen": max_prompt_max,
         "avg_search_calls": _average(search_calls, total),
@@ -255,6 +265,9 @@ def summarize_judged_rollouts(condition: str, judged_path: Path) -> dict[str, An
         "correct_per_1k_reasoning_tokens": correct / (reasoning_tokens / 1000.0) if reasoning_tokens > 0 else 0.0,
         "correct_per_1k_total_generated_tokens": correct / (total_generated_tokens / 1000.0)
         if total_generated_tokens > 0
+        else 0.0,
+        "correct_per_1k_budget_consumed_tokens": correct / (budget_consumed_tokens / 1000.0)
+        if budget_consumed_tokens > 0
         else 0.0,
     }
 
@@ -346,15 +359,16 @@ def _condition_overrides(
 def _render_markdown(summary: dict[str, Any]) -> str:
     condition_summaries = summary["conditions"]
     rows = [
-        "| condition | accuracy | correct/total | avg reasoning tok | avg tool tok | avg summary tok | avg total tok | avg CoT tok/episode | avg prompt max | avg search | avg doc | forced answer | summary too long |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| condition | accuracy | correct/total | avg reasoning tok | avg tool tok | avg summary tok | avg generated tok | avg budget tok | avg CoT tok/episode | avg prompt max | avg search | avg doc | forced answer | summary too long |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for item in condition_summaries:
         rows.append(
             "| {condition} | {accuracy:.4f} | {correct}/{rollout_count} | "
             "{avg_reasoning_generated_tokens:.1f} | {avg_tool_result_tokens:.1f} | "
             "{avg_summary_generated_tokens:.1f} | "
-            "{avg_total_generated_tokens:.1f} | {avg_cot_tokens_per_episode:.1f} | "
+            "{avg_total_generated_tokens:.1f} | {avg_budget_consumed_tokens:.1f} | "
+            "{avg_cot_tokens_per_episode:.1f} | "
             "{avg_max_prompt_tokens_seen:.1f} | {avg_search_calls:.2f} | "
             "{avg_document_calls:.2f} | {forced_answer_episode_count} | "
             "{summary_length_exceeded} |".format(**item)
@@ -379,6 +393,7 @@ def _numeric_deltas(condition_summaries: list[dict[str, Any]]) -> dict[str, floa
         "avg_tool_result_tokens",
         "avg_summary_generated_tokens",
         "avg_total_generated_tokens",
+        "avg_budget_consumed_tokens",
         "avg_cot_tokens_per_episode",
         "avg_max_prompt_tokens_seen",
         "avg_search_calls",
@@ -386,6 +401,7 @@ def _numeric_deltas(condition_summaries: list[dict[str, Any]]) -> dict[str, floa
         "summary_overhead_ratio",
         "correct_per_1k_reasoning_tokens",
         "correct_per_1k_total_generated_tokens",
+        "correct_per_1k_budget_consumed_tokens",
     ]
     return {key: float(second[key]) - float(first[key]) for key in keys}
 

@@ -16,6 +16,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
                 "forced_answer_generated_tokens": 5,
                 "tool_result_tokens": 30,
                 "total_generated_tokens": 125,
+                "budget_consumed_tokens": 155,
                 "max_prompt_tokens_seen": 8000,
                 "summary_count": 1,
             },
@@ -99,12 +100,14 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
     assert record["eval_forced_answer_generated_tokens"] == 5
     assert record["eval_tool_result_tokens"] == 40
     assert record["eval_total_generated_tokens"] == 210
+    assert record["eval_total_budget_consumed_tokens"] == 250
     assert record["eval_avg_reasoning_generated_tokens"] == 175 / 3
     assert record["eval_avg_summary_generated_tokens"] == 10
     assert record["eval_avg_summary_tokens"] == 4
     assert record["eval_avg_forced_answer_generated_tokens"] == 5 / 3
     assert record["eval_avg_tool_result_tokens"] == 40 / 3
     assert record["eval_avg_total_generated_tokens"] == 70
+    assert record["eval_avg_budget_consumed_tokens"] == 250 / 3
     assert record["eval_avg_max_prompt_tokens_seen"] == 6000
     assert record["eval_max_prompt_tokens_seen"] == 8000
     assert record["eval_avg_search_calls"] == 1
@@ -112,6 +115,7 @@ def test_write_eval_metrics_counts_judged_eval_rollouts(tmp_path: Path) -> None:
     assert record["eval_avg_summary_count"] == 2 / 3
     assert record["eval_correct_per_1k_reasoning_tokens"] == 1 / 0.175
     assert record["eval_correct_per_1k_total_generated_tokens"] == 1 / 0.210
+    assert record["eval_correct_per_1k_budget_consumed_tokens"] == 1 / 0.250
     written = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
     assert written == [record]
 

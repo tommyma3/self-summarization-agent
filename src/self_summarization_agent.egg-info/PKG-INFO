@@ -341,7 +341,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 
 - The summarization trigger is runtime-controlled, not model-controlled.
 - Summarization happens only after a completed tool round.
-- `runtime.generated_token_budget` counts all model completion tokens, including thinking, actions, summaries, and forced answers; tool-result text is excluded. Budget exhaustion takes priority over compaction.
+- `runtime.generated_token_budget` limits `budget_consumed_tokens`: all model completion tokens, including thinking, actions, summaries, and forced answers, plus each raw appended tool result counted once. `total_generated_tokens` remains model-output-only for reporting. Budget exhaustion takes priority over compaction.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
 - `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template permits only tagged summary/forced-answer system controls at the end of an interval and preserves all reasoning since the interval's real user query.
 - A successful compaction starts a fresh interval with only the system instructions and compressed state; no raw tail is retained.

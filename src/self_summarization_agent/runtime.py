@@ -222,6 +222,11 @@ class _TokenUsage:
             + self.forced_answer_generated_tokens
         )
 
+    @property
+    def budget_consumed_tokens(self) -> int:
+        """Episode budget usage from generated output plus appended tool results."""
+        return self.total_generated_tokens + self.tool_result_tokens
+
     def as_dict(self, *, summary_count: int, turn_records: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "reasoning_generated_tokens": self.reasoning_generated_tokens,
@@ -229,6 +234,7 @@ class _TokenUsage:
             "forced_answer_generated_tokens": self.forced_answer_generated_tokens,
             "tool_result_tokens": self.tool_result_tokens,
             "total_generated_tokens": self.total_generated_tokens,
+            "budget_consumed_tokens": self.budget_consumed_tokens,
             "prompt_tokens_by_turn": [
                 {
                     "turn_id": record["turn_id"],
@@ -317,7 +323,7 @@ class EpisodeRuntime:
     def _generated_token_budget_exhausted(self, active: _ActiveEpisode) -> bool:
         return (
             self.generated_token_budget is not None
-            and active.token_usage.total_generated_tokens >= self.generated_token_budget
+            and active.token_usage.budget_consumed_tokens >= self.generated_token_budget
         )
 
     def _prompt_token_count(self, active: _ActiveEpisode, prompt: str) -> int:

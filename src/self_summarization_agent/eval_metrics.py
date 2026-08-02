@@ -53,6 +53,18 @@ def _numeric_max(rows: list[dict[str, Any]], field: str) -> float:
     return maximum
 
 
+def _budget_consumed_tokens(row: dict[str, Any]) -> float:
+    usage = _token_usage(row)
+    value = usage.get("budget_consumed_tokens")
+    if isinstance(value, int | float):
+        return float(value)
+    total_generated = usage.get("total_generated_tokens", 0)
+    tool_results = usage.get("tool_result_tokens", 0)
+    return float(total_generated if isinstance(total_generated, int | float) else 0) + float(
+        tool_results if isinstance(tool_results, int | float) else 0
+    )
+
+
 def _average(total: float, count: int) -> float:
     return total / count if count else 0.0
 
@@ -135,6 +147,7 @@ def write_eval_metrics(
     forced_answer_tokens = _numeric_sum(rows, "forced_answer_generated_tokens")
     tool_result_tokens = _numeric_sum(rows, "tool_result_tokens")
     total_generated_tokens = _numeric_sum(rows, "total_generated_tokens")
+    budget_consumed_tokens = sum(_budget_consumed_tokens(row) for row in rows)
     max_prompt_tokens_sum = _numeric_sum(rows, "max_prompt_tokens_seen")
     summary_count = _numeric_sum(rows, "summary_count")
     search_calls = sum(
@@ -166,12 +179,14 @@ def write_eval_metrics(
         "eval_forced_answer_generated_tokens": forced_answer_tokens,
         "eval_tool_result_tokens": tool_result_tokens,
         "eval_total_generated_tokens": total_generated_tokens,
+        "eval_total_budget_consumed_tokens": budget_consumed_tokens,
         "eval_avg_reasoning_generated_tokens": _average(reasoning_tokens, total),
         "eval_avg_summary_generated_tokens": _average(summary_tokens, total),
         "eval_avg_summary_tokens": _average_summary_tokens(rows),
         "eval_avg_forced_answer_generated_tokens": _average(forced_answer_tokens, total),
         "eval_avg_tool_result_tokens": _average(tool_result_tokens, total),
         "eval_avg_total_generated_tokens": _average(total_generated_tokens, total),
+        "eval_avg_budget_consumed_tokens": _average(budget_consumed_tokens, total),
         "eval_avg_max_prompt_tokens_seen": _average(max_prompt_tokens_sum, total),
         "eval_max_prompt_tokens_seen": _numeric_max(rows, "max_prompt_tokens_seen"),
         "eval_avg_search_calls": _average(search_calls, total),
@@ -179,6 +194,7 @@ def write_eval_metrics(
         "eval_avg_summary_count": _average(summary_count, total),
         "eval_correct_per_1k_reasoning_tokens": _per_1k(correct, reasoning_tokens),
         "eval_correct_per_1k_total_generated_tokens": _per_1k(correct, total_generated_tokens),
+        "eval_correct_per_1k_budget_consumed_tokens": _per_1k(correct, budget_consumed_tokens),
     }
     append_jsonl(output, record)
     return record
