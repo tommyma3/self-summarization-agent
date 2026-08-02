@@ -142,7 +142,7 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 16384
+      ppo_max_token_len_per_gpu: 24000
       log_prob_micro_batch_size_per_gpu: 1
       log_prob_max_token_len_per_gpu:
       use_dynamic_bsz: true
