@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import random
+import time
 from typing import Any
 
 from self_summarization_agent.bcplus_backend import build_backend
@@ -221,6 +222,7 @@ class _SubprocessOverlapJudgeClient:
         config_path: str,
         overrides: list[str],
         checkpoint_id: str,
+        drain_timeout_seconds: float = 600,
     ) -> None:
         context = mp.get_context("spawn")
         self.request_queue = context.Queue()
@@ -238,6 +240,8 @@ class _SubprocessOverlapJudgeClient:
         self.checkpoint_id = checkpoint_id
         self.next_batch_id = 0
         self.pending_batch_count = 0
+        self._drain_timeout_seconds = drain_timeout_seconds
+        self._drain_deadline: float | None = None
 
     def submit(self, rows: list[dict[str, Any]], examples: list[QueryExample]) -> None:
         examples_by_query_id = {example.query_id: _example_payload(example) for example in examples}
@@ -263,7 +267,32 @@ class _SubprocessOverlapJudgeClient:
             raise RuntimeError(f"Overlap judge worker returned invalid response: {response!r}")
         return rows
 
+    def _ensure_drain_deadline(self) -> None:
+        if self._drain_deadline is None:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
+
+    def _check_drain_timeout(self) -> None:
+        """Terminate the worker if the drain deadline has passed."""
+        if self._drain_deadline is None:
+            return
+        if time.monotonic() < self._drain_deadline:
+            return
+        pid = self.process.pid
+        print(
+            f"[overlap_judge] Drain timeout ({self._drain_timeout_seconds:.0f}s) "
+            f"reached with {self.pending_batch_count} batch(es) still pending. "
+            f"Terminating judge worker (pid={pid}). "
+            f"Missing batches will be re-generated on --resume.",
+            flush=True,
+        )
+        self.process.terminate()
+        self.process.join(timeout=30)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=10)
+
     def drain_available(self) -> list[dict[str, Any]]:
+        self._ensure_drain_deadline()
         rows: list[dict[str, Any]] = []
         while self.pending_batch_count:
             try:
@@ -274,11 +303,15 @@ class _SubprocessOverlapJudgeClient:
                         "Overlap judge worker exited before returning all batches "
                         f"(exit_code={self.process.exitcode})"
                     )
+                self._check_drain_timeout()
+                if not self.process.is_alive():
+                    break
                 break
             rows.extend(self._handle_response(response))
         return rows
 
     def finish(self) -> list[dict[str, Any]]:
+        self._ensure_drain_deadline()
         rows: list[dict[str, Any]] = []
         while self.pending_batch_count:
             try:
@@ -289,6 +322,9 @@ class _SubprocessOverlapJudgeClient:
                         "Overlap judge worker exited before returning all batches "
                         f"(exit_code={self.process.exitcode})"
                     )
+                self._check_drain_timeout()
+                if not self.process.is_alive():
+                    break
                 continue
             rows.extend(self._handle_response(response))
         return rows

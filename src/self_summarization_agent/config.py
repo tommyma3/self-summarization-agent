@@ -113,6 +113,7 @@ class RuntimeConfig:
     max_summary_tokens: int = 2048
     tool_budget: int = 16
     generated_token_budget: int | None = None
+    phase_timeout_seconds: int | None = None
 
 
 @dataclass(slots=True)

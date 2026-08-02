@@ -80,6 +80,9 @@ runtime:
   tool_budget: 99999
   # Episode budget: model completions plus raw appended tool-result content.
   generated_token_budget: 24000
+  # Per-phase subprocess timeout (seconds). If a rollout/judge/train subprocess
+  # does not exit within this limit it is terminated. None = no timeout.
+  phase_timeout_seconds: 3600
 
 judge:
   enabled: true
