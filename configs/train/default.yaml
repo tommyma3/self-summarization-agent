@@ -46,13 +46,11 @@ model:
   chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
 
 rollout:
-  backend: openai_compatible
-  gpu_ids: []
+  backend: vllm_offline
+  gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend:
   max_model_len: 27000
-  # Applied directly by vllm_offline. For this external-server backend, start
-  # vLLM with --enable-prefix-caching; it cannot be enabled per API request.
   enable_prefix_caching: true
   max_concurrent_episodes: 50
   overlap_judge: true
@@ -60,8 +58,8 @@ rollout:
   temperature: 0.7
   top_p: 0.95
   do_sample: true
-  # The server must expose the checkpoint under api_model (or under the checkpoint
-  # path when api_model is null) and support vLLM's return_token_ids extension.
+  # Used only when rollout.backend is switched to openai_compatible. The server
+  # must expose the checkpoint and support vLLM's return_token_ids extension.
   api_base_url: http://127.0.0.1:8000/v1
   api_model:
   api_key_env: OPENAI_API_KEY
