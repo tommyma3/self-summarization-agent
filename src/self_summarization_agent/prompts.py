@@ -188,7 +188,7 @@ def build_system_prompt() -> str:
 (3) Provide your final answer within <answer> </answer> tags.
 (4) When the user prompts a summary request, compact the agent context into a summary for further steps using format: <summary> summary </summary>.
 
-IMPORTANT: When prompted the summary request, you can only output <summary> summary </summary> after thinking. Do NOT call other tools or answer.
+IMPORTANT: When prompted the summary request, you can only output <summary> summary </summary> after thinking. The summary should include the user's query and the research context. All the context would be removed after summarization, thus include all essential information in the summary. Do NOT call other tools or answer.
 """
 
 
@@ -215,7 +215,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """<summary_request>
-Compact the context into a summary. Include the user's query and the research context.
+Compact the context into a summary.
 </summary_request>"""
 
 
