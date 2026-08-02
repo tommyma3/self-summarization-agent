@@ -4,15 +4,13 @@ import traceback
 from multiprocessing.queues import Queue
 from typing import Any
 
-from self_summarization_agent.config import load_train_config, parse_cli_overrides
-from self_summarization_agent.dataset import QueryExample
-from self_summarization_agent.judge_step import build_judge, judge_rollout_rows
-
 
 SHUTDOWN = "__shutdown__"
 
 
-def _example_from_payload(payload: dict[str, Any]) -> QueryExample:
+def _example_from_payload(payload: dict[str, Any]):
+    from self_summarization_agent.dataset import QueryExample
+
     return QueryExample(
         query_id=str(payload["query_id"]),
         query=str(payload["query"]),
@@ -24,9 +22,18 @@ def run_judge_worker(
     *,
     config_path: str,
     overrides: list[str],
+    gpu_ids: list[int],
     request_queue: Queue,
     response_queue: Queue,
 ) -> None:
+    import os
+
+    if gpu_ids:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in gpu_ids)
+
+    from self_summarization_agent.config import load_train_config, parse_cli_overrides
+    from self_summarization_agent.judge_step import build_judge, judge_rollout_rows
+
     config = load_train_config(config_path, parse_cli_overrides(overrides))
     judge = build_judge(config)
     while True:

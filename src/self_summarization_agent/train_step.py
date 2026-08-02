@@ -91,6 +91,7 @@ def run_train_step(
     rollout_path: str | Path,
     output_checkpoint_path: str | Path,
     metrics_path: str | Path | None = None,
+    published_checkpoint_path: str | Path | None = None,
     trainer: Any | None = None,
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
@@ -168,7 +169,9 @@ def run_train_step(
     if metrics_path is not None and is_main:
         metrics_payload = {
             "policy_checkpoint_id": checkpoint_id,
-            "next_checkpoint_id": checkpoint_id_from_path(output_checkpoint),
+            "next_checkpoint_id": checkpoint_id_from_path(
+                published_checkpoint_path or output_checkpoint
+            ),
             "training_backend": config.training.backend,
             "sample_count": metrics.sample_count,
             "mean_reward": metrics.mean_reward,
@@ -191,6 +194,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rollouts", required=True, help="Rollout JSONL path.")
     parser.add_argument("--output-checkpoint", required=True, help="Output checkpoint directory.")
     parser.add_argument("--metrics", default=None, help="Optional metrics JSONL path.")
+    parser.add_argument(
+        "--published-checkpoint",
+        default=None,
+        help="Final checkpoint path to record when training writes through a temporary directory.",
+    )
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -210,6 +218,7 @@ def main() -> None:
         rollout_path=args.rollouts,
         output_checkpoint_path=args.output_checkpoint,
         metrics_path=args.metrics,
+        published_checkpoint_path=args.published_checkpoint,
     )
     print(output_checkpoint)
 

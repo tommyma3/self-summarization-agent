@@ -58,14 +58,14 @@ These are the new primary entrypoints:
 
 ```powershell
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts
+python scripts/train_iterations.py --config configs/train/default.yaml --iterations 10 --latest-root /path/to/train-artifacts
 ```
 
 Small CLI override layer:
 
 ```powershell
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml --limit 25 --retrieval-backend bm25
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --set runtime.tool_budget=12
+python scripts/train_iterations.py --config configs/train/default.yaml --iterations 10 --set runtime.tool_budget=12
 ```
 
 Sample configs live at:
@@ -133,7 +133,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated API rollout collection, judging, and clipped GRPO training updates
+- `training_loop` for a resumable Python-owned loop of merged collection and clipped GRPO updates
 
 The legacy `train_launcher` remains available only for `training.backend: transformers`.
 
@@ -150,12 +150,12 @@ The practical workflow is:
    - per-query BrowseComp run files
    - `trajectories.jsonl`
    - `manifest.json`
-5. Launch one process-isolated training iteration with `python -m self_summarization_agent.iteration_launcher --config ...`.
+5. Launch a target number of process-isolated training iterations with `python scripts/train_iterations.py --config ... --iterations N`.
 6. Inspect:
    - rollout JSONL under `artifacts/train/.../rollouts/`
-   - `metrics.jsonl`
+   - `step_metrics.jsonl`
    - `eval_metrics.jsonl`
-   - `accuracy_history.jsonl`
+   - `phase_timings.jsonl`
    - checkpoints
 
 ## Minimal Runtime Integration Pattern
@@ -243,11 +243,11 @@ Training notes:
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
-- the default `rollout.backend: openai_compatible` uses Chat Completions against `rollout.api_base_url`; `openai`, `openai-compatible`, and `openai_compatible` are accepted aliases
-- `rollout.api_model` must be the model name exposed by the server; when it is unset the resolved checkpoint path is sent as the model name
+- the default training config uses the owned `vllm_offline` engine; `openai`, `openai-compatible`, and `openai_compatible` select an externally served Chat Completions backend
+- for an external server, `rollout.api_model` must be the exposed model name; when unset, the resolved checkpoint path is sent as the model name
 - `rollout.enable_prefix_caching` defaults to `true`; `vllm_offline` passes it directly to the owned vLLM engine
 - the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning, native tool parsing, and `--enable-prefix-caching`; prefix caching is an engine-startup option and cannot be enabled by a Chat Completions request, while restarting or hot-swapping that server at an iteration boundary remains an external orchestration responsibility
-- legacy `rollout.backend: vllm_offline` and `rollout.backend: sglang` remain available; SGLang is an optional runtime dependency and must be installed separately
+- `rollout.backend: sglang` remains available as an optional runtime dependency
 - the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` consume the same cached trajectory contract
 - each iteration evaluates the selected checkpoint, collects its training trajectories, caches the exact collected token sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
@@ -259,41 +259,43 @@ uv run python scripts/probe_openai_compatible_runtime.py --base-url http://127.0
 
 The probe makes a forced native `finish` call and fails unless the response contains one structured tool call plus exact `prompt_token_ids` and completion `token_ids`. The client automatically sends `extra_body.return_token_ids: true` and `chat_template_kwargs.enable_thinking`.
 
-### Process-isolated rollout/training loop
+### Python-owned rollout/training loop
 
-The new orchestration path uses checkpoint files as the weight-sync boundary:
+The normal orchestration path has exactly two phases per checkpoint update:
 
 ```powershell
-python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.raw.jsonl --judged-output /path/to/rollouts.judged.jsonl
-python -m self_summarization_agent.rollout_collection --config configs/train/default.yaml --checkpoint /path/to/checkpoint --output /path/to/rollouts.raw.jsonl --judged-output /path/to/rollouts.judged.jsonl --resume
-python -m self_summarization_agent.judge_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/raw-rollouts.jsonl --output /path/to/judged-rollouts.jsonl
-python -m self_summarization_agent.cache_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/judged-rollouts.jsonl --output /path/to/cached-rollouts.jsonl --resume
-python -m self_summarization_agent.train_step --config configs/train/default.yaml --checkpoint /path/to/checkpoint --rollouts /path/to/cached-rollouts.jsonl --output-checkpoint /path/to/next-checkpoint
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --resume
+python scripts/train_iterations.py --config configs/train/default.yaml --iterations 10 --latest-root /path/to/train-artifacts --resume
 ```
+
+`--iterations 10` is a target, not an increment: rerunning the same command resumes the first incomplete artifact and stops once `iteration-00010` is current. The equivalent package entry point is `python -m self_summarization_agent.training_loop`. Use `--evaluate-final` when the final checkpoint should also receive a held-out evaluation.
+
+`rollout_collection`, `judge_step`, `cache_step`, and `train_step` remain available as diagnostic/repair commands. The one-iteration `iteration_launcher` is a compatibility wrapper around the Python loop.
 
 For the intended GPU run:
 
-- each iteration's combined eval-then-train collection uses one phase-scoped FAISS worker; the embedding model is unloaded before fallback judging, caching, and policy weight updates
-- combined collection starts one overlap judge worker, then reuses one OpenAI-compatible client for evaluation and training rollouts against the externally served policy checkpoint
+- merged collection owns retrieval for the collection process, which exits before the policy update starts
+- combined collection starts one judge worker and reuses it for evaluation and training rollouts against the same policy checkpoint
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through the selected engine
-- rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
+- rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; judging always streams concurrently in the normal training loop
+- judged training rows stream immediately to the cache worker on `collection.cache_gpu_ids`, so reference-logprob scoring overlaps training rollout generation and is drained before `train_update`
 - `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; the default Qwen3.5 thinking profile uses `temperature: 1.0`, `top_p: 0.95`, and the documented `top_k`, `min_p`, presence-penalty, and repetition-penalty settings
 - eval sampling overrides are applied to the already-loaded rollout generator and restored before training collection, so specialization does not reload the policy model or change the shared-engine phase order
 - raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
-- `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` loads the rollout checkpoint and writes v4 sparse interval caches from the exact collection IDs, with assistant-only completion masks, scalar mean reference logprobs, and per-token reference logprobs; with `--resume`, completed v4 rows are preserved and older cache versions are regenerated as v4
-- interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
+- resume reconciles raw, judged, and cached rows by `(query_id, rollout_index)`: existing raw rows can be judged without recollection, and existing judged rows can be cached without re-judging
+- each iteration writes a semantic-config manifest; resume rejects checkpoint, sampling-profile, or data-contract drift while allowing operational timeout/worker settings to change
+- cache scoring writes v4 sparse interval caches from exact collection IDs, with assistant-only masks and per-token reference logprobs; stale cache rows are regenerated
+- interrupted runs skip complete merged-collection and train-update phases, and a complete checkpoint is atomically published before `latest` advances
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs
+- `--iterations` controls checkpoint updates in the outer loop; `training.update_epochs` controls repeated optimization over one frozen rollout batch, while legacy `training.steps`/`training.epochs` apply only to `train_launcher`
 - iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
-- after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
+- add `--evaluate-final` to evaluate checkpoint `N`; otherwise checkpoint `N` is evaluated at the start of iteration `N+1`
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
 To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 
 ```powershell
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer
+python scripts/train_iterations.py --config configs/train/default.yaml --iterations 10 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer
 ```
 
 ### Optional verl/Ray training backend
@@ -303,7 +305,7 @@ The `training.backend: verl_ray` path is an optional infrastructure path for run
 Example override:
 
 ```powershell
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.worker_backend=verl_fsdp --set training.verl.num_gpus_per_worker=4
+python scripts/train_iterations.py --config configs/train/default.yaml --iterations 10 --latest-root /path/to/train-artifacts --set training.backend=verl_ray --set training.verl.worker_backend=verl_fsdp --set training.verl.num_gpus_per_worker=4
 ```
 
 Useful `training.verl` knobs:

@@ -120,6 +120,9 @@ class RuntimeConfig:
 class CollectionConfig:
     train_task_count: int | None = None
     eval_task_count: int | None = None
+    cache_gpu_ids: list[int] = field(default_factory=lambda: [0])
+    worker_queue_size: int = 8
+    worker_stall_timeout_seconds: float = 600.0
 
 
 @dataclass(slots=True)

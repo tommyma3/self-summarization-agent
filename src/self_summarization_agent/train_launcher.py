@@ -156,7 +156,7 @@ def train_experiment(
     if config.training.backend.lower() != "transformers":
         raise NotImplementedError(
             "train_launcher supports only training.backend='transformers'. "
-            "Use self_summarization_agent.iteration_launcher for process-isolated vLLM rollout "
+            "Use self_summarization_agent.training_loop for process-isolated vLLM rollout "
             "and long-context distributed training backends."
         )
 

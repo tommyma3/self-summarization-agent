@@ -4,6 +4,7 @@ from self_summarization_agent.checkpoints import (
     advance_latest_checkpoint,
     is_vllm_loadable_checkpoint,
     mark_checkpoint_complete,
+    publish_checkpoint,
     resolve_latest_checkpoint,
 )
 
@@ -37,3 +38,17 @@ def test_latest_checkpoint_rejects_partial_checkpoint(tmp_path: Path) -> None:
         assert "not complete or vLLM-loadable" in str(exc)
     else:
         raise AssertionError("Expected partial checkpoint to be rejected")
+
+
+def test_publish_checkpoint_moves_aside_an_incomplete_destination(tmp_path: Path) -> None:
+    partial = tmp_path / ".iteration-00001.incomplete"
+    destination = tmp_path / "iteration-00001"
+    write_fake_checkpoint(partial)
+    destination.mkdir()
+    (destination / "partial.txt").write_text("partial", encoding="utf-8")
+
+    published = publish_checkpoint(partial, destination)
+
+    assert published == destination
+    assert is_vllm_loadable_checkpoint(destination)
+    assert (tmp_path / "iteration-00001.stale-001" / "partial.txt").exists()

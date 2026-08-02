@@ -15,6 +15,11 @@ dataset:
 collection:
   train_task_count: 50
   eval_task_count: 50
+  # Reference-logprob scoring streams judged training rows on this device while
+  # rollout generation continues on rollout.gpu_ids.
+  cache_gpu_ids: [0]
+  worker_queue_size: 8
+  worker_stall_timeout_seconds: 600
 
 retrieval:
   backend: faiss
@@ -53,7 +58,6 @@ rollout:
   max_model_len: 27000
   enable_prefix_caching: true
   max_concurrent_episodes: 50
-  overlap_judge: true
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95

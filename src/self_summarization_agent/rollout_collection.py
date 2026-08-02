@@ -222,16 +222,19 @@ class _SubprocessOverlapJudgeClient:
         config_path: str,
         overrides: list[str],
         checkpoint_id: str,
+        gpu_ids: list[int],
+        queue_size: int = 8,
         drain_timeout_seconds: float = 600,
     ) -> None:
         context = mp.get_context("spawn")
-        self.request_queue = context.Queue()
-        self.response_queue = context.Queue()
+        self.request_queue = context.Queue(maxsize=queue_size)
+        self.response_queue = context.Queue(maxsize=queue_size)
         self.process = context.Process(
             target=run_judge_worker,
             kwargs={
                 "config_path": config_path,
                 "overrides": overrides,
+                "gpu_ids": gpu_ids,
                 "request_queue": self.request_queue,
                 "response_queue": self.response_queue,
             },
@@ -241,7 +244,7 @@ class _SubprocessOverlapJudgeClient:
         self.next_batch_id = 0
         self.pending_batch_count = 0
         self._drain_timeout_seconds = drain_timeout_seconds
-        self._drain_deadline: float | None = None
+        self._last_progress_at = time.monotonic()
 
     def submit(self, rows: list[dict[str, Any]], examples: list[QueryExample]) -> None:
         examples_by_query_id = {example.query_id: _example_payload(example) for example in examples}
@@ -255,9 +258,11 @@ class _SubprocessOverlapJudgeClient:
         )
         self.next_batch_id += 1
         self.pending_batch_count += 1
+        self._last_progress_at = time.monotonic()
 
     def _handle_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         self.pending_batch_count -= 1
+        self._last_progress_at = time.monotonic()
         if response.get("error"):
             traceback_text = response.get("traceback")
             detail = f"\n{traceback_text}" if traceback_text else ""
@@ -267,15 +272,9 @@ class _SubprocessOverlapJudgeClient:
             raise RuntimeError(f"Overlap judge worker returned invalid response: {response!r}")
         return rows
 
-    def _ensure_drain_deadline(self) -> None:
-        if self._drain_deadline is None:
-            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
-
     def _check_drain_timeout(self) -> None:
         """Terminate the worker if the drain deadline has passed."""
-        if self._drain_deadline is None:
-            return
-        if time.monotonic() < self._drain_deadline:
+        if time.monotonic() - self._last_progress_at < self._drain_timeout_seconds:
             return
         pid = self.process.pid
         print(
@@ -290,9 +289,11 @@ class _SubprocessOverlapJudgeClient:
         if self.process.is_alive():
             self.process.kill()
             self.process.join(timeout=10)
+        raise TimeoutError(
+            f"Overlap judge worker made no progress for {self._drain_timeout_seconds:.0f}s"
+        )
 
     def drain_available(self) -> list[dict[str, Any]]:
-        self._ensure_drain_deadline()
         rows: list[dict[str, Any]] = []
         while self.pending_batch_count:
             try:
@@ -311,7 +312,6 @@ class _SubprocessOverlapJudgeClient:
         return rows
 
     def finish(self) -> list[dict[str, Any]]:
-        self._ensure_drain_deadline()
         rows: list[dict[str, Any]] = []
         while self.pending_batch_count:
             try:
@@ -344,6 +344,9 @@ def _build_overlap_judge_client(
     config_path: str | Path | None,
     overrides: list[str],
     checkpoint_id: str,
+    gpu_ids: list[int] | None = None,
+    queue_size: int = 8,
+    drain_timeout_seconds: float = 600,
 ) -> Any:
     if judge is not None:
         return _InProcessOverlapJudgeClient(judge=judge, checkpoint_id=checkpoint_id)
@@ -353,6 +356,9 @@ def _build_overlap_judge_client(
         config_path=str(config_path),
         overrides=overrides,
         checkpoint_id=checkpoint_id,
+        gpu_ids=list(gpu_ids or []),
+        queue_size=queue_size,
+        drain_timeout_seconds=drain_timeout_seconds,
     )
 
 
@@ -535,6 +541,9 @@ def collect_rollouts(
                 config_path=config_path,
                 overrides=overrides,
                 checkpoint_id=checkpoint_id,
+                gpu_ids=list(config.judge.gpu_ids),
+                queue_size=config.collection.worker_queue_size,
+                drain_timeout_seconds=config.collection.worker_stall_timeout_seconds,
             )
             owns_overlap_judge_client = True
     generator = generator or _build_rollout_generator(config, checkpoint, split=split)
