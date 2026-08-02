@@ -83,12 +83,12 @@ evaluation:
 
 runtime:
   context_threshold_tokens: 12000
-  max_context_tokens: 24000
+  max_context_tokens: 28000
   # Summary-body cap. An overlong summary terminates the rollout with a negative reward.
   max_summary_tokens: 6400
   tool_budget: 99999
   # Episode budget: model completions plus raw appended tool-result content.
-  generated_token_budget: 24000
+  generated_token_budget: 36000
 
 judge:
   enabled: true
