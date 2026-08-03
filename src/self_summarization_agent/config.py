@@ -123,6 +123,7 @@ class CollectionConfig:
     cache_gpu_ids: list[int] = field(default_factory=lambda: [0])
     worker_queue_size: int = 8
     worker_stall_timeout_seconds: float = 600.0
+    judge_batch_size: int = 8
 
 
 @dataclass(slots=True)

@@ -76,7 +76,7 @@ def semantic_config_id(config) -> str:
     runtime = payload.get("runtime", {})
     runtime.pop("phase_timeout_seconds", None)
     collection = payload.get("collection", {})
-    for key in ("cache_gpu_ids", "worker_queue_size", "worker_stall_timeout_seconds"):
+    for key in ("cache_gpu_ids", "worker_queue_size", "worker_stall_timeout_seconds", "judge_batch_size"):
         collection.pop(key, None)
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

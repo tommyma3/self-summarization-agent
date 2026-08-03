@@ -19,7 +19,12 @@ collection:
   # rollout generation continues on rollout.gpu_ids.
   cache_gpu_ids: [0]
   worker_queue_size: 8
-  worker_stall_timeout_seconds: 600
+  worker_stall_timeout_seconds: 1800
+  # Judge submission batch size. Kept small (≤ the judge engine's
+  # effective concurrency) so that each submission completes promptly
+  # and the overlapping drain loop sees regular progress, even when the
+  # judge model generates long thinking blocks with a large max_new_tokens.
+  judge_batch_size: 10
 
 retrieval:
   backend: faiss
@@ -104,8 +109,8 @@ judge:
   gpu_ids: [1]
   tensor_parallel_size: 1
   attention_backend:
-  max_model_len: 18000
-  max_new_tokens: 12000
+  max_model_len: 12000
+  max_new_tokens: 8192
   temperature: 0.0
   top_p: 1.0
   do_sample: false

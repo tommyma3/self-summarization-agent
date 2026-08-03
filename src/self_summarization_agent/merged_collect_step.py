@@ -291,7 +291,7 @@ def _collect_split_streaming(
     missing_judged_keys = completed_raw_keys - set(existing_judged_rows)
     if missing_judged_keys and judge_client is None:
         raise RuntimeError(f"{split} judged rows are incomplete but no judge worker was started")
-    for key_batch in iter_batches(sorted(missing_judged_keys), config.rollout.max_concurrent_episodes):
+    for key_batch in iter_batches(sorted(missing_judged_keys), config.collection.judge_batch_size):
         judge_client.submit(
             [raw_rows[key] for key in key_batch],
             [example_by_query_id[key[0]] for key in key_batch],
@@ -355,7 +355,14 @@ def _collect_split_streaming(
                 append_jsonl(raw_output_path, row)
                 new_rows.append(row)
                 batch_examples.append(example)
-            judge_client.submit(new_rows, batch_examples)
+            # Submit as a single batch; the judge worker chunks internally
+            # by judge_batch_size and sends heartbeats so the drain loop sees
+            # regular progress even when the judge model is slow.
+            judge_client.submit(
+                new_rows,
+                batch_examples,
+                judge_batch_size=config.collection.judge_batch_size,
+            )
             _route_judged_rows(
                 judge_client.drain_available(),
                 judged_output_paths=judged_output_paths,

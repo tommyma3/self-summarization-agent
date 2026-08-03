@@ -246,21 +246,34 @@ class _SubprocessOverlapJudgeClient:
         self._drain_timeout_seconds = drain_timeout_seconds
         self._last_progress_at = time.monotonic()
 
-    def submit(self, rows: list[dict[str, Any]], examples: list[QueryExample]) -> None:
+    def submit(
+        self,
+        rows: list[dict[str, Any]],
+        examples: list[QueryExample],
+        *,
+        judge_batch_size: int | None = None,
+    ) -> None:
         examples_by_query_id = {example.query_id: _example_payload(example) for example in examples}
-        self.request_queue.put(
-            {
-                "batch_id": self.next_batch_id,
-                "rows": rows,
-                "examples_by_query_id": examples_by_query_id,
-                "expected_checkpoint_id": self.checkpoint_id,
-            }
-        )
+        message: dict[str, Any] = {
+            "batch_id": self.next_batch_id,
+            "rows": rows,
+            "examples_by_query_id": examples_by_query_id,
+            "expected_checkpoint_id": self.checkpoint_id,
+        }
+        if judge_batch_size is not None:
+            message["judge_batch_size"] = judge_batch_size
+        self.request_queue.put(message)
         self.next_batch_id += 1
         self.pending_batch_count += 1
         self._last_progress_at = time.monotonic()
 
     def _handle_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
+        # Heartbeats let the worker signal liveness during long-running chunks
+        # without completing the batch.  They reset the drain timeout but do
+        # not decrement pending_batch_count.
+        if response.get("heartbeat"):
+            self._last_progress_at = time.monotonic()
+            return []
         self.pending_batch_count -= 1
         self._last_progress_at = time.monotonic()
         if response.get("error"):
