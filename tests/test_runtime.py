@@ -208,6 +208,47 @@ def test_runtime_completes_without_summary_below_threshold() -> None:
     assert result.final_answer == "done"
 
 
+def test_run_many_stream_emits_completions_and_refills_slots_between_rounds() -> None:
+    class BatchRecordingScriptedModel(ScriptedModel):
+        def __init__(self, outputs: list[str]) -> None:
+            super().__init__(outputs=outputs)
+            self.batch_sizes: list[int] = []
+
+        def generate_batch(self, prompts: list[str]) -> list[str]:
+            self.batch_sizes.append(len(prompts))
+            return super().generate_batch(prompts)
+
+    model = BatchRecordingScriptedModel(
+        outputs=[
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "one"}}'),
+            tool_output('{"tool_name": "search", "arguments": {"query": "q2"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "two"}}'),
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "three"}}'),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FakeBackend(search_index={"q2": ["doc-2"]}, documents={}),
+        context_threshold_tokens=1000,
+        max_context_tokens=2048,
+    )
+
+    completed_batches = list(
+        runtime.run_many_stream(
+            [("q1", "first"), ("q2", "second"), ("q3", "third")],
+            max_active_episodes=2,
+        )
+    )
+
+    assert [[index for index, _ in batch] for batch in completed_batches] == [[0], [1, 2]]
+    assert [
+        result.final_answer
+        for batch in completed_batches
+        for _, result in batch
+    ] == ["one", "two", "three"]
+    assert model.batch_sizes == [2, 2]
+
+
 def test_runtime_batches_same_step_search_calls() -> None:
     class BatchSearchBackend(FakeBackend):
         def __init__(self) -> None:

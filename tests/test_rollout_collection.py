@@ -18,6 +18,7 @@ from self_summarization_agent.config import (
 )
 from self_summarization_agent.dataset import QueryExample
 from self_summarization_agent.rollout_collection import collect_rollouts
+from self_summarization_agent.rollout_collection import _SubprocessOverlapJudgeClient
 
 
 class CyclingGenerator:
@@ -93,6 +94,22 @@ class FakeJudge:
 
     def evaluate_batch(self, items: list[tuple[QueryExample, str, str]]) -> list[FakeJudgeDecision]:
         return [self.evaluate(example, status, response) for example, status, response in items]
+
+
+def test_overlap_judge_progress_resets_watchdog_deadline() -> None:
+    client = object.__new__(_SubprocessOverlapJudgeClient)
+    client.pending_batch_count = 2
+    client.completed_row_count = 0
+    client._drain_timeout_seconds = 10
+    client._drain_deadline = 1.0
+
+    assert client._handle_response({"batch_id": 0, "rows": [{"query_id": "q1"}]})
+    assert client.pending_batch_count == 1
+    assert client._drain_deadline > 1.0
+
+    client._handle_response({"batch_id": 1, "rows": []})
+    assert client.pending_batch_count == 0
+    assert client._drain_deadline is None
 
 
 def train_config(tmp_path: Path) -> TrainConfig:

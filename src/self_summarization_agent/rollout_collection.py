@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import multiprocessing as mp
-from queue import Empty
 from dataclasses import replace
 import json
+import multiprocessing as mp
 import os
 from pathlib import Path
+from queue import Empty, Full
 import random
 import time
 from typing import Any
@@ -227,10 +227,11 @@ class _SubprocessOverlapJudgeClient:
         config_path: str,
         overrides: list[str],
         checkpoint_id: str,
+        queue_max_batches: int = 8,
         drain_timeout_seconds: float = 600,
     ) -> None:
         context = mp.get_context("spawn")
-        self.request_queue = context.Queue()
+        self.request_queue = context.Queue(maxsize=max(1, queue_max_batches))
         self.response_queue = context.Queue()
         self.process = context.Process(
             target=run_judge_worker,
@@ -247,10 +248,32 @@ class _SubprocessOverlapJudgeClient:
         self.pending_batch_count = 0
         self._drain_timeout_seconds = drain_timeout_seconds
         self._drain_deadline: float | None = None
+        self.submitted_row_count = 0
+        self.completed_row_count = 0
+        self.queue_block_seconds = 0.0
+
+    def _put_request(self, message: dict[str, Any]) -> None:
+        started = time.monotonic()
+        deadline = started + self._drain_timeout_seconds
+        while True:
+            try:
+                self.request_queue.put(message, timeout=5)
+                self.queue_block_seconds += time.monotonic() - started
+                return
+            except Full:
+                if not self.process.is_alive():
+                    raise RuntimeError(
+                        "Overlap judge worker exited while its request queue was full "
+                        f"(exit_code={self.process.exitcode})"
+                    )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "Timed out waiting for space in the overlap judge request queue"
+                    )
 
     def submit(self, rows: list[dict[str, Any]], examples: list[QueryExample]) -> None:
         examples_by_query_id = {example.query_id: _example_payload(example) for example in examples}
-        self.request_queue.put(
+        self._put_request(
             {
                 "batch_id": self.next_batch_id,
                 "rows": rows,
@@ -260,6 +283,9 @@ class _SubprocessOverlapJudgeClient:
         )
         self.next_batch_id += 1
         self.pending_batch_count += 1
+        self.submitted_row_count += len(rows)
+        if self._drain_deadline is None:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
 
     def _handle_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         self.pending_batch_count -= 1
@@ -270,10 +296,18 @@ class _SubprocessOverlapJudgeClient:
         rows = response.get("rows")
         if not isinstance(rows, list):
             raise RuntimeError(f"Overlap judge worker returned invalid response: {response!r}")
+        self.completed_row_count += len(rows)
+        self._drain_deadline = (
+            time.monotonic() + self._drain_timeout_seconds
+            if self.pending_batch_count
+            else None
+        )
         return rows
 
     def _ensure_drain_deadline(self) -> None:
-        if self._drain_deadline is None:
+        if not self.pending_batch_count:
+            self._drain_deadline = None
+        elif self._drain_deadline is None:
             self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
 
     def _check_drain_timeout(self) -> None:
@@ -334,10 +368,22 @@ class _SubprocessOverlapJudgeClient:
             rows.extend(self._handle_response(response))
         return rows
 
+    def metrics(self) -> dict[str, Any]:
+        return {
+            "submitted_rows": self.submitted_row_count,
+            "completed_rows": self.completed_row_count,
+            "pending_batches": self.pending_batch_count,
+            "queue_block_seconds": self.queue_block_seconds,
+        }
+
     def close(self) -> None:
         if self.process.is_alive():
-            self.request_queue.put(SHUTDOWN)
-            self.process.join(timeout=30)
+            try:
+                self.request_queue.put(SHUTDOWN, timeout=5)
+            except Full:
+                pass
+            else:
+                self.process.join(timeout=30)
         if self.process.is_alive():
             self.process.terminate()
             self.process.join(timeout=30)
@@ -349,6 +395,7 @@ def _build_overlap_judge_client(
     config_path: str | Path | None,
     overrides: list[str],
     checkpoint_id: str,
+    queue_max_batches: int = 8,
 ) -> Any:
     if judge is not None:
         return _InProcessOverlapJudgeClient(judge=judge, checkpoint_id=checkpoint_id)
@@ -358,6 +405,7 @@ def _build_overlap_judge_client(
         config_path=str(config_path),
         overrides=overrides,
         checkpoint_id=checkpoint_id,
+        queue_max_batches=queue_max_batches,
     )
 
 
@@ -540,6 +588,7 @@ def collect_rollouts(
                 config_path=config_path,
                 overrides=overrides,
                 checkpoint_id=checkpoint_id,
+                queue_max_batches=config.rollout.overlap_queue_max_batches,
             )
             owns_overlap_judge_client = True
     generator = generator or _build_rollout_generator(config, checkpoint, split=split)

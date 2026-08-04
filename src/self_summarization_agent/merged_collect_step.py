@@ -24,7 +24,7 @@ import json
 import multiprocessing as mp
 import os
 from pathlib import Path
-from queue import Empty
+from queue import Empty, Full
 import time
 import traceback
 from typing import Any
@@ -108,17 +108,31 @@ def _run_cache_overlap_worker(
         try:
             rows = message["rows"]
             expected_checkpoint_id = message["expected_checkpoint_id"]
-            cached_rows: list[dict[str, Any]] = []
-            for row in rows:
-                samples = extract_trainable_samples(
+            samples_by_row = [
+                extract_trainable_samples(
                     row["trajectory_records"],
                     row["turn_rewards"],
                     rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
                 )
-                if not samples:
+                for row in rows
+            ]
+            all_samples = [sample for row_samples in samples_by_row for sample in row_samples]
+            all_cache_payloads: list[dict[str, Any]] = []
+            cache_microbatch_size = max(
+                1,
+                config.training.gradient_accumulation_microbatch_size,
+            )
+            for sample_batch in iter_batches(all_samples, cache_microbatch_size):
+                all_cache_payloads.extend(scorer.cache_samples(sample_batch))
+            cached_rows: list[dict[str, Any]] = []
+            payload_offset = 0
+            for row, row_samples in zip(rows, samples_by_row):
+                if not row_samples:
                     cached_rows.append(dict(row))
                     continue
-                cache_payloads = scorer.cache_samples(samples)
+                next_offset = payload_offset + len(row_samples)
+                cache_payloads = all_cache_payloads[payload_offset:next_offset]
+                payload_offset = next_offset
                 cached_row = _attach_training_caches(
                     row,
                     cache_payloads=cache_payloads,
@@ -154,10 +168,11 @@ class _CacheOverlapClient:
         overrides: list[str],
         checkpoint_path: str,
         checkpoint_id: str,
+        queue_max_batches: int = 8,
         drain_timeout_seconds: float = 600,
     ) -> None:
         context = mp.get_context("spawn")
-        self.request_queue = context.Queue()
+        self.request_queue = context.Queue(maxsize=max(1, queue_max_batches))
         self.response_queue = context.Queue()
         self.process = context.Process(
             target=_run_cache_overlap_worker,
@@ -175,6 +190,28 @@ class _CacheOverlapClient:
         self.pending_count = 0
         self._drain_timeout_seconds = drain_timeout_seconds
         self._drain_deadline: float | None = None
+        self.submitted_row_count = 0
+        self.completed_row_count = 0
+        self.queue_block_seconds = 0.0
+
+    def _put_request(self, message: dict[str, Any]) -> None:
+        started = time.monotonic()
+        deadline = started + self._drain_timeout_seconds
+        while True:
+            try:
+                self.request_queue.put(message, timeout=5)
+                self.queue_block_seconds += time.monotonic() - started
+                return
+            except Full:
+                if not self.process.is_alive():
+                    raise RuntimeError(
+                        "Cache overlap worker exited while its request queue was full "
+                        f"(exit_code={self.process.exitcode})"
+                    )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "Timed out waiting for space in the cache overlap request queue"
+                    )
 
     # ------------------------------------------------------------------
     # Submit / drain / finish (mirrors _SubprocessOverlapJudgeClient)
@@ -183,7 +220,7 @@ class _CacheOverlapClient:
     def submit(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
-        self.request_queue.put(
+        self._put_request(
             {
                 "batch_id": self.next_batch_id,
                 "rows": rows,
@@ -192,6 +229,9 @@ class _CacheOverlapClient:
         )
         self.next_batch_id += 1
         self.pending_count += 1
+        self.submitted_row_count += len(rows)
+        if self._drain_deadline is None:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
 
     def _handle_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         self.pending_count -= 1
@@ -202,10 +242,18 @@ class _CacheOverlapClient:
         rows = response.get("rows")
         if not isinstance(rows, list):
             raise RuntimeError(f"Cache overlap worker returned invalid response: {response!r}")
+        self.completed_row_count += len(rows)
+        self._drain_deadline = (
+            time.monotonic() + self._drain_timeout_seconds
+            if self.pending_count
+            else None
+        )
         return rows
 
     def _ensure_drain_deadline(self) -> None:
-        if self._drain_deadline is None:
+        if not self.pending_count:
+            self._drain_deadline = None
+        elif self._drain_deadline is None:
             self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
 
     def _check_drain_timeout(self) -> None:
@@ -265,10 +313,22 @@ class _CacheOverlapClient:
             rows.extend(self._handle_response(response))
         return rows
 
+    def metrics(self) -> dict[str, Any]:
+        return {
+            "submitted_rows": self.submitted_row_count,
+            "completed_rows": self.completed_row_count,
+            "pending_batches": self.pending_count,
+            "queue_block_seconds": self.queue_block_seconds,
+        }
+
     def close(self) -> None:
         if self.process.is_alive():
-            self.request_queue.put(_CACHE_SHUTDOWN)
-            self.process.join(timeout=30)
+            try:
+                self.request_queue.put(_CACHE_SHUTDOWN, timeout=5)
+            except Full:
+                pass
+            else:
+                self.process.join(timeout=30)
         if self.process.is_alive():
             self.process.terminate()
             self.process.join(timeout=30)
@@ -319,9 +379,12 @@ def _collect_split(
         for rollout_index in range(group_size)
     ]
     expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
+    example_by_query_id = {example.query_id: example for example in selected_examples}
+    completed_raw_keys: set[tuple[str, int]] = set()
+    completed_judged_keys: set[tuple[str, int]] = set()
 
     if resume:
-        completed_keys = _load_completed_rollout_keys(
+        completed_raw_keys = _load_completed_rollout_keys(
             raw_output_path,
             checkpoint_id=checkpoint_id,
             expected_keys=expected_keys,
@@ -331,17 +394,30 @@ def _collect_split(
         rollout_requests = [
             (example, rollout_index)
             for example, rollout_index in rollout_requests
-            if (example.query_id, rollout_index) not in completed_keys
+            if (example.query_id, rollout_index) not in completed_raw_keys
         ]
-        if not rollout_requests:
-            return
     elif raw_output_path.exists():
         raw_output_path.unlink()
 
-    overlap_judge = overlap_judge_client is not None
+    overlap_judge = overlap_judge_client is not None and judged_output_path is not None
     if overlap_judge:
+        assert judged_output_path is not None
         ensure_dir(judged_output_path.parent)
-        if not resume and judged_output_path.exists():
+        if resume:
+            completed_judged_keys = _load_completed_rollout_keys(
+                judged_output_path,
+                checkpoint_id=checkpoint_id,
+                expected_keys=expected_keys,
+                expected_sampling_profile_id=profile_id if split == "eval" else None,
+                require_exact_token_ids=False,
+            )
+            if not completed_judged_keys <= completed_raw_keys:
+                unexpected = sorted(completed_judged_keys - completed_raw_keys)
+                raise ValueError(
+                    f"Cannot resume {judged_output_path}: judged rows have no raw counterpart: "
+                    f"{unexpected!r}"
+                )
+        elif judged_output_path.exists():
             judged_output_path.unlink()
 
     if cached_output_path is not None:
@@ -349,18 +425,82 @@ def _collect_split(
         if not resume and cached_output_path.exists():
             cached_output_path.unlink()
 
+    def append_cached_rows(rows: list[dict[str, Any]]) -> None:
+        if cached_output_path is None:
+            return
+        for cached_row in rows:
+            append_jsonl(cached_output_path, cached_row)
+
+    def consume_judged_rows(rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        assert judged_output_path is not None
+        for judged_row in rows:
+            append_jsonl(judged_output_path, judged_row)
+        if cache_overlap_client is not None:
+            cache_overlap_client.submit(rows)
+            append_cached_rows(cache_overlap_client.drain_available())
+
+    # Resume can have raw rows that were never judged. Submit those before new
+    # generation so judge startup/processing overlaps the first rollout round.
+    if overlap_judge and completed_raw_keys - completed_judged_keys:
+        raw_rows_by_key = {
+            (row.get("query_id"), row.get("rollout_index")): row
+            for row in _load_rollout_rows(raw_output_path)
+        }
+        pending_judge_rows = [
+            raw_rows_by_key[(example.query_id, rollout_index)]
+            for example in selected_examples
+            for rollout_index in range(group_size)
+            if (example.query_id, rollout_index) in completed_raw_keys - completed_judged_keys
+        ]
+        for rows in iter_batches(pending_judge_rows, config.judge.batch_size):
+            overlap_judge_client.submit(
+                rows,
+                [example_by_query_id[str(row["query_id"])] for row in rows],
+            )
+
+    # Likewise, resume can have judged rows whose cache responses were not
+    # durably appended before interruption.
+    if cache_overlap_client is not None and judged_output_path is not None:
+        cached_keys = (
+            set(
+                _completed_cached_rows(
+                    cached_output_path,
+                    expected_checkpoint_id=checkpoint_id,
+                )
+            )
+            if resume and cached_output_path is not None
+            else set()
+        )
+        existing_judged_rows = (
+            _load_rollout_rows(judged_output_path) if judged_output_path.exists() else []
+        )
+        pending_cache_rows = [
+            row
+            for row in existing_judged_rows
+            if (row.get("query_id"), row.get("rollout_index")) not in cached_keys
+        ]
+        for rows in iter_batches(pending_cache_rows, config.judge.batch_size):
+            cache_overlap_client.submit(rows)
+
+    collection_started = time.monotonic()
+    completed_batch_count = 0
+    generated_row_count = 0
     with _temporary_sampling_profile(generator, sampling_profile):
         runtime = build_runtime(generator, backend, config.runtime)
-        for request_batch in iter_batches(
-            rollout_requests,
-            config.rollout.max_concurrent_episodes,
+        episode_inputs = [
+            (example.query_id, example.query) for example, _ in rollout_requests
+        ]
+        for completed_batch in runtime.run_many_stream(
+            episode_inputs,
+            max_active_episodes=config.rollout.max_concurrent_episodes,
         ):
-            results = runtime.run_many(
-                (example.query_id, example.query) for example, _ in request_batch
-            )
+            completed_batch_count += 1
             overlap_rows: list[dict[str, Any]] = []
             overlap_examples: list[Any] = []
-            for (example, rollout_index), result in zip(request_batch, results):
+            for request_index, result in completed_batch:
+                example, rollout_index = rollout_requests[request_index]
                 trainable_sample_count = None
                 judge_payload = None
                 # We don't do inline judging in the merged step — overlap is
@@ -382,30 +522,38 @@ def _collect_split(
                     ),
                 }
                 append_jsonl(raw_output_path, row)
+                generated_row_count += 1
                 if overlap_judge:
                     overlap_rows.append(row)
                     overlap_examples.append(example)
 
             if overlap_judge and overlap_rows:
                 overlap_judge_client.submit(overlap_rows, overlap_examples)
-                for judged_row in overlap_judge_client.drain_available():
-                    append_jsonl(judged_output_path, judged_row)
-                    # Forward to cache worker for train split
-                    if cache_overlap_client is not None:
-                        cache_overlap_client.submit([judged_row])
-                        for cached_row in cache_overlap_client.drain_available():
-                            append_jsonl(cached_output_path, cached_row)
+                consume_judged_rows(overlap_judge_client.drain_available())
+            elif cache_overlap_client is not None:
+                append_cached_rows(cache_overlap_client.drain_available())
 
         # Drain remaining judge + cache responses
         if overlap_judge:
-            for judged_row in overlap_judge_client.finish():
-                append_jsonl(judged_output_path, judged_row)
-                if cache_overlap_client is not None:
-                    cache_overlap_client.submit([judged_row])
+            consume_judged_rows(overlap_judge_client.finish())
 
         if cache_overlap_client is not None:
-            for cached_row in cache_overlap_client.finish():
-                append_jsonl(cached_output_path, cached_row)
+            append_cached_rows(cache_overlap_client.finish())
+
+    print(
+        "[merged_collect] "
+        + json.dumps(
+            {
+                "event": "streaming_collection_complete",
+                "split": split,
+                "generated_rows": generated_row_count,
+                "completion_batches": completed_batch_count,
+                "elapsed_seconds": time.monotonic() - collection_started,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -556,16 +704,19 @@ def run_merged_collect(
 
     generator = None
     if needs_collection:
-        # Build vLLM engine with train defaults (eval sampling is applied
-        # temporarily via _temporary_sampling_profile during eval collection).
-        generator = _build_rollout_generator(config, checkpoint, split="train")
+        # Start judge loading first so its GPU initialization overlaps rollout
+        # engine construction on the disjoint rollout GPUs.
         if overlap_judge:
             overlap_judge_client = _build_overlap_judge_client(
                 judge=None,
                 config_path=str(config_path),
                 overrides=overrides,
                 checkpoint_id=checkpoint_id,
+                queue_max_batches=config.rollout.overlap_queue_max_batches,
             )
+        # Build vLLM engine with train defaults (eval sampling is applied
+        # temporarily via _temporary_sampling_profile during eval collection).
+        generator = _build_rollout_generator(config, checkpoint, split="train")
 
     outputs: dict[str, Path] = {}
 
@@ -624,6 +775,7 @@ def run_merged_collect(
                     overrides=overrides,
                     checkpoint_path=str(checkpoint),
                     checkpoint_id=checkpoint_id,
+                    queue_max_batches=config.rollout.overlap_queue_max_batches,
                 )
 
             try:
@@ -682,10 +834,26 @@ def run_merged_collect(
                     outputs["train_cached"] = Path(train_cached_output)
             finally:
                 if cache_overlap_client is not None:
+                    print(
+                        "[merged_collect] "
+                        + json.dumps(
+                            {"event": "cache_overlap_metrics", **cache_overlap_client.metrics()},
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
                     cache_overlap_client.close()
 
     finally:
         if overlap_judge_client is not None:
+            print(
+                "[merged_collect] "
+                + json.dumps(
+                    {"event": "judge_overlap_metrics", **overlap_judge_client.metrics()},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             overlap_judge_client.close()
 
     return outputs

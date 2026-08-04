@@ -93,6 +93,7 @@ class RolloutConfig:
     enable_prefix_caching: bool = True
     max_concurrent_episodes: int = 32
     overlap_judge: bool = True
+    overlap_queue_max_batches: int = 8
     max_new_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -104,6 +105,12 @@ class RolloutConfig:
     api_max_retries: int = 2
     api_extra_body: dict[str, Any] = field(default_factory=dict)
     require_exact_token_ids: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_concurrent_episodes < 1:
+            raise ValueError("rollout.max_concurrent_episodes must be at least 1")
+        if self.overlap_queue_max_batches < 1:
+            raise ValueError("rollout.overlap_queue_max_batches must be at least 1")
 
 
 @dataclass(slots=True)
@@ -145,6 +152,14 @@ class JudgeConfig:
     temperature: float = 0.0
     top_p: float = 1.0
     do_sample: bool = False
+    batch_size: int = 32
+    batch_wait_ms: int = 25
+
+    def __post_init__(self) -> None:
+        if self.batch_size < 1:
+            raise ValueError("judge.batch_size must be at least 1")
+        if self.batch_wait_ms < 0:
+            raise ValueError("judge.batch_wait_ms cannot be negative")
 
 
 @dataclass(slots=True)

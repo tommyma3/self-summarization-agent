@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1090,72 +1090,143 @@ class EpisodeRuntime:
         active.token_usage.retired_round_count += retired_count
         active.summary_turns.append(summary_turn_id)
 
-    def run_many(self, episodes: Iterable[tuple[str, str]]) -> list[RuntimeResult]:
-        active_episodes = [self._new_active_episode(query_id, user_prompt) for query_id, user_prompt in episodes]
-        while any(active.result is None for active in active_episodes):
-            action_items: list[tuple[_ActiveEpisode, str, int, bool]] = []
-            for active in active_episodes:
-                if active.result is not None:
-                    continue
-                remaining_tool_calls = self._remaining_tool_calls(active)
-                forced_reasons: list[str] = []
-                if remaining_tool_calls == 0:
-                    forced_reasons.append("tool_budget")
-                if self._generated_token_budget_exhausted(active):
-                    forced_reasons.append("generated_token_budget")
+    def _advance_active_episodes(self, active_episodes: list[_ActiveEpisode]) -> None:
+        """Advance every unfinished episode by one action and compaction round.
 
-                if forced_reasons:
-                    active.token_usage.forced_answer_reasons.extend(forced_reasons)
-                    acting_prompt = self._build_forced_answer_prompt(active)
-                    active.context_manager.assert_fits(acting_prompt)
-                    prompt_tokens = self._prompt_token_count(active, acting_prompt)
-                    action_items.append((active, acting_prompt, prompt_tokens, True))
-                    continue
-                acting_prompt = self._build_runtime_prompt(active.state)
+        Keeping this as a round-sized operation preserves batched generation and
+        batched tool execution while allowing callers to retire completed
+        episodes and refill their slots before the next round.
+        """
+
+        action_items: list[tuple[_ActiveEpisode, str, int, bool]] = []
+        for active in active_episodes:
+            if active.result is not None:
+                continue
+            remaining_tool_calls = self._remaining_tool_calls(active)
+            forced_reasons: list[str] = []
+            if remaining_tool_calls == 0:
+                forced_reasons.append("tool_budget")
+            if self._generated_token_budget_exhausted(active):
+                forced_reasons.append("generated_token_budget")
+
+            if forced_reasons:
+                active.token_usage.forced_answer_reasons.extend(forced_reasons)
+                acting_prompt = self._build_forced_answer_prompt(active)
                 active.context_manager.assert_fits(acting_prompt)
                 prompt_tokens = self._prompt_token_count(active, acting_prompt)
-                action_items.append((active, acting_prompt, prompt_tokens, False))
+                action_items.append((active, acting_prompt, prompt_tokens, True))
+                continue
+            acting_prompt = self._build_runtime_prompt(active.state)
+            active.context_manager.assert_fits(acting_prompt)
+            prompt_tokens = self._prompt_token_count(active, acting_prompt)
+            action_items.append((active, acting_prompt, prompt_tokens, False))
 
-            if action_items:
-                action_outputs = self._generate_batch([prompt for _, prompt, _, _ in action_items])
-                pending_tool_actions: list[_PendingToolAction] = []
-                for (active, prompt, prompt_tokens, forced_answer), generated_output in zip(action_items, action_outputs):
-                    if forced_answer:
-                        self._apply_forced_answer_output(active, generated_output, prompt, prompt_tokens)
-                    else:
-                        pending_action = self._prepare_action_output(
-                            active,
-                            generated_output,
-                            prompt,
-                            prompt_tokens,
-                        )
-                        if pending_action is not None:
-                            pending_tool_actions.append(pending_action)
-                if pending_tool_actions:
-                    self._execute_pending_tool_actions(pending_tool_actions)
+        if action_items:
+            action_outputs = self._generate_batch([prompt for _, prompt, _, _ in action_items])
+            pending_tool_actions: list[_PendingToolAction] = []
+            for (active, prompt, prompt_tokens, forced_answer), generated_output in zip(
+                action_items,
+                action_outputs,
+            ):
+                if forced_answer:
+                    self._apply_forced_answer_output(active, generated_output, prompt, prompt_tokens)
+                else:
+                    pending_action = self._prepare_action_output(
+                        active,
+                        generated_output,
+                        prompt,
+                        prompt_tokens,
+                    )
+                    if pending_action is not None:
+                        pending_tool_actions.append(pending_action)
+            if pending_tool_actions:
+                self._execute_pending_tool_actions(pending_tool_actions)
 
-            summary_items: list[tuple[_ActiveEpisode, str, int]] = []
-            for active in active_episodes:
-                if active.result is not None:
-                    continue
-                # The generation budget has priority over context compaction.
-                # If both thresholds are reached by the latest action, the
-                # next invocation must be the forced-answer continuation.
-                if self._generated_token_budget_exhausted(active):
-                    continue
-                summary_request = self._build_summary_prompt_for_active(active)
-                if summary_request is None:
-                    continue
-                summary_prompt = summary_request
-                prompt_tokens = self._prompt_token_count(active, summary_prompt)
-                summary_items.append((active, summary_prompt, prompt_tokens))
+        summary_items: list[tuple[_ActiveEpisode, str, int]] = []
+        for active in active_episodes:
+            if active.result is not None:
+                continue
+            # The generation budget has priority over context compaction.
+            # If both thresholds are reached by the latest action, the next
+            # invocation must be the forced-answer continuation.
+            if self._generated_token_budget_exhausted(active):
+                continue
+            summary_request = self._build_summary_prompt_for_active(active)
+            if summary_request is None:
+                continue
+            summary_prompt = summary_request
+            prompt_tokens = self._prompt_token_count(active, summary_prompt)
+            summary_items.append((active, summary_prompt, prompt_tokens))
 
-            if summary_items:
-                summary_outputs = self._generate_batch([prompt for _, prompt, _ in summary_items])
-                for (active, prompt, prompt_tokens), generated_output in zip(summary_items, summary_outputs):
-                    self._apply_summary_output(active, prompt, prompt_tokens, generated_output)
+        if summary_items:
+            summary_outputs = self._generate_batch([prompt for _, prompt, _ in summary_items])
+            for (active, prompt, prompt_tokens), generated_output in zip(summary_items, summary_outputs):
+                self._apply_summary_output(active, prompt, prompt_tokens, generated_output)
 
-        return [active.result for active in active_episodes if active.result is not None]
+    def run_many_stream(
+        self,
+        episodes: Iterable[tuple[str, str]],
+        *,
+        max_active_episodes: int,
+    ) -> Iterator[list[tuple[int, RuntimeResult]]]:
+        """Yield completed episode batches while continuously refilling slots.
+
+        Result indices refer to the input order. A yielded batch contains all
+        episodes that completed in the same runtime round, which gives
+        downstream judge/cache workers useful micro-batches without waiting for
+        the slowest episode in the original collection window.
+        """
+
+        if max_active_episodes < 1:
+            raise ValueError(
+                f"max_active_episodes must be at least 1, got {max_active_episodes}"
+            )
+        pending = iter(enumerate(episodes))
+        active_slots: list[tuple[int, _ActiveEpisode]] = []
+
+        def refill() -> None:
+            while len(active_slots) < max_active_episodes:
+                try:
+                    episode_index, (query_id, user_prompt) = next(pending)
+                except StopIteration:
+                    break
+                active_slots.append(
+                    (episode_index, self._new_active_episode(query_id, user_prompt))
+                )
+
+        refill()
+        while active_slots:
+            self._advance_active_episodes([active for _, active in active_slots])
+            completed = [
+                (episode_index, active.result)
+                for episode_index, active in active_slots
+                if active.result is not None
+            ]
+            if not completed:
+                continue
+            active_slots = [
+                (episode_index, active)
+                for episode_index, active in active_slots
+                if active.result is None
+            ]
+            yield [
+                (episode_index, result)
+                for episode_index, result in completed
+                if result is not None
+            ]
+            refill()
+
+    def run_many(self, episodes: Iterable[tuple[str, str]]) -> list[RuntimeResult]:
+        episode_list = list(episodes)
+        if not episode_list:
+            return []
+        results_by_index: dict[int, RuntimeResult] = {}
+        for completed in self.run_many_stream(
+            episode_list,
+            max_active_episodes=len(episode_list),
+        ):
+            results_by_index.update(completed)
+        return [results_by_index[index] for index in range(len(episode_list))]
 
     def run(self, query_id: str, user_prompt: str) -> RuntimeResult:
         return self.run_many([(query_id, user_prompt)])[0]

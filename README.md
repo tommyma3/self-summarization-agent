@@ -278,7 +278,9 @@ For the intended GPU run:
 
 - each iteration's combined eval-then-train collection uses one phase-scoped FAISS worker; the embedding model is unloaded before fallback judging, caching, and policy weight updates
 - combined collection starts one overlap judge worker, then reuses one OpenAI-compatible client for evaluation and training rollouts against the externally served policy checkpoint
-- rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes and batches their next model prompts through the selected engine
+- rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes, emits completed rollouts after each runtime round, and immediately refills freed slots instead of waiting for the slowest episode in a fixed batch
+- completed rollouts stream through a bounded overlap queue; the judge dynamically coalesces them up to `judge.batch_size` or `judge.batch_wait_ms`, and cache scoring uses the configured training microbatch size
+- `rollout.overlap_queue_max_batches` bounds producer lead and applies backpressure when judging or cache scoring falls behind
 - rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
 - `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; the default Qwen3.5 thinking profile uses `temperature: 1.0`, `top_p: 0.95`, and the documented `top_k`, `min_p`, presence-penalty, and repetition-penalty settings
 - eval sampling overrides are applied to the already-loaded rollout generator and restored before training collection, so specialization does not reload the policy model or change the shared-engine phase order
