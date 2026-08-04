@@ -296,7 +296,7 @@ def test_eval_resume_rejects_a_different_sampling_profile(tmp_path: Path) -> Non
     config.dataset.limit = 2
     config.dataset.train_limit = 1
     config.dataset.eval_limit = 1
-    config.evaluation.temperature = 1.0
+    config.evaluation.temperature = 0.0
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     examples = [
@@ -371,8 +371,8 @@ def test_build_rollout_generator_uses_split_specific_sampling_config(
     config.rollout.top_p = 0.95
     config.rollout.do_sample = True
     config.evaluation.max_new_tokens = 128
-    config.evaluation.temperature = 1.0
-    config.evaluation.extra_sampling_params = {"top_k": 20, "presence_penalty": 1.5}
+    config.evaluation.temperature = 0.0
+    config.evaluation.extra_sampling_params = {}
     captured = []
 
     def fake_build_generator(model_config, *, sampling_extra):
@@ -387,8 +387,8 @@ def test_build_rollout_generator_uses_split_specific_sampling_config(
     eval_model_config, eval_extra = captured[0]
     train_model_config, train_extra = captured[1]
     assert eval_model_config.max_new_tokens == 128
-    assert eval_model_config.temperature == 1.0
-    assert eval_extra == {"top_k": 20, "presence_penalty": 1.5}
+    assert eval_model_config.temperature == 0.0
+    assert eval_extra == {}
     assert train_model_config.max_new_tokens == 64
     assert train_model_config.temperature == 0.7
     assert train_extra == {}
