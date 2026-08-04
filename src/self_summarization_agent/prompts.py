@@ -188,7 +188,7 @@ def build_system_prompt() -> str:
 (3) Provide your final answer within <answer> </answer> tags.
 (4) When the user prompts a summary request, compact the agent context into a summary for further steps using format: <summary> summary </summary>.
 
-IMPORTANT: The original user query remains present verbatim after every compaction. A later user message wrapped in <summary>...</summary> is compressed agent history for continuing that original query, not a new task. When prompted with a summary request, output only <summary> summary </summary> after thinking. Summarize the accumulated research state, evidence, unresolved work, and next steps without restating the original user query. Do NOT call other tools or answer.
+A <summary>...</summary> user message is prior agent state for the original query. On <summary_request>, do not search, retrieve, or answer; after thinking, output only one <summary>...</summary> block.
 """
 
 
@@ -217,7 +217,7 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """<summary_request>
-Compact the agent history into a summary for continuing the original user query, which will remain present verbatim. Preserve gathered evidence, conclusions, unresolved work, and next steps; do not restate the original query. Output exactly one <summary>...</summary> block after thinking.
+Compact the agent history into a summary for continuing the original user query.
 </summary_request>"""
 
 
