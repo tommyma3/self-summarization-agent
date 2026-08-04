@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import time
 import traceback
 from multiprocessing.queues import Queue
@@ -12,6 +13,7 @@ from self_summarization_agent.judge_step import build_judge, judge_rollout_rows
 
 
 SHUTDOWN = "__shutdown__"
+READY = "__ready__"
 
 
 def _example_from_payload(payload: dict[str, Any]) -> QueryExample:
@@ -33,6 +35,8 @@ def run_judge_worker(
     judge = build_judge(config)
     batch_size = max(1, config.judge.batch_size)
     batch_wait_seconds = max(0, config.judge.batch_wait_ms) / 1000.0
+    batch_timeout = max(0.0, config.judge.batch_timeout_seconds)
+    response_queue.put(READY)
     while True:
         first_message = request_queue.get()
         if first_message == SHUTDOWN:
@@ -76,16 +80,53 @@ def run_judge_worker(
                 for query_id, example_payload in examples_payloads.items()
             }
             expected_checkpoint_id = next(iter(expected_checkpoint_ids))
+            processing_deadline = (
+                time.monotonic() + batch_timeout if batch_timeout > 0 else None
+            )
             judged_rows: list[dict[str, Any]] = []
             for batch_start in range(0, len(rows), batch_size):
-                judged_rows.extend(
-                    judge_rollout_rows(
-                        rows[batch_start : batch_start + batch_size],
-                        judge=judge,
-                        examples_by_query_id=examples,
-                        expected_checkpoint_id=expected_checkpoint_id,
-                    )
+                remaining = (
+                    max(0.0, processing_deadline - time.monotonic())
+                    if processing_deadline is not None
+                    else None
                 )
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError(
+                        f"Judge batch processing timed out after {batch_timeout:.0f}s "
+                        f"(processed {batch_start}/{len(rows)} rows)"
+                    )
+                if remaining is None:
+                    # No timeout configured — call directly.
+                    judged_rows.extend(
+                        judge_rollout_rows(
+                            rows[batch_start : batch_start + batch_size],
+                            judge=judge,
+                            examples_by_query_id=examples,
+                            expected_checkpoint_id=expected_checkpoint_id,
+                        )
+                    )
+                else:
+                    # Run in a thread with a deadline.  We must NOT use a `with`
+                    # block here because `executor.shutdown(wait=True)` (called by
+                    # __exit__) would block forever if the worker thread is stuck
+                    # in a CUDA / vLLM call.
+                    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    try:
+                        future = executor.submit(
+                            judge_rollout_rows,
+                            rows[batch_start : batch_start + batch_size],
+                            judge=judge,
+                            examples_by_query_id=examples,
+                            expected_checkpoint_id=expected_checkpoint_id,
+                        )
+                        judged_rows.extend(future.result(timeout=remaining))
+                    except concurrent.futures.TimeoutError:
+                        raise TimeoutError(
+                            f"Judge batch processing timed out after {batch_timeout:.0f}s "
+                            f"(stuck at row {batch_start}/{len(rows)})"
+                        )
+                    finally:
+                        executor.shutdown(wait=False)
             offset = 0
             for message, message_row_count in zip(messages, row_counts):
                 response_queue.put(

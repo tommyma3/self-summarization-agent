@@ -154,12 +154,15 @@ class JudgeConfig:
     do_sample: bool = False
     batch_size: int = 32
     batch_wait_ms: int = 25
+    batch_timeout_seconds: float = 600
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
             raise ValueError("judge.batch_size must be at least 1")
         if self.batch_wait_ms < 0:
             raise ValueError("judge.batch_wait_ms cannot be negative")
+        if self.batch_timeout_seconds < 0:
+            raise ValueError("judge.batch_timeout_seconds cannot be negative")
 
 
 @dataclass(slots=True)

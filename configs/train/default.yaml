@@ -106,6 +106,9 @@ judge:
   # Dynamically coalesce streamed completions for efficient judge inference.
   batch_size: 32
   batch_wait_ms: 25
+  # Maximum seconds a single judge micro-batch may take before the worker
+  # returns an error and moves on. 0 disables the timeout.
+  batch_timeout_seconds: 600
 
 training:
   backend: verl_ray

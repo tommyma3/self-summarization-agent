@@ -64,6 +64,7 @@ from self_summarization_agent.launcher_utils import (
     iter_batches,
     serialize_runtime_result,
 )
+from self_summarization_agent.judge_worker import READY
 from self_summarization_agent.rewards import (
     apply_malformed_tool_penalty,
     apply_terminal_reward,
@@ -102,6 +103,7 @@ def _run_cache_overlap_worker(
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     config = load_train_config(config_path, parse_cli_overrides(overrides))
     scorer = build_cache_scorer(config, checkpoint_path=checkpoint_path)
+    response_queue.put(READY)
     while True:
         message = request_queue.get()
         if message == _CACHE_SHUTDOWN:
@@ -202,10 +204,35 @@ class _CacheOverlapClient:
             kwargs=self._worker_kwargs,
         )
         self.process.start()
+        # Wait for worker to signal successful initialization (model load).
+        try:
+            signal = self.response_queue.get(timeout=600)
+        except Empty:
+            self.process.kill()
+            self.process.join(timeout=30)
+            raise RuntimeError(
+                "Cache overlap worker failed to initialize within 600s startup timeout"
+            )
+        if not self.process.is_alive():
+            raise RuntimeError(
+                f"Cache overlap worker exited during startup "
+                f"(exit_code={self.process.exitcode})"
+            )
+        if signal != READY:
+            self.process.kill()
+            self.process.join(timeout=30)
+            raise RuntimeError(
+                f"Unexpected startup signal from cache overlap worker: {signal!r}"
+            )
 
     def _put_request(self, message: dict[str, Any]) -> None:
         self._ensure_started()
         assert self.process is not None
+        if not self.process.is_alive():
+            raise RuntimeError(
+                f"Cache overlap worker exited "
+                f"(exit_code={self.process.exitcode})"
+            )
         started = time.monotonic()
         deadline = started + self._drain_timeout_seconds
         while True:
@@ -292,6 +319,8 @@ class _CacheOverlapClient:
 
     def drain_available(self) -> list[dict[str, Any]]:
         self._ensure_drain_deadline()
+        if self.pending_count:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
         rows: list[dict[str, Any]] = []
         while self.pending_count:
             try:
@@ -311,7 +340,8 @@ class _CacheOverlapClient:
         return rows
 
     def finish(self) -> list[dict[str, Any]]:
-        self._ensure_drain_deadline()
+        if self.pending_count:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
         rows: list[dict[str, Any]] = []
         while self.pending_count:
             try:

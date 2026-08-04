@@ -24,7 +24,7 @@ from self_summarization_agent.dataset import QueryExample, load_query_examples, 
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.judge_step import judge_rollout_rows
-from self_summarization_agent.judge_worker import SHUTDOWN, run_judge_worker
+from self_summarization_agent.judge_worker import READY, SHUTDOWN, run_judge_worker
 from self_summarization_agent.launcher_utils import (
     append_jsonl,
     build_runtime,
@@ -249,6 +249,26 @@ class _SubprocessOverlapJudgeClient:
             },
         )
         self.process.start()
+        # Wait for worker to signal successful initialization (model load).
+        try:
+            signal = self.response_queue.get(timeout=600)
+        except Empty:
+            self.process.kill()
+            self.process.join(timeout=30)
+            raise RuntimeError(
+                "Overlap judge worker failed to initialize within 600s startup timeout"
+            )
+        if not self.process.is_alive():
+            raise RuntimeError(
+                f"Overlap judge worker exited during startup "
+                f"(exit_code={self.process.exitcode})"
+            )
+        if signal != READY:
+            self.process.kill()
+            self.process.join(timeout=30)
+            raise RuntimeError(
+                f"Unexpected startup signal from overlap judge worker: {signal!r}"
+            )
         self.checkpoint_id = checkpoint_id
         self.next_batch_id = 0
         self.pending_batch_count = 0
@@ -259,6 +279,11 @@ class _SubprocessOverlapJudgeClient:
         self.queue_block_seconds = 0.0
 
     def _put_request(self, message: dict[str, Any]) -> None:
+        if not self.process.is_alive():
+            raise RuntimeError(
+                f"Overlap judge worker exited "
+                f"(exit_code={self.process.exitcode})"
+            )
         started = time.monotonic()
         deadline = started + self._drain_timeout_seconds
         while True:
@@ -338,6 +363,10 @@ class _SubprocessOverlapJudgeClient:
 
     def drain_available(self) -> list[dict[str, Any]]:
         self._ensure_drain_deadline()
+        # Reset the deadline so slow-but-healthy workers aren't terminated
+        # based on a deadline that was set long ago on the first submit.
+        if self.pending_batch_count:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
         rows: list[dict[str, Any]] = []
         while self.pending_batch_count:
             try:
@@ -356,7 +385,11 @@ class _SubprocessOverlapJudgeClient:
         return rows
 
     def finish(self) -> list[dict[str, Any]]:
-        self._ensure_drain_deadline()
+        # Reset the deadline so that finish() always gives the worker a full
+        # timeout window starting *now*, rather than inheriting a deadline
+        # set during an earlier streaming loop that may have already elapsed.
+        if self.pending_batch_count:
+            self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
         rows: list[dict[str, Any]] = []
         while self.pending_batch_count:
             try:
