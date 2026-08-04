@@ -24,7 +24,10 @@ from self_summarization_agent.rewards import (
     apply_terminal_reward,
     trainable_turn_ids_from_records,
 )
-from self_summarization_agent.trajectory import TRAJECTORY_SCHEMA_VERSION
+from self_summarization_agent.trajectory import (
+    COLLECTION_TOKEN_VERSION,
+    TRAJECTORY_SCHEMA_VERSION,
+)
 
 
 _JSON_DECODER = json.JSONDecoder()
@@ -275,6 +278,9 @@ class _GeneratedOutput:
     completion_tokens: int
     prompt_token_ids: list[int] | None = None
     completion_token_ids: list[int] | None = None
+    cumulative_logprob: float | None = None
+    token_logprobs: list[float] | None = None
+    token_logprobs_mode: str | None = None
     message: Message | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -404,6 +410,11 @@ class EpisodeRuntime:
                     "prompt_token_ids": generation_prompt_ids,
                     "completion_token_ids": generation_completion_ids,
                     "full_token_ids": generation_prompt_ids + generation_completion_ids,
+                    "cumulative_logprob": output.cumulative_logprob,
+                    "completion_token_logprobs": (
+                        list(output.token_logprobs) if output.token_logprobs is not None else None
+                    ),
+                    "logprobs_mode": output.token_logprobs_mode,
                     "finish_reason": output.finish_reason,
                 }
             )
@@ -428,7 +439,7 @@ class EpisodeRuntime:
         for token_index in range(completion_start, len(full_token_ids)):
             assistant_token_mask[token_index] = True
         return {
-            "version": 1,
+            "version": COLLECTION_TOKEN_VERSION,
             "prompt_token_ids": prompt_token_ids,
             "completion_token_ids": completion_token_ids,
             "full_token_ids": full_token_ids,
@@ -612,6 +623,17 @@ class EpisodeRuntime:
                         completion_token_ids=(
                             list(completion_token_ids) if completion_token_ids is not None else None
                         ),
+                        cumulative_logprob=(
+                            float(result.cumulative_logprob)
+                            if getattr(result, "cumulative_logprob", None) is not None
+                            else None
+                        ),
+                        token_logprobs=(
+                            list(result.token_logprobs)
+                            if getattr(result, "token_logprobs", None) is not None
+                            else None
+                        ),
+                        token_logprobs_mode=getattr(result, "token_logprobs_mode", None),
                         message=getattr(result, "message", None),
                         finish_reason=getattr(result, "finish_reason", None),
                         usage=getattr(result, "usage", None),

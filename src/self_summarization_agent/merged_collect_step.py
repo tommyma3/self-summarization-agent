@@ -7,13 +7,14 @@ metrics, and caching work.
 
 Architecture
 ------------
-Three concurrent workers across 4 GPUs::
+Up to three concurrent workers across 4 GPUs::
 
     Main process (GPUs 2,3):  vLLM engine → generates rollouts
     Judge worker (GPU 1):     spawned process → scores batches
-    Cache worker (GPU 0):     spawned process → reference logprobs
+    Cache fallback (GPU 0):   lazily spawned for rows missing rollout logprobs
 
-Cache scoring overlaps with train rollout collection so that all
+Exact vLLM rollouts assemble reference-logprob caches from decode metadata.
+Fallback cache scoring overlaps with train collection when needed so all
 outputs are ready before the downstream ``train_update`` phase starts.
 """
 
@@ -33,6 +34,7 @@ from self_summarization_agent.cache_step import (
     _attach_training_caches,
     _completed_cached_rows,
     _load_rollout_rows,
+    _materialize_rollout_native_training_caches,
     _row_has_current_training_cache,
     _validate_judged_row,
     build_cache_scorer,
@@ -171,20 +173,17 @@ class _CacheOverlapClient:
         queue_max_batches: int = 8,
         drain_timeout_seconds: float = 600,
     ) -> None:
-        context = mp.get_context("spawn")
-        self.request_queue = context.Queue(maxsize=max(1, queue_max_batches))
-        self.response_queue = context.Queue()
-        self.process = context.Process(
-            target=_run_cache_overlap_worker,
-            kwargs={
-                "config_path": config_path,
-                "overrides": overrides,
-                "checkpoint_path": checkpoint_path,
-                "request_queue": self.request_queue,
-                "response_queue": self.response_queue,
-            },
-        )
-        self.process.start()
+        self._context = mp.get_context("spawn")
+        self.request_queue = self._context.Queue(maxsize=max(1, queue_max_batches))
+        self.response_queue = self._context.Queue()
+        self._worker_kwargs = {
+            "config_path": config_path,
+            "overrides": overrides,
+            "checkpoint_path": checkpoint_path,
+            "request_queue": self.request_queue,
+            "response_queue": self.response_queue,
+        }
+        self.process: mp.Process | None = None
         self.checkpoint_id = checkpoint_id
         self.next_batch_id = 0
         self.pending_count = 0
@@ -192,9 +191,21 @@ class _CacheOverlapClient:
         self._drain_deadline: float | None = None
         self.submitted_row_count = 0
         self.completed_row_count = 0
+        self.rollout_native_row_count = 0
         self.queue_block_seconds = 0.0
 
+    def _ensure_started(self) -> None:
+        if self.process is not None:
+            return
+        self.process = self._context.Process(
+            target=_run_cache_overlap_worker,
+            kwargs=self._worker_kwargs,
+        )
+        self.process.start()
+
     def _put_request(self, message: dict[str, Any]) -> None:
+        self._ensure_started()
+        assert self.process is not None
         started = time.monotonic()
         deadline = started + self._drain_timeout_seconds
         while True:
@@ -233,6 +244,9 @@ class _CacheOverlapClient:
         if self._drain_deadline is None:
             self._drain_deadline = time.monotonic() + self._drain_timeout_seconds
 
+    def record_rollout_native_rows(self, count: int) -> None:
+        self.rollout_native_row_count += count
+
     def _handle_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         self.pending_count -= 1
         if response.get("error"):
@@ -261,6 +275,7 @@ class _CacheOverlapClient:
             return
         if time.monotonic() < self._drain_deadline:
             return
+        assert self.process is not None
         pid = self.process.pid
         print(
             f"[cache_overlap] Drain timeout ({self._drain_timeout_seconds:.0f}s) "
@@ -282,6 +297,7 @@ class _CacheOverlapClient:
             try:
                 response = self.response_queue.get_nowait()
             except Empty:
+                assert self.process is not None
                 if not self.process.is_alive():
                     raise RuntimeError(
                         "Cache overlap worker exited before returning all batches "
@@ -301,6 +317,7 @@ class _CacheOverlapClient:
             try:
                 response = self.response_queue.get(timeout=5)
             except Empty:
+                assert self.process is not None
                 if not self.process.is_alive():
                     raise RuntimeError(
                         "Cache overlap worker exited before returning all batches "
@@ -317,11 +334,15 @@ class _CacheOverlapClient:
         return {
             "submitted_rows": self.submitted_row_count,
             "completed_rows": self.completed_row_count,
+            "rollout_native_rows": self.rollout_native_row_count,
             "pending_batches": self.pending_count,
             "queue_block_seconds": self.queue_block_seconds,
+            "fallback_worker_started": self.process is not None,
         }
 
     def close(self) -> None:
+        if self.process is None:
+            return
         if self.process.is_alive():
             try:
                 self.request_queue.put(_CACHE_SHUTDOWN, timeout=5)
@@ -431,15 +452,34 @@ def _collect_split(
         for cached_row in rows:
             append_jsonl(cached_output_path, cached_row)
 
+    def consume_cache_candidates(rows: list[dict[str, Any]]) -> None:
+        if not rows or cache_overlap_client is None:
+            return
+        cache_candidates = [
+            _materialize_rollout_native_training_caches(
+                row,
+                checkpoint_id=checkpoint_id,
+            )
+            for row in rows
+        ]
+        rollout_native_rows = [
+            row for row in cache_candidates if _row_has_current_training_cache(row)
+        ]
+        fallback_rows = [
+            row for row in cache_candidates if not _row_has_current_training_cache(row)
+        ]
+        cache_overlap_client.record_rollout_native_rows(len(rollout_native_rows))
+        append_cached_rows(rollout_native_rows)
+        cache_overlap_client.submit(fallback_rows)
+        append_cached_rows(cache_overlap_client.drain_available())
+
     def consume_judged_rows(rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
         assert judged_output_path is not None
         for judged_row in rows:
             append_jsonl(judged_output_path, judged_row)
-        if cache_overlap_client is not None:
-            cache_overlap_client.submit(rows)
-            append_cached_rows(cache_overlap_client.drain_available())
+        consume_cache_candidates(rows)
 
     # Resume can have raw rows that were never judged. Submit those before new
     # generation so judge startup/processing overlaps the first rollout round.
@@ -482,7 +522,7 @@ def _collect_split(
             if (row.get("query_id"), row.get("rollout_index")) not in cached_keys
         ]
         for rows in iter_batches(pending_cache_rows, config.judge.batch_size):
-            cache_overlap_client.submit(rows)
+            consume_cache_candidates(rows)
 
     collection_started = time.monotonic()
     completed_batch_count = 0
@@ -760,16 +800,20 @@ def run_merged_collect(
             outputs["eval_metrics"] = Path(eval_metrics_output)
 
         # --------------------------------------------------------------
-        # Stage 3: Train collection + overlapped cache
+        # Stage 3: Train collection + rollout-native/fallback cache
         # --------------------------------------------------------------
         if train_collection_needed or train_cache_needed:
-            # When overlap judging is ON *and* we need fresh collection, run
-            # the cache worker on GPU 0 in parallel with rollout generation.
-            # Otherwise (resume where collection is already done, or overlap
-            # judging disabled) compute caches inline from the judged output.
+            # Fresh exact vLLM rows normally materialize their caches without a
+            # model pass. Keep a lazy GPU 0 fallback available for incomplete
+            # logprob metadata; resume-only and non-overlap paths materialize or
+            # rescore inline from the judged artifact.
             cache_overlap_client = None
             if train_collection_needed and train_cache_needed and overlap_judge:
-                print("[merged_collect] Starting cache overlap worker on GPU 0...", flush=True)
+                print(
+                    "[merged_collect] Preparing lazy GPU 0 cache fallback for rows without "
+                    "rollout-native logprobs...",
+                    flush=True,
+                )
                 cache_overlap_client = _CacheOverlapClient(
                     config_path=str(config_path),
                     overrides=overrides,
@@ -910,19 +954,30 @@ def _run_cache_inline(
     if not pending_rows:
         return
 
-    scorer = build_cache_scorer(config, checkpoint_path=str(checkpoint_path))
+    scorer = None
     for row in pending_rows:
+        cache_candidate = _materialize_rollout_native_training_caches(
+            row,
+            checkpoint_id=checkpoint_id,
+        )
+        if _row_has_current_training_cache(cache_candidate):
+            append_jsonl(cached_output_path, cache_candidate)
+            continue
+        if scorer is None:
+            scorer = build_cache_scorer(config, checkpoint_path=str(checkpoint_path))
         samples = extract_trainable_samples(
-            row["trajectory_records"],
-            row["turn_rewards"],
-            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+            cache_candidate["trajectory_records"],
+            cache_candidate["turn_rewards"],
+            rollout_id=(
+                f"{cache_candidate.get('query_id')}:{cache_candidate.get('rollout_index')}"
+            ),
         )
         if not samples:
             append_jsonl(cached_output_path, dict(row))
             continue
         cache_payloads = scorer.cache_samples(samples)
         cached_row = _attach_training_caches(
-            row,
+            cache_candidate,
             cache_payloads=cache_payloads,
             checkpoint_id=checkpoint_id,
         )

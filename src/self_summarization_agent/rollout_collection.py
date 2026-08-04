@@ -38,7 +38,12 @@ from self_summarization_agent.rewards import (
     is_penalized_runtime_status,
     trainable_turn_ids_from_records,
 )
-from self_summarization_agent.trajectory import extract_trainable_samples, validate_trajectory_schema
+from self_summarization_agent.trajectory import (
+    COLLECTION_TOKEN_VERSION,
+    LEGACY_COLLECTION_TOKEN_VERSION,
+    extract_trainable_samples,
+    validate_trajectory_schema,
+)
 
 
 def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str, Any]:
@@ -127,7 +132,8 @@ def _load_completed_rollout_keys(
                     assistant_mask = collection_tokens.get("assistant_token_mask")
                     generations = collection_tokens.get("generations")
                     if (
-                        collection_tokens.get("version") != 1
+                        collection_tokens.get("version")
+                        not in {LEGACY_COLLECTION_TOKEN_VERSION, COLLECTION_TOKEN_VERSION}
                         or not isinstance(full_ids, list)
                         or not isinstance(assistant_mask, list)
                         or not isinstance(generations, list)

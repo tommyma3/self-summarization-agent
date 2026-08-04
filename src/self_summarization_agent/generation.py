@@ -40,6 +40,7 @@ class GenerationResult:
     completion_token_ids: list[int] | None = None
     cumulative_logprob: float | None = None
     token_logprobs: list[float] | None = None
+    token_logprobs_mode: str | None = None
     message: Message | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -461,10 +462,16 @@ class VLLMGenerator:
             "max_model_len": self.max_model_len,
             "language_model_only": self.language_model_only,
             "enable_prefix_caching": self.enable_prefix_caching,
+            "logprobs_mode": "raw_logprobs",
         }
         sig = inspect.signature(LLM)
         supported_kwargs = set(sig.parameters)
         has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if "logprobs_mode" not in supported_kwargs and not has_var_keyword:
+            raise RuntimeError(
+                "The installed vLLM does not expose logprobs_mode; raw rollout "
+                "logprobs cannot be marked authoritative"
+            )
         self.llm = LLM(
             **{
                 key: value
@@ -572,6 +579,7 @@ class VLLMGenerator:
                     if cumulative_logprob is not None
                     else None,
                     token_logprobs=token_logprobs,
+                    token_logprobs_mode="raw_logprobs" if token_logprobs is not None else None,
                 )
             )
         return completions

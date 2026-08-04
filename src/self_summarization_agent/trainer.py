@@ -19,7 +19,12 @@ except ImportError:
 from self_summarization_agent.config import ModelConfig, TrainingConfig
 from self_summarization_agent.chat_template import configure_tokenizer_chat_template
 from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
-from self_summarization_agent.trajectory import RLSample, TOKEN_CACHE_VERSION, tokenize_interval_messages
+from self_summarization_agent.trajectory import (
+    REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
+    RLSample,
+    TOKEN_CACHE_VERSION,
+    tokenize_interval_messages,
+)
 
 
 @dataclass(slots=True)
@@ -358,6 +363,7 @@ def _training_cache_payload(
         "completion_mask": [bool(value) for value in completion_mask.detach().cpu().tolist()],
         "reference_logprob": float(reference_logprob),
         "reference_logprobs": [float(value) for value in reference_logprobs.detach().cpu().tolist()],
+        "reference_logprob_source": REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
     }
 
 

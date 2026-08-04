@@ -9,7 +9,11 @@ from self_summarization_agent.launcher_utils import serialize_runtime_result
 from self_summarization_agent.generation import GenerationResult
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
-from self_summarization_agent.trajectory import extract_trainable_samples
+from self_summarization_agent.trajectory import (
+    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+    build_rollout_native_training_cache,
+    extract_trainable_samples,
+)
 
 
 class RecordingModel(ScriptedModel):
@@ -63,6 +67,9 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
                 text="raw search",
                 prompt_token_ids=[1, 2],
                 completion_token_ids=[10, 11],
+                cumulative_logprob=-0.3,
+                token_logprobs=[-0.1, -0.2],
+                token_logprobs_mode="raw_logprobs",
                 message=Message(
                     role="assistant",
                     reasoning_content="search first",
@@ -74,6 +81,9 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
                 text="raw finish",
                 prompt_token_ids=[1, 2, 10, 11, 20],
                 completion_token_ids=[30, 31],
+                cumulative_logprob=-0.7,
+                token_logprobs=[-0.3, -0.4],
+                token_logprobs_mode="raw_logprobs",
                 message=Message(
                     role="assistant",
                     reasoning_content="answer",
@@ -116,6 +126,15 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
         True,
         True,
     ]
+    assert "training_cache" not in trajectory
+    cache = build_rollout_native_training_cache(trajectory["collection_tokens"])
+    assert cache is not None
+    assert cache["input_ids"] == [1, 2, 10, 11, 20, 30]
+    assert cache["labels"] == [2, 10, 11, 20, 30, 31]
+    assert cache["completion_mask"] == [False, True, True, False, True, True]
+    assert cache["reference_logprobs"] == [0.0, -0.1, -0.2, 0.0, -0.3, -0.4]
+    assert cache["reference_logprob"] == -0.25
+    assert cache["reference_logprob_source"] == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
     assert result.token_usage["budget_consumed_tokens"] == (
         result.token_usage["total_generated_tokens"] + result.token_usage["tool_result_tokens"]
     )
@@ -126,8 +145,11 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
         [
             GenerationResult(
                 text="raw search",
-                prompt_token_ids=[1, 2],
+                prompt_token_ids=[3],
                 completion_token_ids=[10],
+                cumulative_logprob=-0.1,
+                token_logprobs=[-0.1],
+                token_logprobs_mode="raw_logprobs",
                 message=Message(
                     role="assistant",
                     tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
@@ -137,6 +159,9 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 text="raw summary",
                 prompt_token_ids=[3, 10, 4],
                 completion_token_ids=[11],
+                cumulative_logprob=-0.2,
+                token_logprobs=[-0.2],
+                token_logprobs_mode="raw_logprobs",
                 message=Message(
                     role="assistant",
                     reasoning_content="compact",
@@ -147,6 +172,9 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 text="raw finish",
                 prompt_token_ids=[5, 6],
                 completion_token_ids=[12],
+                cumulative_logprob=-0.3,
+                token_logprobs=[-0.3],
+                token_logprobs_mode="raw_logprobs",
                 message=Message(
                     role="assistant",
                     tool_calls=[ToolCall(id="call-finish", name="finish", arguments={"answer": "done"})],
@@ -190,6 +218,47 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
         False,
         True,
     ]
+    summary_cache = build_rollout_native_training_cache(
+        result.trajectory_records[0]["collection_tokens"]
+    )
+    final_cache = build_rollout_native_training_cache(
+        result.trajectory_records[1]["collection_tokens"]
+    )
+    assert summary_cache is not None
+    assert final_cache is not None
+    assert summary_cache["reference_logprobs"] == [
+        -0.1,
+        0.0,
+        -0.2,
+    ]
+    assert final_cache["reference_logprobs"] == [
+        0.0,
+        -0.3,
+    ]
+
+
+def test_rollout_native_cache_rejects_completion_without_exact_conditioning_prefix() -> None:
+    collection_tokens = {
+        "version": 2,
+        "full_token_ids": [1, 10, 2, 11],
+        "assistant_token_mask": [False, True, False, True],
+        "generations": [
+            {
+                "prompt_token_ids": [9],
+                "completion_token_ids": [10],
+                "completion_token_logprobs": [-0.1],
+                "logprobs_mode": "raw_logprobs",
+            },
+            {
+                "prompt_token_ids": [1, 10, 2],
+                "completion_token_ids": [11],
+                "completion_token_logprobs": [-0.2],
+                "logprobs_mode": "raw_logprobs",
+            },
+        ],
+    }
+
+    assert build_rollout_native_training_cache(collection_tokens) is None
 
 
 def test_runtime_completes_without_summary_below_threshold() -> None:

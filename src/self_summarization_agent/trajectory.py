@@ -5,10 +5,17 @@ import math
 from typing import Any
 
 
-TOKEN_CACHE_VERSION = 4
+TOKEN_CACHE_VERSION = 5
 TOKEN_CACHE_FIELD = "training_cache"
 TRAJECTORY_SCHEMA_VERSION = 3
-COLLECTION_TOKEN_VERSION = 1
+COLLECTION_TOKEN_VERSION = 2
+LEGACY_COLLECTION_TOKEN_VERSION = 1
+REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE = "policy_rescore"
+REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT = "vllm_raw_rollout"
+_REFERENCE_LOGPROB_SOURCES = {
+    REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
+    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+}
 
 
 @dataclass(slots=True)
@@ -87,10 +94,17 @@ def _validate_float_list(value: Any, *, field_name: str, turn_id: str) -> list[f
 
 
 def is_training_cache_current(cache: object) -> bool:
+    if not isinstance(cache, Mapping):
+        return False
+    source = cache.get("reference_logprob_source")
     return (
-        isinstance(cache, Mapping)
-        and cache.get("version") == TOKEN_CACHE_VERSION
+        cache.get("version") == TOKEN_CACHE_VERSION
         and "reference_logprobs" in cache
+        and source in _REFERENCE_LOGPROB_SOURCES
+        and (
+            source != REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+            or cache.get("logprobs_mode") == "raw_logprobs"
+        )
     )
 
 
@@ -109,6 +123,19 @@ def _extract_training_cache(
         raise ValueError(
             f"Trainable record {turn_id} has unsupported training cache version: {version!r}; "
             f"expected {TOKEN_CACHE_VERSION}"
+        )
+    reference_logprob_source = cache.get("reference_logprob_source")
+    if reference_logprob_source not in _REFERENCE_LOGPROB_SOURCES:
+        raise ValueError(
+            f"Trainable record {turn_id} has unsupported reference_logprob_source: "
+            f"{reference_logprob_source!r}"
+        )
+    if (
+        reference_logprob_source == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+        and cache.get("logprobs_mode") != "raw_logprobs"
+    ):
+        raise ValueError(
+            f"Trainable record {turn_id} has non-raw rollout reference logprobs"
         )
     input_ids = _validate_int_list(cache.get("input_ids"), field_name="input_ids", turn_id=turn_id)
     labels = _validate_int_list(cache.get("labels"), field_name="labels", turn_id=turn_id)
@@ -192,7 +219,10 @@ def _extract_collection_tokens(
         return None, None
     if not isinstance(payload, Mapping):
         raise ValueError(f"Trainable record {turn_id} has non-object collection_tokens")
-    if payload.get("version") != COLLECTION_TOKEN_VERSION:
+    if payload.get("version") not in {
+        LEGACY_COLLECTION_TOKEN_VERSION,
+        COLLECTION_TOKEN_VERSION,
+    }:
         raise ValueError(
             f"Trainable record {turn_id} has unsupported collection token version: "
             f"{payload.get('version')!r}"
@@ -244,6 +274,118 @@ def _extract_collection_tokens(
     if list(final_generation["full_token_ids"]) != full_token_ids:
         raise ValueError(f"Trainable record {turn_id} final generation does not match full_token_ids")
     return full_token_ids, assistant_token_mask
+
+
+def build_rollout_native_training_cache(
+    collection_tokens: object,
+) -> dict[str, Any] | None:
+    """Build a cache from authoritative raw vLLM decode logprobs.
+
+    This is deliberately fail-closed. The fast path is valid only when every
+    generated completion carries finite raw-policy logprobs and every complete
+    generation token sequence is an exact prefix of the finalized interval.
+    Later appended tokens then cannot change any earlier autoregressive
+    probability. Callers must fall back to policy rescoring when this returns
+    ``None``.
+    """
+
+    if not isinstance(collection_tokens, Mapping):
+        return None
+    if collection_tokens.get("version") != COLLECTION_TOKEN_VERSION:
+        return None
+    full_token_ids = collection_tokens.get("full_token_ids")
+    assistant_token_mask = collection_tokens.get("assistant_token_mask")
+    generations = collection_tokens.get("generations")
+    if (
+        not isinstance(full_token_ids, list)
+        or not isinstance(assistant_token_mask, list)
+        or not isinstance(generations, list)
+        or not generations
+        or len(full_token_ids) < 2
+        or len(full_token_ids) != len(assistant_token_mask)
+    ):
+        return None
+    if not all(isinstance(token_id, int) and not isinstance(token_id, bool) for token_id in full_token_ids):
+        return None
+    if not all(isinstance(mask_value, bool) for mask_value in assistant_token_mask):
+        return None
+
+    expected_assistant_positions = {
+        index
+        for index, is_assistant in enumerate(assistant_token_mask)
+        if index > 0 and is_assistant
+    }
+    if not expected_assistant_positions:
+        return None
+
+    reference_logprobs = [0.0] * (len(full_token_ids) - 1)
+    covered_assistant_positions: set[int] = set()
+    for generation in generations:
+        if not isinstance(generation, Mapping):
+            return None
+        prompt_ids = generation.get("prompt_token_ids")
+        completion_ids = generation.get("completion_token_ids")
+        completion_logprobs = generation.get("completion_token_logprobs")
+        if generation.get("logprobs_mode") != "raw_logprobs":
+            return None
+        if (
+            not isinstance(prompt_ids, list)
+            or not isinstance(completion_ids, list)
+            or not isinstance(completion_logprobs, list)
+            or len(completion_ids) != len(completion_logprobs)
+            or not completion_ids
+        ):
+            return None
+        if not all(isinstance(token_id, int) and not isinstance(token_id, bool) for token_id in prompt_ids):
+            return None
+        if not all(
+            isinstance(token_id, int) and not isinstance(token_id, bool)
+            for token_id in completion_ids
+        ):
+            return None
+        numeric_logprobs: list[float] = []
+        for logprob in completion_logprobs:
+            if not isinstance(logprob, (int, float)) or isinstance(logprob, bool):
+                return None
+            numeric_logprob = float(logprob)
+            if not math.isfinite(numeric_logprob):
+                return None
+            numeric_logprobs.append(numeric_logprob)
+
+        generation_full_ids = prompt_ids + completion_ids
+        if full_token_ids[: len(generation_full_ids)] != generation_full_ids:
+            return None
+        completion_start = len(prompt_ids)
+        for offset, logprob in enumerate(numeric_logprobs):
+            full_position = completion_start + offset
+            if (
+                full_position <= 0
+                or full_position >= len(full_token_ids)
+                or not assistant_token_mask[full_position]
+                or full_position in covered_assistant_positions
+            ):
+                return None
+            reference_logprobs[full_position - 1] = logprob
+            covered_assistant_positions.add(full_position)
+
+    if covered_assistant_positions != expected_assistant_positions:
+        return None
+    completion_mask = list(assistant_token_mask[1:])
+    masked_logprobs = [
+        reference_logprobs[index]
+        for index, is_assistant in enumerate(completion_mask)
+        if is_assistant
+    ]
+    return {
+        "version": TOKEN_CACHE_VERSION,
+        "input_ids": list(full_token_ids[:-1]),
+        "labels": list(full_token_ids[1:]),
+        "completion_mask": completion_mask,
+        "reference_logprob": sum(masked_logprobs) / len(masked_logprobs),
+        "reference_logprobs": reference_logprobs,
+        "reference_logprob_source": REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+        "logprobs_mode": "raw_logprobs",
+    }
 
 
 def extract_trainable_samples(

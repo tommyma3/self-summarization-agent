@@ -131,6 +131,7 @@ def test_vllm_generator_enables_prefix_caching_in_offline_engine(monkeypatch) ->
     )
 
     assert engine_kwargs["enable_prefix_caching"] is True
+    assert engine_kwargs["logprobs_mode"] == "raw_logprobs"
 
 
 def test_build_generator_accepts_sglang_backend(monkeypatch) -> None:
@@ -282,6 +283,7 @@ def test_vllm_generator_can_return_generation_metadata(monkeypatch) -> None:
     assert outputs[0].completion_token_ids == [11, 12]
     assert outputs[0].cumulative_logprob == -2.0
     assert outputs[0].token_logprobs == [-0.75, -1.25]
+    assert outputs[0].token_logprobs_mode == "raw_logprobs"
     assert generator.llm.params.kwargs == {
         "max_tokens": 16,
         "temperature": 0.7,

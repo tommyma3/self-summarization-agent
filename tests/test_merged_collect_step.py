@@ -118,6 +118,24 @@ class RecordingResumeJudgeClient:
         ]
 
 
+class RecordingFallbackCacheClient:
+    def __init__(self) -> None:
+        self.submitted_rows: list[dict] = []
+        self.rollout_native_row_count = 0
+
+    def submit(self, rows) -> None:
+        self.submitted_rows.extend(rows)
+
+    def record_rollout_native_rows(self, count: int) -> None:
+        self.rollout_native_row_count += count
+
+    def drain_available(self):
+        return []
+
+    def finish(self):
+        return []
+
+
 def test_collect_split_resume_judges_existing_raw_rows_without_regeneration(
     tmp_path: Path,
     monkeypatch,
@@ -179,3 +197,76 @@ def test_collect_split_resume_judges_existing_raw_rows_without_regeneration(
     judged_rows = [json.loads(line) for line in judged_path.read_text(encoding="utf-8").splitlines()]
     assert judged_rows[0]["query_id"] == "q1"
     assert judged_rows[0]["judge"]["outcome"] == "correct_answer"
+
+
+def test_collect_split_resume_persists_inline_cache_without_starting_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    raw_path = tmp_path / "train.raw.jsonl"
+    judged_path = tmp_path / "train.judged.jsonl"
+    cached_path = tmp_path / "train.cached.jsonl"
+    raw_row = {
+        "policy_checkpoint_id": "iteration-00000",
+        "query_id": "q1",
+        "rollout_index": 0,
+        "trajectory_records": [],
+        "turn_records": [],
+        "summary_turns": [],
+        "status": "completed",
+        "final_answer": "answer",
+    }
+    judged_row = {
+        **raw_row,
+        "turn_rewards": {},
+        "trainable_sample_count": 0,
+        "judge": {"outcome": "correct_answer"},
+    }
+    raw_path.write_text(json.dumps(raw_row) + "\n", encoding="utf-8")
+    judged_path.write_text(json.dumps(judged_row) + "\n", encoding="utf-8")
+    config = SimpleNamespace(
+        experiment=SimpleNamespace(seed=1),
+        collection=SimpleNamespace(train_task_count=None, eval_task_count=None),
+        training=SimpleNamespace(rollout_query_count=None),
+        rollout=SimpleNamespace(max_concurrent_episodes=2),
+        judge=SimpleNamespace(batch_size=4),
+        runtime=object(),
+    )
+
+    class NoGenerationRuntime:
+        def run_many_stream(self, episodes, *, max_active_episodes):
+            assert list(episodes) == []
+            assert max_active_episodes == 2
+            return iter(())
+
+    monkeypatch.setattr(
+        merged_collect_step,
+        "build_runtime",
+        lambda *_args, **_kwargs: NoGenerationRuntime(),
+    )
+    cache_client = RecordingFallbackCacheClient()
+
+    merged_collect_step._collect_split(
+        config=config,
+        checkpoint_id="iteration-00000",
+        checkpoint_path=tmp_path / "checkpoint",
+        generator=object(),
+        backend=object(),
+        overlap_judge_client=RecordingResumeJudgeClient(),
+        split="train",
+        examples=[QueryExample(query_id="q1", query="question", answer="answer")],
+        raw_output_path=raw_path,
+        judged_output_path=judged_path,
+        sampling_profile={"extra_sampling_params": {}},
+        profile_id="profile",
+        group_size=1,
+        sample_seed=1,
+        resume=True,
+        cache_overlap_client=cache_client,
+        cached_output_path=cached_path,
+    )
+
+    assert cache_client.submitted_rows == []
+    assert cache_client.rollout_native_row_count == 1
+    cached_rows = [json.loads(line) for line in cached_path.read_text(encoding="utf-8").splitlines()]
+    assert cached_rows == [judged_row]

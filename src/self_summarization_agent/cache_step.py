@@ -14,6 +14,7 @@ from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
+    build_rollout_native_training_cache,
     extract_trainable_samples,
     is_training_cache_current,
 )
@@ -112,6 +113,30 @@ def _row_has_current_training_cache(row: dict[str, Any]) -> bool:
         and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
     }
     return sample_turn_ids <= cached_turn_ids
+
+
+def _materialize_rollout_native_training_caches(
+    row: dict[str, Any],
+    *,
+    checkpoint_id: str,
+) -> dict[str, Any]:
+    """Copy a row, build valid rollout-native caches, and bind the checkpoint."""
+
+    cached_row = dict(row)
+    cached_records: list[dict[str, Any]] = []
+    for record in row.get("trajectory_records", []):
+        cached_record = dict(record)
+        cache = record.get(TOKEN_CACHE_FIELD) if isinstance(record, dict) else None
+        if not is_training_cache_current(cache) and isinstance(record, dict):
+            cache = build_rollout_native_training_cache(record.get("collection_tokens"))
+        if is_training_cache_current(cache):
+            cached_record[TOKEN_CACHE_FIELD] = {
+                **cache,
+                "policy_checkpoint_id": checkpoint_id,
+            }
+        cached_records.append(cached_record)
+    cached_row["trajectory_records"] = cached_records
+    return cached_row
 
 
 def _completed_cached_rows(path: Path, *, expected_checkpoint_id: str) -> dict[tuple[str, int], dict[str, Any]]:
@@ -262,23 +287,35 @@ def run_cache_step(
     if not pending_rows:
         return output
 
-    scorer = scorer or build_cache_scorer(config, checkpoint_path=checkpoint)
-    is_main = _is_main_process(scorer)
+    active_scorer = scorer
     for row in pending_rows:
-        samples = extract_trainable_samples(
-            row["trajectory_records"],
-            row["turn_rewards"],
-            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
-        )
-        cache_payloads = scorer.cache_samples(samples)
-        cached_row = _attach_training_caches(
+        cache_candidate = _materialize_rollout_native_training_caches(
             row,
+            checkpoint_id=checkpoint_id,
+        )
+        if _row_has_current_training_cache(cache_candidate):
+            if _is_main_process(active_scorer):
+                append_jsonl(output, cache_candidate)
+            continue
+        if active_scorer is None:
+            active_scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
+        samples = extract_trainable_samples(
+            cache_candidate["trajectory_records"],
+            cache_candidate["turn_rewards"],
+            rollout_id=(
+                f"{cache_candidate.get('query_id')}:{cache_candidate.get('rollout_index')}"
+            ),
+        )
+        cache_payloads = active_scorer.cache_samples(samples)
+        cached_row = _attach_training_caches(
+            cache_candidate,
             cache_payloads=cache_payloads,
             checkpoint_id=checkpoint_id,
         )
-        if is_main:
+        if _is_main_process(active_scorer):
             append_jsonl(output, cached_row)
-    _wait_for_everyone(scorer)
+    if active_scorer is not None:
+        _wait_for_everyone(active_scorer)
     return output
 
 

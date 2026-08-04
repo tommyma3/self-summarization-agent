@@ -23,12 +23,13 @@ class FakeScorer:
         self.seen_batches.append([sample.turn_id for sample in samples])
         return [
             {
-                "version": 4,
+                "version": 5,
                 "input_ids": [1, index + 2],
                 "labels": [index + 2, index + 3],
                 "completion_mask": [False, True],
                 "reference_logprob": -0.5 - index,
                 "reference_logprobs": [0.0, -0.5 - index],
+                "reference_logprob_source": "policy_rescore",
             }
             for index, _sample in enumerate(samples)
         ]
@@ -121,11 +122,49 @@ def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> N
     assert scorer.seen_batches == [["trajectory-1"]]
     cache = rows[0]["trajectory_records"][0]["training_cache"]
     assert cache["input_ids"] == [1, 2]
-    assert cache["version"] == 4
+    assert cache["version"] == 5
     assert cache["reference_logprob"] == -0.5
     assert cache["reference_logprobs"] == [0.0, -0.5]
     assert cache["policy_checkpoint_id"] == "step-00001"
     assert cache["completion_mask"] == [False, True]
+
+
+def test_cache_step_reuses_rollout_native_cache_without_rescoring(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    judged_path = tmp_path / "judged.jsonl"
+    output_path = tmp_path / "cached.jsonl"
+    row = judged_row("q1", 0)
+    row["trajectory_records"][0]["collection_tokens"] = {
+        "version": 2,
+        "full_token_ids": [1, 2],
+        "assistant_token_mask": [False, True],
+        "generations": [
+            {
+                "prompt_token_ids": [1],
+                "completion_token_ids": [2],
+                "full_token_ids": [1, 2],
+                "completion_token_logprobs": [-0.25],
+                "logprobs_mode": "raw_logprobs",
+            }
+        ],
+    }
+    write_jsonl(judged_path, [row])
+    scorer = FakeScorer()
+
+    run_cache_step(
+        train_config(tmp_path),
+        checkpoint_path=checkpoint,
+        rollout_path=judged_path,
+        output_path=output_path,
+        scorer=scorer,
+    )
+
+    cached_row = json.loads(output_path.read_text(encoding="utf-8"))
+    cache = cached_row["trajectory_records"][0]["training_cache"]
+    assert scorer.seen_batches == []
+    assert cache["reference_logprob_source"] == "vllm_raw_rollout"
+    assert cache["policy_checkpoint_id"] == "step-00001"
 
 
 def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
@@ -138,12 +177,13 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     first_cached = judged_row("q1", 0)
     for record in first_cached["trajectory_records"]:
         record["training_cache"] = {
-            "version": 4,
+            "version": 5,
             "input_ids": [1],
             "labels": [2],
             "completion_mask": [True],
             "reference_logprob": -0.1,
             "reference_logprobs": [-0.1],
+            "reference_logprob_source": "policy_rescore",
         }
     write_jsonl(output_path, [first_cached])
     scorer = FakeScorer()
@@ -160,11 +200,11 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert scorer.seen_batches == [["trajectory-1"]]
     assert [(row["query_id"], row["rollout_index"]) for row in cached_rows] == [("q1", 0), ("q2", 1)]
-    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 4
-    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == 4
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 5
+    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == 5
 
 
-def test_cache_step_resume_rewrites_old_cached_rows_to_v4(tmp_path: Path) -> None:
+def test_cache_step_resume_rewrites_old_cached_rows_to_v5(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     judged_path = tmp_path / "judged.jsonl"
@@ -195,7 +235,7 @@ def test_cache_step_resume_rewrites_old_cached_rows_to_v4(tmp_path: Path) -> Non
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert scorer.seen_batches == [["trajectory-1"]]
     assert len(cached_rows) == 1
-    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 4
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 5
     assert cached_rows[0]["trajectory_records"][0]["training_cache"]["reference_logprobs"] == [0.0, -0.5]
 
 
