@@ -26,6 +26,8 @@ def test_build_summary_system_prompt_is_concise_and_requires_wrappers() -> None:
 
     assert "2048" not in prompt
     assert "<summary>...</summary>" in prompt
+    assert "remain present verbatim" in prompt
+    assert "do not restate the original query" in prompt
     assert prompt.startswith("<summary_request>")
     assert prompt.endswith("</summary_request>")
 
@@ -56,15 +58,22 @@ def test_tool_result_wrapper_preserves_raw_result_text() -> None:
     )
 
 
-def test_compacted_messages_wrap_generated_state_but_not_the_system_prompt() -> None:
+def test_compacted_messages_preserve_original_prefix_and_wrap_generated_state() -> None:
     for native_tools in (False, True):
-        messages = build_compacted_messages("compressed task state", native_tools=native_tools)
+        initial_messages = build_initial_messages("original user query", native_tools=native_tools)
+        messages = build_compacted_messages(
+            "original user query",
+            "compressed task state",
+            native_tools=native_tools,
+        )
 
-        assert messages[0].role == "system"
+        assert messages[:2] == initial_messages
         assert messages[1].role == "user"
-        assert messages[1].content == "<summary>\ncompressed task state\n</summary>"
-        assert messages[1].content.count("<summary>") == 1
-        assert messages[1].content.count("</summary>") == 1
+        assert messages[1].content == "original user query"
+        assert messages[2].role == "user"
+        assert messages[2].content == "<summary>\ncompressed task state\n</summary>"
+        assert messages[2].content.count("<summary>") == 1
+        assert messages[2].content.count("</summary>") == 1
 
 
 def test_initial_messages_leave_raw_user_query_unwrapped() -> None:

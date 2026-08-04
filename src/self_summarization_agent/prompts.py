@@ -188,7 +188,7 @@ def build_system_prompt() -> str:
 (3) Provide your final answer within <answer> </answer> tags.
 (4) When the user prompts a summary request, compact the agent context into a summary for further steps using format: <summary> summary </summary>.
 
-IMPORTANT: When prompted the summary request, you can only output <summary> summary </summary> after thinking. The summary should include the user's query and the research context. All the context would be removed after summarization, thus include all essential information in the summary. Do NOT call other tools or answer.
+IMPORTANT: The original user query remains present verbatim after every compaction. A later user message wrapped in <summary>...</summary> is compressed agent history for continuing that original query, not a new task. When prompted with a summary request, output only <summary> summary </summary> after thinking. Summarize the accumulated research state, evidence, unresolved work, and next steps without restating the original user query. Do NOT call other tools or answer.
 """
 
 
@@ -196,7 +196,9 @@ def build_native_tool_system_prompt() -> str:
     return """You are an expert research agent. Normally, use exactly one provided function per turn.
 Use search to find relevant passages, get_document to inspect a selected document, and finish only when you can submit the best-supported final answer.
 
-The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not call a function or answer the original question. Compact the preceding task state and output exactly one <summary>...</summary> block. Normal function-calling mode resumes afterward."""
+The original user query remains present verbatim after every compaction. A later user message wrapped in <summary>...</summary> is compressed agent history for continuing that original query, not a new task.
+
+The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not call a function or answer the original question. Compact only the accumulated research state, evidence, unresolved work, and next steps without restating the original query, then output exactly one <summary>...</summary> block. Normal function-calling mode resumes afterward."""
 
 
 def build_forced_answer_prompt() -> str:
@@ -215,12 +217,12 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
     return """<summary_request>
-Compact the context into a summary.
+Compact the agent history into a summary for continuing the original user query, which will remain present verbatim. Preserve gathered evidence, conclusions, unresolved work, and next steps; do not restate the original query. Output exactly one <summary>...</summary> block after thinking.
 </summary_request>"""
 
 
 def build_native_summary_system_prompt() -> str:
-    return """You compact research-agent state for a later continuation. Do not call tools. Preserve the original question, gathered evidence, unresolved questions, and the best next steps. Output exactly one <summary>...</summary> block and no text outside it."""
+    return """You compact research-agent history for a later continuation. The original user query remains present verbatim, so do not restate it. Do not call tools. Preserve gathered evidence, conclusions, unresolved questions, and the best next steps. Output exactly one <summary>...</summary> block and no text outside it."""
 
 
 def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:
@@ -243,11 +245,17 @@ def format_compacted_summary(summary: str) -> str:
     return f"<summary>\n{summary}\n</summary>"
 
 
-def build_compacted_messages(summary: str, *, native_tools: bool = False) -> list[Message]:
+def build_compacted_messages(
+    user_prompt: str,
+    summary: str,
+    *,
+    native_tools: bool = False,
+) -> list[Message]:
     return [
         Message(
             role="system",
             content=build_native_tool_system_prompt() if native_tools else build_system_prompt(),
         ),
+        Message(role="user", content=user_prompt),
         Message(role="user", content=format_compacted_summary(summary)),
     ]

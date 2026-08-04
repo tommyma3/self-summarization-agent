@@ -24,6 +24,7 @@ from self_summarization_agent.rewards import (
     apply_terminal_reward,
     trainable_turn_ids_from_records,
 )
+from self_summarization_agent.trajectory import TRAJECTORY_SCHEMA_VERSION
 
 
 _JSON_DECODER = json.JSONDecoder()
@@ -451,7 +452,7 @@ class EpisodeRuntime:
         if not assistant_outputs:
             return trajectory_id
         record: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": TRAJECTORY_SCHEMA_VERSION,
             "query_id": active.state.query_id,
             "turn_id": trajectory_id,
             "segment_index": len(active.trajectory_records) + 1,
@@ -1082,6 +1083,7 @@ class EpisodeRuntime:
             return
         state.latest_summary = summary_extraction.summary
         state.messages = build_compacted_messages(
+            state.user_prompt,
             summary_extraction.summary,
             native_tools=self._uses_native_tools,
         )

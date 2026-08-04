@@ -38,7 +38,7 @@ from self_summarization_agent.rewards import (
     is_penalized_runtime_status,
     trainable_turn_ids_from_records,
 )
-from self_summarization_agent.trajectory import extract_trainable_samples
+from self_summarization_agent.trajectory import extract_trainable_samples, validate_trajectory_schema
 
 
 def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str, Any]:
@@ -104,9 +104,14 @@ def _load_completed_rollout_keys(
                     f"Cannot resume {rollout_path}: line {line_number} has sampling profile "
                     f"{row.get('sampling_profile_id')!r}, expected {expected_sampling_profile_id!r}"
                 )
+            trajectory_records = row.get("trajectory_records")
+            validate_trajectory_schema(
+                trajectory_records,
+                context=f"Cannot resume {rollout_path}: line {line_number}",
+            )
             if require_exact_token_ids:
-                trajectory_records = row.get("trajectory_records")
-                if not isinstance(trajectory_records, list) or not trajectory_records:
+                assert isinstance(trajectory_records, list)
+                if not trajectory_records:
                     raise ValueError(
                         f"Cannot resume {rollout_path}: line {line_number} has no trajectory records "
                         "for exact-token collection"

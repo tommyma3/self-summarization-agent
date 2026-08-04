@@ -71,7 +71,8 @@
         {%- set content = render_content(message.content, false)|trim %}
         {%- set is_tool_response = content.startswith('<tool_response>') and content.endswith('</tool_response>') %}
         {%- set is_summary_request = content.startswith('<summary_request>') and content.endswith('</summary_request>') %}
-        {%- if not is_tool_response and not is_summary_request %}
+        {%- set is_compacted_state = content.startswith('<summary>') and content.endswith('</summary>') %}
+        {%- if not is_tool_response and not is_summary_request and not is_compacted_state %}
             {%- set ns.multi_step_tool = false %}
             {%- set ns.last_query_index = index %}
         {%- endif %}

@@ -27,6 +27,7 @@ from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
     extract_trainable_samples,
     is_training_cache_current,
+    validate_trajectory_schema,
 )
 
 
@@ -300,6 +301,10 @@ def _has_complete_raw_rollouts(
             raise ValueError(
                 f"Cannot resume from {path}: row {index} is missing trajectory_records; recollect it"
             )
+        validate_trajectory_schema(
+            row["trajectory_records"],
+            context=f"Cannot resume from {path}: row {index}",
+        )
     return True
 
 
@@ -335,6 +340,10 @@ def _has_complete_judged_rollouts(
             raise ValueError(
                 f"Cannot resume from {path}: row {index} is missing trajectory_records; recollect it"
             )
+        validate_trajectory_schema(
+            row["trajectory_records"],
+            context=f"Cannot resume from {path}: row {index}",
+        )
         if not isinstance(row.get("turn_rewards"), dict):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_rewards")
         if require_judge and not isinstance(row.get("judge"), dict):
@@ -370,6 +379,10 @@ def _has_complete_cached_rollouts(
             raise ValueError(
                 f"Cannot resume from {path}: row {index} is missing trajectory_records; recollect it"
             )
+        validate_trajectory_schema(
+            trajectory_records,
+            context=f"Cannot resume from {path}: row {index}",
+        )
         if not isinstance(turn_rewards, dict):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_rewards")
         if row.get("trainable_sample_count") == 0:
@@ -447,6 +460,10 @@ def _has_inline_cached_rollouts(
             or not isinstance(turn_rewards, dict)
         ):
             return False
+        validate_trajectory_schema(
+            trajectory_records,
+            context=f"Cannot use inline cache from {path}: row {index}",
+        )
         if row.get("trainable_sample_count") == 0:
             continue
         rewarded_ids = set(turn_rewards)

@@ -473,6 +473,7 @@ def test_openai_collection_resume_rejects_rows_without_exact_token_ids(tmp_path:
                 "query_id": "q1",
                 "trajectory_records": [
                     {
+                        "schema_version": 3,
                         "kind": "trajectory",
                         "turn_id": "trajectory-1",
                     }
@@ -498,3 +499,46 @@ def test_openai_collection_resume_rejects_rows_without_exact_token_ids(tmp_path:
         assert "missing exact collection_tokens" in str(exc)
     else:
         raise AssertionError("Expected OpenAI-compatible resume to reject non-exact rows")
+
+
+def test_collection_resume_rejects_previous_trajectory_contract(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    output_path = tmp_path / "rollouts.jsonl"
+    output_path.write_text(
+        json.dumps(
+            {
+                "policy_checkpoint_id": "step-00001",
+                "rollout_index": 0,
+                "query_id": "q1",
+                "trajectory_records": [
+                    {
+                        "schema_version": 2,
+                        "kind": "trajectory",
+                        "turn_id": "trajectory-1",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    examples = [QueryExample(query_id="q1", query="question", answer="done")]
+
+    try:
+        collect_rollouts(
+            config,
+            checkpoint_path=checkpoint,
+            output_path=output_path,
+            examples=examples,
+            backend=FakeBackend(search_index={}, documents={}),
+            generator=CyclingGenerator([]),
+            judge=FakeJudge(),
+            resume=True,
+        )
+    except ValueError as exc:
+        assert "schema version 2" in str(exc)
+        assert "Recollect it without --resume" in str(exc)
+    else:
+        raise AssertionError("Expected resume to reject the previous trajectory contract")

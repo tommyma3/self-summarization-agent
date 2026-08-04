@@ -100,16 +100,37 @@ def test_summary_request_only_appends_tokens_to_the_rendered_tool_segment() -> N
     assert rendered_summary_prompt.index("<summary_request>") > len(rendered_segment)
 
 
-def test_wrapped_compacted_state_is_rendered_as_the_next_user_query() -> None:
+def test_wrapped_compacted_state_is_rendered_after_the_preserved_user_query() -> None:
     rendered = _render(
         [
             {"role": "system", "content": "policy"},
+            {"role": "user", "content": "original question"},
             {"role": "user", "content": "<summary>\ncompressed task state\n</summary>"},
         ]
     )
 
+    assert rendered.index("original question") < rendered.index("compressed task state")
     assert "<|im_start|>user\n<summary>\ncompressed task state\n</summary><|im_end|>" in rendered
     assert rendered.rstrip().endswith("<|im_start|>assistant\n<think>")
+
+
+def test_wrapped_compacted_state_does_not_replace_query_for_reasoning_history() -> None:
+    rendered = _render(
+        [
+            {"role": "system", "content": "policy"},
+            {"role": "user", "content": "original question"},
+            {"role": "user", "content": "<summary>\ncompressed task state\n</summary>"},
+            {
+                "role": "assistant",
+                "content": "<search>next</search>",
+                "reasoning_content": "continue from compressed evidence",
+            },
+        ],
+        add_generation_prompt=False,
+    )
+
+    assert rendered.index("original question") < rendered.index("compressed task state")
+    assert "<think>\ncontinue from compressed evidence\n</think>" in rendered
 
 
 def test_rejects_unscoped_noninitial_system_message() -> None:

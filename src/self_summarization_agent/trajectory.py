@@ -7,7 +7,7 @@ from typing import Any
 
 TOKEN_CACHE_VERSION = 4
 TOKEN_CACHE_FIELD = "training_cache"
-TRAJECTORY_SCHEMA_VERSION = 2
+TRAJECTORY_SCHEMA_VERSION = 3
 COLLECTION_TOKEN_VERSION = 1
 
 
@@ -168,6 +168,20 @@ def _validate_messages(value: object, *, record_id: str) -> list[dict[str, Any]]
     return messages
 
 
+def validate_trajectory_schema(records: object, *, context: str) -> None:
+    if not isinstance(records, list):
+        raise ValueError(f"{context} is missing trajectory records")
+    for index, record in enumerate(records, start=1):
+        if not isinstance(record, Mapping):
+            raise ValueError(f"{context} trajectory {index} is not an object")
+        version = record.get("schema_version")
+        if version != TRAJECTORY_SCHEMA_VERSION:
+            raise ValueError(
+                f"{context} trajectory {index} has schema version {version!r}; "
+                f"expected {TRAJECTORY_SCHEMA_VERSION}. Recollect it without --resume."
+            )
+
+
 def _extract_collection_tokens(
     record: Mapping[str, object],
     *,
@@ -238,6 +252,7 @@ def extract_trainable_samples(
     *,
     rollout_id: str | None = None,
 ) -> list[RLSample]:
+    validate_trajectory_schema(records, context="Trainable records")
     samples: list[RLSample] = []
     seen_record_ids: set[str] = set()
     for record in records:

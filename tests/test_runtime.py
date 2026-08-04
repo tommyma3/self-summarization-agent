@@ -171,6 +171,10 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
     assert summary_prompt.messages[0].content == model.prompts[0].messages[0].content
     assert summary_prompt.messages[-1].role == "user"
     assert summary_prompt.messages[-1].content.startswith("<summary_request>")
+    acting_prompt_after_summary = model.prompts[2]
+    assert [message.role for message in acting_prompt_after_summary.messages] == ["system", "user", "user"]
+    assert acting_prompt_after_summary.messages[:2] == model.prompts[0].messages[:2]
+    assert acting_prompt_after_summary.messages[2].content == "<summary>\nstate\n</summary>"
     assert [message["role"] for message in result.trajectory_records[0]["messages"]] == [
         "system",
         "user",
@@ -511,8 +515,8 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     assert compaction_prompt.rstrip().endswith("</summary_request>")
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
+    assert "### USER\nquestion" in acting_prompt_after_summary
     assert "### USER\n<summary>\nsummary of the task and old-doc\n</summary>" in acting_prompt_after_summary
-    assert "### USER\nquestion" not in acting_prompt_after_summary
     assert "retain this reasoning" not in acting_prompt_after_summary
     assert "<search>first</search>" not in acting_prompt_after_summary
 
@@ -631,15 +635,61 @@ def test_runtime_records_one_training_trajectory_per_interval() -> None:
         "system", "user", "assistant", "user", "user", "assistant"
     ]
     assert "retain" not in first_interval["messages"][0]["content"]
-    assert "Compact the preceding task state" in first_interval["messages"][-2]["content"]
+    assert "Compact the agent history" in first_interval["messages"][-2]["content"]
     second_interval = result.trajectory_records[1]
     assert second_interval["turn_ids"] == ["final-answer"]
-    assert [message["role"] for message in second_interval["messages"]] == ["system", "user", "assistant"]
-    assert second_interval["messages"][1]["content"] == (
+    assert [message["role"] for message in second_interval["messages"]] == [
+        "system", "user", "user", "assistant"
+    ]
+    assert second_interval["messages"][1]["content"] == "question"
+    assert second_interval["messages"][2]["content"] == (
         "<summary>\nsummary of the task and old-doc\n</summary>"
     )
     assert result.turn_records[1]["summary"] == "summary of the task and old-doc"
     assert result.turn_rewards == {"trajectory-1": 1.0, "trajectory-2": 1.0}
+
+
+def test_runtime_preserves_original_prefix_and_replaces_only_history_across_compactions() -> None:
+    backend = FakeBackend(
+        search_index={"first": ["first-doc"], "second": ["second-doc"]},
+        documents={},
+    )
+    model = RecordingModel(
+        outputs=[
+            tool_output('{"tool_name": "search", "arguments": {"query": "first"}}', "first reasoning"),
+            "<think>compact first</think>\n<summary>first compressed history</summary>",
+            tool_output('{"tool_name": "search", "arguments": {"query": "second"}}', "second reasoning"),
+            "<think>compact second</think>\n<summary>second compressed history</summary>",
+            tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}'),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=1,
+        max_context_tokens=2048,
+        max_summary_tokens=128,
+        token_counter=lambda text: text.count("doc"),
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="exact original question")
+
+    assert result.status == "completed"
+    assert result.summary_turns == ["summary-1", "summary-2"]
+    assert len(result.trajectory_records) == 3
+    initial_prefix = result.trajectory_records[0]["messages"][:2]
+    for record in result.trajectory_records[1:]:
+        assert record["messages"][:2] == initial_prefix
+        assert record["messages"][1]["content"] == "exact original question"
+
+    second_interval = result.trajectory_records[1]["messages"]
+    assert second_interval[2]["content"] == "<summary>\nfirst compressed history\n</summary>"
+    assert all("first reasoning" not in message["content"] for message in second_interval)
+
+    third_interval = result.trajectory_records[2]["messages"]
+    assert third_interval[2]["content"] == "<summary>\nsecond compressed history\n</summary>"
+    assert all("first compressed history" not in message["content"] for message in third_interval)
+    assert all("second reasoning" not in message["content"] for message in third_interval)
 
 
 def test_runtime_completed_result_feeds_trajectory_extraction() -> None:

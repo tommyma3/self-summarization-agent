@@ -24,23 +24,25 @@ When the compaction threshold is reached after a completed tool round, the runti
 
 ```text
 system instructions
-user request or <summary>previous compressed state</summary>
+original user request
+<summary>previous compressed agent history</summary> (after the first compaction)
 assistant/tool events
 ...
 compaction instruction
 assistant compaction reasoning and `<summary>compressed state</summary>`
 ```
 
-The compaction prompt is concise and does not state the configured summary-body limit. It requires completed thinking followed by the compressed state inside `<summary>...</summary>`. The runtime first removes everything through `</think>`, then stores only the text inside the first complete wrapper in the remainder, ignoring any other prefix or suffix. The stored body remains the value used for summary metrics and diagnostics. When it becomes the next interval's initial user message, the runtime wraps that body again in `<summary>...</summary>` to distinguish model-generated compaction from an original query. Missing `</think>` or summary wrappers are malformed-tool-call failures; a present but empty wrapper is an empty-summary failure. The full raw completion, including thinking and wrappers, remains in the interval trajectory and generated-token accounting.
+The compaction prompt is concise and does not state the configured summary-body limit. It requires completed thinking followed by compressed agent history inside `<summary>...</summary>`. Because the original user request remains present verbatim in every interval, the summary preserves gathered evidence, conclusions, unresolved work, and next steps without needing to restate the request. The runtime first removes everything through `</think>`, then stores only the text inside the first complete wrapper in the remainder, ignoring any other prefix or suffix. The stored body remains the value used for summary metrics and diagnostics. When it becomes the next interval's third message, the runtime wraps that body again in `<summary>...</summary>` to distinguish model-generated compressed history from the original query. Missing `</think>` or summary wrappers are malformed-tool-call failures; a present but empty wrapper is an empty-summary failure. The full raw completion, including thinking and wrappers, remains in the interval trajectory and generated-token accounting.
 
-The compaction prompt does not insert a second copy of the previous compressed state. A valid summary retires the entire preceding interval. The next action begins from exactly:
+The compaction prompt does not insert a second copy of the previous compressed state. A valid summary retires the preceding assistant/tool history while preserving the stable task prefix. The next action begins from exactly:
 
 ```text
 system instructions
-<summary>new compressed state</summary>
+original user request
+<summary>new compressed agent history</summary>
 ```
 
-There is no original user-request copy and no retained raw tool-event tail after compaction. The compressed state is responsible for preserving all task information needed in later intervals.
+The system instructions and original user request are byte-for-byte identical across intervals. There is no retained raw assistant/tool-event tail after compaction, and only the latest compressed state is carried forward. The complete retired interval remains immutable in its trajectory record.
 
 ## Forced-Answer Contract
 
@@ -59,7 +61,7 @@ The sample contains the full structured message sequence. Its token mask is spar
 
 - every assistant-generated token is trainable, including reasoning, tool actions, summary reasoning/body, and final-answer reasoning/body
 - system instructions are conditioning-only
-- the user request or compressed state is conditioning-only
+- the original user request and any compressed state are conditioning-only
 - tool results are conditioning-only
 - appended compaction and forced-answer instructions are conditioning-only
 
@@ -77,7 +79,7 @@ Generation-level `turn_records` remain diagnostic metadata. Training consumes `t
 - assistant-completion count
 - optional sparse token cache
 
-Training cache version 3 tokenizes the entire interval once, masks only assistant targets, and stores reference log probabilities aligned with that sparse mask. An interval that exceeds the configured training sequence length is rejected; its prefix is never left-truncated because truncation would violate the system/state/trajectory contract.
+Trajectory schema version 3 records the stable system-plus-original-query prefix contract and must not be mixed with earlier rollout rows during resume or training. Training cache version 4 tokenizes the entire interval once, masks only assistant targets, and stores reference log probabilities aligned with that sparse mask. An interval that exceeds the configured training sequence length is rejected; its prefix is never left-truncated because truncation would violate the system/state/trajectory contract.
 
 ## Failure Semantics
 

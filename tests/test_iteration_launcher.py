@@ -114,6 +114,7 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_v
             ],
             "trajectory_records": [
                 {
+                    "schema_version": 3,
                     "query_id": f"q{index}",
                     "turn_id": "trajectory-1",
                     "kind": "trajectory",

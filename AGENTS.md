@@ -67,10 +67,11 @@ Only after the old interval has been finalized may the runtime start the next in
 
 ```text
 the same stable system instructions
-user: <summary>extracted compressed state</summary>
+the same original user query
+user: <summary>extracted compressed agent history</summary>
 ```
 
-The wrapper distinguishes model-generated compaction from a raw user query. Do not copy the original query or retain a raw event tail beside the summary in the new interval; the summary itself must preserve the original query, gathered evidence, unresolved work, and next steps.
+The system instructions and original user query remain byte-for-byte stable across every interval. The wrapper distinguishes model-generated compressed history from the original query. Do not retain a raw assistant/tool-event tail beside the summary in the new interval; the summary replaces the preceding agent history and must preserve gathered evidence, conclusions, unresolved work, and next steps without being responsible for reproducing the original query.
 
 A malformed, empty, or over-limit summary is never installed as new state. Its raw failed output stays in the terminated interval and the rollout receives the configured penalty.
 
@@ -81,7 +82,7 @@ One `trajectory_record` is one complete interval ending in compaction, final ans
 The sparse training mask is:
 
 - Trainable: every model-generated assistant token, including reasoning, tool actions, summary reasoning/body, and final-answer reasoning/body.
-- Conditioning only: system instructions, original query or wrapped compressed state, tool results, summary requests, and forced-answer controls.
+- Conditioning only: system instructions, the original query, any wrapped compressed state, tool results, summary requests, and forced-answer controls.
 
 All intervals from one rollout share the same judged rollout reward. Do not give a rollout more independent reward-normalization weight merely because it compacted more often.
 
@@ -101,7 +102,7 @@ When changing runtime, prompts, chat templates, generation backends, collection,
 
 1. Identify the interval boundary before editing.
 2. Confirm that every non-compaction transition only appends messages or tokens.
-3. Confirm that compaction first finalizes the complete old interval, then starts a fresh interval from the unchanged system instructions plus the wrapped summary.
+3. Confirm that compaction first finalizes the complete old interval, then starts a fresh interval from the unchanged system instructions, unchanged original query, and wrapped summary.
 4. Preserve raw generated output alongside any parsed runtime representation.
 5. Preserve native tool-call structure and tool-call IDs.
 6. Keep exact collected token IDs authoritative for training.

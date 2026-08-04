@@ -76,7 +76,7 @@ def judged_row(query_id: str, rollout_index: int, checkpoint_id: str = "step-000
         ],
         "trajectory_records": [
             {
-                "schema_version": 1,
+                "schema_version": 3,
                 "query_id": query_id,
                 "turn_id": "trajectory-1",
                 "kind": "trajectory",

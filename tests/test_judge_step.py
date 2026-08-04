@@ -42,6 +42,7 @@ def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
         ],
         "trajectory_records": [
             {
+                "schema_version": 3,
                 "query_id": "q1",
                 "turn_id": "trajectory-1",
                 "kind": "trajectory",
@@ -124,6 +125,7 @@ def write_raw_rollouts(path: Path) -> None:
             ],
             "trajectory_records": [
                 {
+                    "schema_version": 3,
                     "query_id": "q1",
                     "turn_id": "trajectory-1",
                     "kind": "trajectory",

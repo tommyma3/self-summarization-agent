@@ -40,8 +40,9 @@ def test_summary_instruction_is_appended_to_unchanged_context() -> None:
     assert prompt.messages[-1].role == "user"
     assert prompt.messages[-1].content.startswith("<summary_request>")
     assert prompt.messages[-1].content.endswith("</summary_request>")
-    assert "Compact the preceding task state" in prompt.messages[-1].content
+    assert "Compact the agent history" in prompt.messages[-1].content
     assert "<summary>...</summary>" in prompt.messages[-1].content
+    assert "remain present verbatim" in prompt.messages[-1].content
     assert "32" not in prompt.messages[-1].content
 
 

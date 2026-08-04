@@ -11,7 +11,7 @@ from self_summarization_agent.trajectory import extract_trainable_samples, token
 
 def trajectory_record(record_id: str, query_id: str = "q1") -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 3,
         "query_id": query_id,
         "turn_id": record_id,
         "kind": "trajectory",
@@ -93,6 +93,7 @@ def test_extract_trainable_samples_rejects_missing_assistant_completion() -> Non
 
 def test_extract_trainable_samples_rejects_old_per_turn_schema() -> None:
     old_record = {
+        "schema_version": 3,
         "query_id": "q1",
         "turn_id": "tool-1",
         "kind": "tool",
@@ -102,6 +103,14 @@ def test_extract_trainable_samples_rejects_old_per_turn_schema() -> None:
 
     with pytest.raises(ValueError, match="Unknown trajectory record kind"):
         extract_trainable_samples([old_record], {"tool-1": 1.0})
+
+
+def test_extract_trainable_samples_rejects_previous_trajectory_contract() -> None:
+    record = trajectory_record("trajectory-1")
+    record["schema_version"] = 2
+
+    with pytest.raises(ValueError, match="expected 3.*Recollect"):
+        extract_trainable_samples([record], {"trajectory-1": 1.0})
 
 
 def test_extract_trainable_samples_rejects_leftover_reward_ids() -> None:
@@ -137,6 +146,39 @@ def test_interval_tokenization_masks_only_assistant_content() -> None:
     )
 
     assert sum(mask) == len("reasoning and action".split()) + len("reasoning and summary".split())
+
+
+def test_compacted_state_and_preserved_query_are_conditioning_only() -> None:
+    class WhitespaceTokenizer:
+        chat_template = None
+
+        def __init__(self) -> None:
+            self.vocabulary: dict[str, int] = {}
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            del add_special_tokens
+            ids = []
+            for token in text.split():
+                if token not in self.vocabulary:
+                    self.vocabulary[token] = len(self.vocabulary) + 1
+                ids.append(self.vocabulary[token])
+            return ids
+
+    messages = [
+        {"role": "system", "content": "stable instructions"},
+        {"role": "user", "content": "exact original query"},
+        {"role": "user", "content": "<summary> compressed agent history </summary>"},
+        {"role": "assistant", "content": "new reasoning and action"},
+    ]
+
+    _input_ids, _labels, mask = tokenize_interval_messages(
+        WhitespaceTokenizer(),
+        messages,
+        max_sequence_length=128,
+        sample_id="trajectory-2",
+    )
+
+    assert sum(mask) == len("new reasoning and action".split())
 
 
 def test_interval_tokenization_never_left_truncates_system_prefix() -> None:

@@ -61,6 +61,7 @@ def training_cache(reference_logprob: float = -0.5) -> dict:
 
 def trajectory_record(record_id: str, *, termination_kind: str, cache: bool = True) -> dict:
     record = {
+        "schema_version": 3,
         "query_id": "q1",
         "turn_id": record_id,
         "kind": "trajectory",
