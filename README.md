@@ -276,18 +276,16 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 
 For the intended GPU run:
 
-- each iteration's combined eval-then-train collection uses one phase-scoped FAISS worker; the embedding model is unloaded before fallback judging, caching, and policy weight updates
-- combined collection starts one overlap judge worker, then reuses one OpenAI-compatible client for evaluation and training rollouts against the externally served policy checkpoint
+- each iteration's eval-then-train collection uses one collection-scoped FAISS worker; it is shut down and joined together with the policy collection boundary before judging begins
+- eval and training policy engines run in isolated subprocesses with their corresponding sampling profiles; process exit is the authoritative vLLM teardown boundary
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes, emits completed rollouts after each runtime round, and immediately refills freed slots instead of waiting for the slowest episode in a fixed batch
-- completed rollouts stream through a bounded overlap queue; the judge dynamically coalesces them up to `judge.batch_size` or `judge.batch_wait_ms`
-- exact `vllm_offline` generations retain raw sampled-token logprobs and assemble v5 training caches directly from authoritative collection IDs and assistant masks; GPU 0 policy rescoring starts lazily only for rows with missing, non-raw, or prefix-misaligned rollout logprobs
-- `rollout.overlap_queue_max_batches` bounds producer lead and applies backpressure when judging or fallback cache scoring falls behind
-- rollout collection writes eval trajectories first and training trajectories second while reusing the policy rollout engine; by default the shared judge worker overlaps judging into each paired judged rollout artifact
-- `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; the default Qwen3.5 thinking profile uses `temperature: 1.0`, `top_p: 0.95`, and the documented `top_k`, `min_p`, presence-penalty, and repetition-penalty settings
-- eval sampling overrides are applied to the already-loaded rollout generator and restored before training collection, so specialization does not reload the policy model or change the shared-engine phase order
+- exact `vllm_offline` training generations retain raw sampled-token logprobs and assemble v5 training caches directly from authoritative collection IDs and assistant masks before the policy process exits
+- after both raw artifacts are complete and policy/retrieval teardown is confirmed, one judge vLLM loads on GPUs 0-3 with tensor parallel size 4 and judges all pending eval rows followed by all pending training rows
+- `rollout.overlap_judge` and `rollout.overlap_queue_max_batches` remain parseable for compatibility but do not enable policy/judge overlap in `merged_collect`
+- `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; its generator is constructed from the resolved evaluation profile instead of mutating the training generator
 - raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` preserves complete rollout-native v5 caches without loading a model; when fallback rescoring is required, it loads the rollout checkpoint and writes v5 sparse interval caches from the exact collection IDs. Resume preserves completed v5 rows and regenerates older cache versions as v5
+- `cache_step` preserves complete rollout-native v5 caches without loading a model; when fallback rescoring is required, a GPU-0 policy scorer starts only after the judge process exits. Resume preserves completed v5 rows and regenerates older cache versions as v5
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs

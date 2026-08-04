@@ -1,21 +1,15 @@
-"""Single-process merged collection step with overlapped cache scoring.
+"""Merged collection with strict GPU lifecycle boundaries.
 
-Replaces six separate subprocess phases (eval_rollout, train_rollout,
-eval_judge, eval_metrics, train_judge, train_cache) with one process
-that builds a single vLLM engine and runs all collection, judging,
-metrics, and caching work.
+The parent process remains CUDA-free and supervises three sequential phases::
 
-Architecture
-------------
-Up to three concurrent workers across 4 GPUs::
+    collection workers (policy GPUs): eval, then train + native logprobs
+    judge worker (judge GPUs):        eval and train answer judging
+    cache fallback (GPU 0):           only rows missing native logprobs
 
-    Main process (GPUs 2,3):  vLLM engine → generates rollouts
-    Judge worker (GPU 1):     spawned process → scores batches
-    Cache fallback (GPU 0):   lazily spawned for rows missing rollout logprobs
-
-Exact vLLM rollouts assemble reference-logprob caches from decode metadata.
-Fallback cache scoring overlaps with train collection when needed so all
-outputs are ready before the downstream ``train_update`` phase starts.
+The retrieval worker is owned by the collection phase.  It and every policy
+worker must exit before the judge worker is allowed to start.  Process exit,
+rather than best-effort object deletion, is the authoritative vLLM teardown
+boundary.
 """
 
 from __future__ import annotations
@@ -26,6 +20,8 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 from queue import Empty, Full
+import signal
+import sys
 import time
 import traceback
 from typing import Any
@@ -55,8 +51,9 @@ from self_summarization_agent.iteration_launcher import (
     _has_complete_judged_rollouts,
     _has_complete_raw_rollouts,
     _has_eval_metrics,
+    _start_retrieval_worker,
+    _stop_retrieval_worker,
 )
-from self_summarization_agent.judge_step import build_judge, judge_rollout_rows
 from self_summarization_agent.launcher_utils import (
     append_jsonl,
     build_runtime,
@@ -65,26 +62,18 @@ from self_summarization_agent.launcher_utils import (
     serialize_runtime_result,
 )
 from self_summarization_agent.judge_worker import READY
-from self_summarization_agent.rewards import (
-    apply_malformed_tool_penalty,
-    apply_terminal_reward,
-    is_penalized_runtime_status,
-    trainable_turn_ids_from_records,
-)
 from self_summarization_agent.rollout_collection import (
     _build_overlap_judge_client,
     _build_rollout_generator,
     _configured_task_count,
-    _example_payload,
     _load_completed_rollout_keys,
     _select_collection_examples,
     _temporary_sampling_profile,
-    apply_judged_rewards,
 )
 from self_summarization_agent.trajectory import extract_trainable_samples
 
 # ---------------------------------------------------------------------------
-# Cache overlap worker (spawned process on GPU 0)
+# Cache fallback worker (spawned process on GPU 0 after judging)
 # ---------------------------------------------------------------------------
 
 _CACHE_SHUTDOWN = "__cache_shutdown__"
@@ -155,15 +144,11 @@ def _run_cache_overlap_worker(
 
 
 # ---------------------------------------------------------------------------
-# Cache overlap client (manages the spawned cache-worker lifecycle)
+# Cache fallback client (manages the spawned cache-worker lifecycle)
 # ---------------------------------------------------------------------------
 
 class _CacheOverlapClient:
-    """Manages a spawned cache-worker process on GPU 0.
-
-    Follows the same pattern as ``_SubprocessOverlapJudgeClient`` but for
-    reference-logprob caching instead of judging.
-    """
+    """Lazily manages a post-judge cache-fallback process on GPU 0."""
 
     def __init__(
         self,
@@ -383,6 +368,9 @@ class _CacheOverlapClient:
         if self.process.is_alive():
             self.process.terminate()
             self.process.join(timeout=30)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=10)
 
 
 # ---------------------------------------------------------------------------
@@ -396,21 +384,16 @@ def _collect_split(
     checkpoint_path: Path,
     generator: Any,
     backend: Any,
-    overlap_judge_client: Any | None,
     split: str,
     examples: list[Any],
     raw_output_path: Path,
-    judged_output_path: Path | None,
     sampling_profile: dict[str, Any],
     profile_id: str,
     group_size: int,
     sample_seed: int | None,
     resume: bool,
-    # Optional cache overlap (train split only)
-    cache_overlap_client: _CacheOverlapClient | None = None,
-    cached_output_path: Path | None = None,
 ) -> None:
-    """Collect rollouts for a single split with optional overlapped cache scoring."""
+    """Collect one split without constructing or contacting a judge model."""
 
     task_count, task_count_key = _configured_task_count(config, split=split)
     seed = config.experiment.seed if sample_seed is None else sample_seed
@@ -430,9 +413,7 @@ def _collect_split(
         for rollout_index in range(group_size)
     ]
     expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
-    example_by_query_id = {example.query_id: example for example in selected_examples}
     completed_raw_keys: set[tuple[str, int]] = set()
-    completed_judged_keys: set[tuple[str, int]] = set()
 
     if resume:
         completed_raw_keys = _load_completed_rollout_keys(
@@ -450,110 +431,6 @@ def _collect_split(
     elif raw_output_path.exists():
         raw_output_path.unlink()
 
-    overlap_judge = overlap_judge_client is not None and judged_output_path is not None
-    if overlap_judge:
-        assert judged_output_path is not None
-        ensure_dir(judged_output_path.parent)
-        if resume:
-            completed_judged_keys = _load_completed_rollout_keys(
-                judged_output_path,
-                checkpoint_id=checkpoint_id,
-                expected_keys=expected_keys,
-                expected_sampling_profile_id=profile_id if split == "eval" else None,
-                require_exact_token_ids=False,
-            )
-            if not completed_judged_keys <= completed_raw_keys:
-                unexpected = sorted(completed_judged_keys - completed_raw_keys)
-                raise ValueError(
-                    f"Cannot resume {judged_output_path}: judged rows have no raw counterpart: "
-                    f"{unexpected!r}"
-                )
-        elif judged_output_path.exists():
-            judged_output_path.unlink()
-
-    if cached_output_path is not None:
-        ensure_dir(cached_output_path.parent)
-        if not resume and cached_output_path.exists():
-            cached_output_path.unlink()
-
-    def append_cached_rows(rows: list[dict[str, Any]]) -> None:
-        if cached_output_path is None:
-            return
-        for cached_row in rows:
-            append_jsonl(cached_output_path, cached_row)
-
-    def consume_cache_candidates(rows: list[dict[str, Any]]) -> None:
-        if not rows or cache_overlap_client is None:
-            return
-        cache_candidates = [
-            _materialize_rollout_native_training_caches(
-                row,
-                checkpoint_id=checkpoint_id,
-            )
-            for row in rows
-        ]
-        rollout_native_rows = [
-            row for row in cache_candidates if _row_has_current_training_cache(row)
-        ]
-        fallback_rows = [
-            row for row in cache_candidates if not _row_has_current_training_cache(row)
-        ]
-        cache_overlap_client.record_rollout_native_rows(len(rollout_native_rows))
-        append_cached_rows(rollout_native_rows)
-        cache_overlap_client.submit(fallback_rows)
-        append_cached_rows(cache_overlap_client.drain_available())
-
-    def consume_judged_rows(rows: list[dict[str, Any]]) -> None:
-        if not rows:
-            return
-        assert judged_output_path is not None
-        for judged_row in rows:
-            append_jsonl(judged_output_path, judged_row)
-        consume_cache_candidates(rows)
-
-    # Resume can have raw rows that were never judged. Submit those before new
-    # generation so judge startup/processing overlaps the first rollout round.
-    if overlap_judge and completed_raw_keys - completed_judged_keys:
-        raw_rows_by_key = {
-            (row.get("query_id"), row.get("rollout_index")): row
-            for row in _load_rollout_rows(raw_output_path)
-        }
-        pending_judge_rows = [
-            raw_rows_by_key[(example.query_id, rollout_index)]
-            for example in selected_examples
-            for rollout_index in range(group_size)
-            if (example.query_id, rollout_index) in completed_raw_keys - completed_judged_keys
-        ]
-        for rows in iter_batches(pending_judge_rows, config.judge.batch_size):
-            overlap_judge_client.submit(
-                rows,
-                [example_by_query_id[str(row["query_id"])] for row in rows],
-            )
-
-    # Likewise, resume can have judged rows whose cache responses were not
-    # durably appended before interruption.
-    if cache_overlap_client is not None and judged_output_path is not None:
-        cached_keys = (
-            set(
-                _completed_cached_rows(
-                    cached_output_path,
-                    expected_checkpoint_id=checkpoint_id,
-                )
-            )
-            if resume and cached_output_path is not None
-            else set()
-        )
-        existing_judged_rows = (
-            _load_rollout_rows(judged_output_path) if judged_output_path.exists() else []
-        )
-        pending_cache_rows = [
-            row
-            for row in existing_judged_rows
-            if (row.get("query_id"), row.get("rollout_index")) not in cached_keys
-        ]
-        for rows in iter_batches(pending_cache_rows, config.judge.batch_size):
-            consume_cache_candidates(rows)
-
     collection_started = time.monotonic()
     completed_batch_count = 0
     generated_row_count = 0
@@ -567,14 +444,9 @@ def _collect_split(
             max_active_episodes=config.rollout.max_concurrent_episodes,
         ):
             completed_batch_count += 1
-            overlap_rows: list[dict[str, Any]] = []
-            overlap_examples: list[Any] = []
             for request_index, result in completed_batch:
                 example, rollout_index = rollout_requests[request_index]
                 trainable_sample_count = None
-                judge_payload = None
-                # We don't do inline judging in the merged step — overlap is
-                # always preferred when available.
                 row = {
                     "policy_checkpoint_id": checkpoint_id,
                     "policy_checkpoint_path": str(checkpoint_path),
@@ -591,24 +463,17 @@ def _collect_split(
                         include_rewards=False,
                     ),
                 }
+                if split == "train":
+                    # This is a reward-independent transformation of exact
+                    # collection IDs and raw sampled-token logprobs.  Persist it
+                    # before the policy process exits so normal rows never need
+                    # a second policy-model load.
+                    row = _materialize_rollout_native_training_caches(
+                        row,
+                        checkpoint_id=checkpoint_id,
+                    )
                 append_jsonl(raw_output_path, row)
                 generated_row_count += 1
-                if overlap_judge:
-                    overlap_rows.append(row)
-                    overlap_examples.append(example)
-
-            if overlap_judge and overlap_rows:
-                overlap_judge_client.submit(overlap_rows, overlap_examples)
-                consume_judged_rows(overlap_judge_client.drain_available())
-            elif cache_overlap_client is not None:
-                append_cached_rows(cache_overlap_client.drain_available())
-
-        # Drain remaining judge + cache responses
-        if overlap_judge:
-            consume_judged_rows(overlap_judge_client.finish())
-
-        if cache_overlap_client is not None:
-            append_cached_rows(cache_overlap_client.finish())
 
     print(
         "[merged_collect] "
@@ -624,6 +489,193 @@ def _collect_split(
         ),
         flush=True,
     )
+
+
+def _run_split_collection_worker(
+    *,
+    config_path: str,
+    overrides: list[str],
+    checkpoint_path: str,
+    split: str,
+    raw_output_path: str,
+    sample_seed: int | None,
+    resume: bool,
+    retrieval_worker_url: str | None,
+) -> None:
+    """Child entrypoint that owns one split's policy engine and CUDA state."""
+
+    config = load_train_config(config_path, parse_cli_overrides(overrides))
+    checkpoint = Path(checkpoint_path).resolve()
+    checkpoint_id = checkpoint_id_from_path(checkpoint)
+    examples = load_query_examples(
+        config.experiment.bc_plus_root,
+        config.dataset,
+        require_answers=True,
+        seed=config.experiment.seed,
+    )
+    train_examples, eval_examples = split_train_eval_examples(
+        examples,
+        train_limit=config.dataset.train_limit,
+        eval_limit=config.dataset.eval_limit,
+    )
+    split_examples = eval_examples if split == "eval" else train_examples
+    sampling_profile = resolved_rollout_sampling_profile(config, split=split)
+    profile_id = sampling_profile_id(sampling_profile)
+    group_size = config.evaluation.samples_per_task if split == "eval" else config.training.group_size
+
+    from self_summarization_agent.bcplus_backend import build_backend
+
+    backend = build_backend(
+        config.experiment.bc_plus_root,
+        config.retrieval,
+        worker_url=retrieval_worker_url,
+    )
+    generator = _build_rollout_generator(config, checkpoint, split=split)
+    _collect_split(
+        config=config,
+        checkpoint_id=checkpoint_id,
+        checkpoint_path=checkpoint,
+        generator=generator,
+        backend=backend,
+        split=split,
+        examples=split_examples,
+        raw_output_path=Path(raw_output_path),
+        sampling_profile=sampling_profile,
+        profile_id=profile_id,
+        group_size=group_size,
+        sample_seed=sample_seed,
+        resume=resume,
+    )
+
+
+def _run_split_collection_process(
+    *,
+    config_path: str | Path,
+    overrides: list[str],
+    checkpoint_path: Path,
+    split: str,
+    raw_output_path: Path,
+    sample_seed: int | None,
+    resume: bool,
+    retrieval_worker_url: str | None,
+) -> None:
+    """Run and join a policy child; successful return is the teardown barrier."""
+
+    context = mp.get_context("spawn")
+    process = context.Process(
+        target=_run_split_collection_worker,
+        kwargs={
+            "config_path": str(config_path),
+            "overrides": overrides,
+            "checkpoint_path": str(checkpoint_path),
+            "split": split,
+            "raw_output_path": str(raw_output_path),
+            "sample_seed": sample_seed,
+            "resume": resume,
+            "retrieval_worker_url": retrieval_worker_url,
+        },
+    )
+    process.start()
+    try:
+        process.join()
+    except BaseException:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=30)
+        raise
+    if process.exitcode != 0:
+        raise RuntimeError(
+            f"{split.capitalize()} policy collection process failed with exit code {process.exitcode}"
+        )
+
+
+def _selected_split_examples(config, *, split: str, examples: list[Any], sample_seed: int | None):
+    task_count, task_count_key = _configured_task_count(config, split=split)
+    seed = config.experiment.seed if sample_seed is None else sample_seed
+    return _select_collection_examples(
+        examples,
+        task_count=task_count,
+        task_count_key=task_count_key,
+        split=split,
+        seed=seed,
+    )
+
+
+def _judge_split(
+    *,
+    config,
+    checkpoint_id: str,
+    judge_client: Any,
+    split: str,
+    examples: list[Any],
+    raw_output_path: Path,
+    judged_output_path: Path,
+    group_size: int,
+    sample_seed: int | None,
+    profile_id: str,
+    resume: bool,
+) -> None:
+    """Judge only missing raw rows while preserving resumable JSONL output."""
+
+    selected_examples = _selected_split_examples(
+        config,
+        split=split,
+        examples=examples,
+        sample_seed=sample_seed,
+    )
+    expected_keys = {
+        (example.query_id, rollout_index)
+        for example in selected_examples
+        for rollout_index in range(group_size)
+    }
+    raw_keys = _load_completed_rollout_keys(
+        raw_output_path,
+        checkpoint_id=checkpoint_id,
+        expected_keys=expected_keys,
+        expected_sampling_profile_id=profile_id if split == "eval" else None,
+        require_exact_token_ids=False,
+    )
+    if raw_keys != expected_keys:
+        missing = sorted(expected_keys - raw_keys)
+        raise ValueError(f"Cannot judge incomplete {split} raw rollouts; missing keys: {missing!r}")
+
+    ensure_dir(judged_output_path.parent)
+    completed_judged_keys: set[tuple[str, int]] = set()
+    if resume:
+        completed_judged_keys = _load_completed_rollout_keys(
+            judged_output_path,
+            checkpoint_id=checkpoint_id,
+            expected_keys=expected_keys,
+            expected_sampling_profile_id=profile_id if split == "eval" else None,
+            require_exact_token_ids=False,
+        )
+        if not completed_judged_keys <= raw_keys:
+            unexpected = sorted(completed_judged_keys - raw_keys)
+            raise ValueError(
+                f"Cannot resume {judged_output_path}: judged rows have no raw counterpart: "
+                f"{unexpected!r}"
+            )
+    elif judged_output_path.exists():
+        judged_output_path.unlink()
+
+    example_by_query_id = {example.query_id: example for example in selected_examples}
+    pending_rows = [
+        row
+        for row in _load_rollout_rows(raw_output_path)
+        if (row.get("query_id"), row.get("rollout_index")) not in completed_judged_keys
+    ]
+
+    def append_judged(rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            append_jsonl(judged_output_path, row)
+
+    for rows in iter_batches(pending_rows, config.judge.batch_size):
+        judge_client.submit(
+            rows,
+            [example_by_query_id[str(row["query_id"])] for row in rows],
+        )
+        append_judged(judge_client.drain_available())
+    append_judged(judge_client.finish())
 
 
 # ---------------------------------------------------------------------------
@@ -749,186 +801,187 @@ def run_merged_collect(
         )
     )
 
-    eval_collection_needed = not (eval_raw_done and eval_judged_done and eval_metrics_done)
-    train_collection_needed = not (train_raw_done and train_judged_done)
+    eval_raw_needed = not eval_raw_done
+    train_raw_needed = not train_raw_done
+    eval_judge_needed = not eval_judged_done
+    train_judge_needed = not train_judged_done
     train_cache_needed = not train_cached_done
 
-    if not eval_collection_needed and not train_collection_needed and not train_cache_needed:
+    if not any(
+        (
+            eval_raw_needed,
+            train_raw_needed,
+            eval_judge_needed,
+            train_judge_needed,
+            not eval_metrics_done,
+            train_cache_needed,
+        )
+    ):
         print("[merged_collect] All outputs complete — nothing to do.", flush=True)
         return {}
 
-    # ------------------------------------------------------------------
-    # Build shared resources
-    # ------------------------------------------------------------------
-    from self_summarization_agent.bcplus_backend import build_backend
-
-    backend = build_backend(
-        config.experiment.bc_plus_root,
-        config.retrieval,
-        worker_url=retrieval_worker_url,
-    )
-
-    needs_collection = eval_collection_needed or train_collection_needed
-    overlap_judge = bool(config.rollout.overlap_judge and config.judge.enabled)
-    overlap_judge_client = None
-
-    generator = None
-    if needs_collection:
-        # Start judge loading first so its GPU initialization overlaps rollout
-        # engine construction on the disjoint rollout GPUs.
-        if overlap_judge:
-            overlap_judge_client = _build_overlap_judge_client(
-                judge=None,
-                config_path=str(config_path),
-                overrides=overrides,
-                checkpoint_id=checkpoint_id,
-                queue_max_batches=config.rollout.overlap_queue_max_batches,
-            )
-        # Build vLLM engine with train defaults (eval sampling is applied
-        # temporarily via _temporary_sampling_profile during eval collection).
-        generator = _build_rollout_generator(config, checkpoint, split="train")
-
     outputs: dict[str, Path] = {}
 
-    try:
-        # --------------------------------------------------------------
-        # Stage 2: Eval collection + judging + metrics
-        # --------------------------------------------------------------
-        if eval_collection_needed and has_eval:
-            print("[merged_collect] Starting eval collection...", flush=True)
-            _collect_split(
-                config=config,
-                checkpoint_id=checkpoint_id,
-                checkpoint_path=checkpoint,
-                generator=generator,
-                backend=backend,
-                overlap_judge_client=overlap_judge_client,
-                split="eval",
-                examples=eval_examples_all,
-                raw_output_path=Path(eval_raw_output),
-                judged_output_path=Path(eval_judged_output) if eval_judged_output else None,
-                sampling_profile=eval_sampling_profile,
-                profile_id=eval_profile_id,
-                group_size=config.evaluation.samples_per_task,
-                sample_seed=None,
-                resume=resume,
-                cache_overlap_client=None,
-            )
-            outputs["eval_raw"] = Path(eval_raw_output)
-            if eval_judged_output:
-                outputs["eval_judged"] = Path(eval_judged_output)
-
-        # Eval metrics (cheap — run after collection if not already done)
-        if has_eval and not eval_metrics_done and eval_judged_output is not None:
-            print("[merged_collect] Computing eval metrics...", flush=True)
-            write_eval_metrics(
-                judged_rollout_path=eval_judged_output,
-                metrics_path=eval_metrics_output,
-                iteration=eval_iteration if eval_iteration is not None else 0,
-                policy_checkpoint_id=checkpoint_id,
-            )
-            outputs["eval_metrics"] = Path(eval_metrics_output)
-
-        # --------------------------------------------------------------
-        # Stage 3: Train collection + rollout-native/fallback cache
-        # --------------------------------------------------------------
-        if train_collection_needed or train_cache_needed:
-            # Fresh exact vLLM rows normally materialize their caches without a
-            # model pass. Keep a lazy GPU 0 fallback available for incomplete
-            # logprob metadata; resume-only and non-overlap paths materialize or
-            # rescore inline from the judged artifact.
-            cache_overlap_client = None
-            if train_collection_needed and train_cache_needed and overlap_judge:
-                print(
-                    "[merged_collect] Preparing lazy GPU 0 cache fallback for rows without "
-                    "rollout-native logprobs...",
-                    flush=True,
-                )
-                cache_overlap_client = _CacheOverlapClient(
-                    config_path=str(config_path),
+    # ------------------------------------------------------------------
+    # Phase 1: policy collection. Retrieval is scoped to this phase only.
+    # ------------------------------------------------------------------
+    needs_collection = eval_raw_needed or train_raw_needed
+    owned_retrieval_process = None
+    active_retrieval_url = retrieval_worker_url
+    if needs_collection:
+        try:
+            if config.retrieval.persistent_worker and active_retrieval_url is None:
+                print("[merged_collect] Starting collection-scoped retrieval worker...", flush=True)
+                owned_retrieval_process, active_retrieval_url = _start_retrieval_worker(
+                    config_path=config_path,
+                    train_dir=ensure_dir(Path(train_raw_output).parent),
+                    python_executable=sys.executable,
                     overrides=overrides,
-                    checkpoint_path=str(checkpoint),
-                    checkpoint_id=checkpoint_id,
-                    queue_max_batches=config.rollout.overlap_queue_max_batches,
+                    startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
                 )
 
-            try:
-                if train_collection_needed:
-                    print("[merged_collect] Starting train collection...", flush=True)
-                    train_sampling_profile = resolved_rollout_sampling_profile(config, split="train")
-                    train_profile_id = sampling_profile_id(train_sampling_profile)
-                    _collect_split(
-                        config=config,
-                        checkpoint_id=checkpoint_id,
-                        checkpoint_path=checkpoint,
-                        generator=generator,
-                        backend=backend,
-                        overlap_judge_client=overlap_judge_client,
-                        split="train",
-                        examples=train_examples_all,
-                        raw_output_path=Path(train_raw_output),
-                        judged_output_path=(
-                            Path(train_judged_output) if train_judged_output else None
-                        ),
-                        sampling_profile=train_sampling_profile,
-                        profile_id=train_profile_id,
-                        group_size=config.training.group_size,
-                        sample_seed=sample_seed,
-                        resume=resume,
-                        cache_overlap_client=cache_overlap_client,
-                        cached_output_path=(
-                            Path(train_cached_output) if train_cached_output else None
-                        ),
-                    )
-                    outputs["train_raw"] = Path(train_raw_output)
-                    if train_judged_output:
-                        outputs["train_judged"] = Path(train_judged_output)
+            if eval_raw_needed and has_eval:
+                print("[merged_collect] Starting isolated eval policy collection...", flush=True)
+                _run_split_collection_process(
+                    config_path=config_path,
+                    overrides=overrides,
+                    checkpoint_path=checkpoint,
+                    split="eval",
+                    raw_output_path=Path(eval_raw_output),
+                    sample_seed=None,
+                    resume=resume,
+                    retrieval_worker_url=active_retrieval_url,
+                )
+                outputs["eval_raw"] = Path(eval_raw_output)
 
-                # Compute caches inline when the cache worker wasn't used:
-                #  - Resume: collection already done, judged output exists
-                #  - No overlap judging: launcher handles cache separately
-                if train_cache_needed and cache_overlap_client is None:
-                    judged_path = (
-                        Path(train_judged_output)
-                        if train_judged_output
-                        else None
+            if train_raw_needed:
+                print("[merged_collect] Starting isolated train policy collection...", flush=True)
+                _run_split_collection_process(
+                    config_path=config_path,
+                    overrides=overrides,
+                    checkpoint_path=checkpoint,
+                    split="train",
+                    raw_output_path=Path(train_raw_output),
+                    sample_seed=sample_seed,
+                    resume=resume,
+                    retrieval_worker_url=active_retrieval_url,
+                )
+                outputs["train_raw"] = Path(train_raw_output)
+        finally:
+            if owned_retrieval_process is not None:
+                print("[merged_collect] Stopping collection-scoped retrieval worker...", flush=True)
+                _stop_retrieval_worker(owned_retrieval_process, active_retrieval_url)
+                if owned_retrieval_process.poll() is None:
+                    raise RuntimeError(
+                        "Retrieval worker is still alive after collection teardown; refusing to start judge"
                     )
-                    if judged_path is not None and judged_path.exists():
-                        print("[merged_collect] Computing training caches inline...", flush=True)
-                        _run_cache_inline(
-                            config=config,
-                            checkpoint_path=checkpoint,
-                            judged_rollout_path=judged_path,
-                            cached_output_path=(
-                                Path(train_cached_output) if train_cached_output else None
-                            ),
-                            resume=resume,
-                        )
-                if train_cached_output:
-                    outputs["train_cached"] = Path(train_cached_output)
-            finally:
-                if cache_overlap_client is not None:
-                    print(
-                        "[merged_collect] "
-                        + json.dumps(
-                            {"event": "cache_overlap_metrics", **cache_overlap_client.metrics()},
-                            sort_keys=True,
-                        ),
-                        flush=True,
-                    )
-                    cache_overlap_client.close()
 
-    finally:
-        if overlap_judge_client is not None:
+    # Revalidate the durable boundary before allocating any judge GPU.
+    if has_eval and not _has_complete_raw_rollouts(
+        Path(eval_raw_output),
+        checkpoint_id=checkpoint_id,
+        expected_count=eval_expected_count,
+        expected_sampling_profile_id=eval_profile_id,
+    ):
+        raise RuntimeError("Eval raw rollout artifact is incomplete after policy collection")
+    if not _has_complete_raw_rollouts(
+        Path(train_raw_output),
+        checkpoint_id=checkpoint_id,
+        expected_count=train_expected_count,
+    ):
+        raise RuntimeError("Train raw rollout artifact is incomplete after policy collection")
+
+    # ------------------------------------------------------------------
+    # Phase 2: one fresh judge process handles both complete raw artifacts.
+    # ------------------------------------------------------------------
+    if eval_judge_needed or train_judge_needed:
+        if not config.judge.enabled:
+            raise ValueError("judge.enabled must be true for merged collection")
+        print("[merged_collect] Starting post-collection judge...", flush=True)
+        judge_client = _build_overlap_judge_client(
+            judge=None,
+            config_path=str(config_path),
+            overrides=overrides,
+            checkpoint_id=checkpoint_id,
+            queue_max_batches=config.rollout.overlap_queue_max_batches,
+        )
+        try:
+            if eval_judge_needed and has_eval and eval_judged_output is not None:
+                _judge_split(
+                    config=config,
+                    checkpoint_id=checkpoint_id,
+                    judge_client=judge_client,
+                    split="eval",
+                    examples=eval_examples_all,
+                    raw_output_path=Path(eval_raw_output),
+                    judged_output_path=Path(eval_judged_output),
+                    group_size=config.evaluation.samples_per_task,
+                    sample_seed=None,
+                    profile_id=eval_profile_id,
+                    resume=resume,
+                )
+                outputs["eval_judged"] = Path(eval_judged_output)
+            if train_judge_needed and train_judged_output is not None:
+                train_profile_id = sampling_profile_id(
+                    resolved_rollout_sampling_profile(config, split="train")
+                )
+                _judge_split(
+                    config=config,
+                    checkpoint_id=checkpoint_id,
+                    judge_client=judge_client,
+                    split="train",
+                    examples=train_examples_all,
+                    raw_output_path=Path(train_raw_output),
+                    judged_output_path=Path(train_judged_output),
+                    group_size=config.training.group_size,
+                    sample_seed=sample_seed,
+                    profile_id=train_profile_id,
+                    resume=resume,
+                )
+                outputs["train_judged"] = Path(train_judged_output)
+        finally:
             print(
                 "[merged_collect] "
                 + json.dumps(
-                    {"event": "judge_overlap_metrics", **overlap_judge_client.metrics()},
+                    {"event": "post_collection_judge_metrics", **judge_client.metrics()},
                     sort_keys=True,
                 ),
                 flush=True,
             )
-            overlap_judge_client.close()
+            judge_client.close()
+            judge_process = getattr(judge_client, "process", None)
+            if judge_process is not None and judge_process.is_alive():
+                raise RuntimeError(
+                    "Judge worker is still alive after teardown; refusing to start cache fallback"
+                )
+
+    # ------------------------------------------------------------------
+    # Phase 3: CPU metrics and native-cache finalization. Any policy rescore
+    # fallback starts only after the judge worker above has exited.
+    # ------------------------------------------------------------------
+    if has_eval and not eval_metrics_done and eval_judged_output is not None:
+        print("[merged_collect] Computing eval metrics...", flush=True)
+        write_eval_metrics(
+            judged_rollout_path=eval_judged_output,
+            metrics_path=eval_metrics_output,
+            iteration=eval_iteration if eval_iteration is not None else 0,
+            policy_checkpoint_id=checkpoint_id,
+        )
+        outputs["eval_metrics"] = Path(eval_metrics_output)
+
+    if train_cache_needed and train_judged_output is not None:
+        print("[merged_collect] Finalizing training caches...", flush=True)
+        _run_cache_inline(
+            config=config,
+            config_path=str(config_path),
+            overrides=overrides,
+            checkpoint_path=checkpoint,
+            judged_rollout_path=Path(train_judged_output),
+            cached_output_path=Path(train_cached_output) if train_cached_output else None,
+            resume=resume,
+        )
+        if train_cached_output:
+            outputs["train_cached"] = Path(train_cached_output)
 
     return outputs
 
@@ -936,12 +989,14 @@ def run_merged_collect(
 def _run_cache_inline(
     *,
     config,
+    config_path: str,
+    overrides: list[str],
     checkpoint_path: Path,
     judged_rollout_path: Path,
     cached_output_path: Path | None,
     resume: bool,
 ) -> None:
-    """Fallback: compute training caches inline (no overlap judge, or after collection)."""
+    """Finalize native caches, then lazily rescore misses in an isolated child."""
     if cached_output_path is None:
         return
 
@@ -984,7 +1039,7 @@ def _run_cache_inline(
     if not pending_rows:
         return
 
-    scorer = None
+    fallback_rows: list[dict[str, Any]] = []
     for row in pending_rows:
         cache_candidate = _materialize_rollout_native_training_caches(
             row,
@@ -993,25 +1048,40 @@ def _run_cache_inline(
         if _row_has_current_training_cache(cache_candidate):
             append_jsonl(cached_output_path, cache_candidate)
             continue
-        if scorer is None:
-            scorer = build_cache_scorer(config, checkpoint_path=str(checkpoint_path))
-        samples = extract_trainable_samples(
-            cache_candidate["trajectory_records"],
-            cache_candidate["turn_rewards"],
-            rollout_id=(
-                f"{cache_candidate.get('query_id')}:{cache_candidate.get('rollout_index')}"
+        fallback_rows.append(cache_candidate)
+
+    if not fallback_rows:
+        return
+
+    print(
+        f"[merged_collect] Launching post-judge GPU 0 cache fallback for "
+        f"{len(fallback_rows)} row(s)...",
+        flush=True,
+    )
+    cache_client = _CacheOverlapClient(
+        config_path=config_path,
+        overrides=overrides,
+        checkpoint_path=str(checkpoint_path),
+        checkpoint_id=checkpoint_id,
+        queue_max_batches=config.rollout.overlap_queue_max_batches,
+    )
+    try:
+        for rows in iter_batches(fallback_rows, config.judge.batch_size):
+            cache_client.submit(rows)
+            for cached_row in cache_client.drain_available():
+                append_jsonl(cached_output_path, cached_row)
+        for cached_row in cache_client.finish():
+            append_jsonl(cached_output_path, cached_row)
+    finally:
+        print(
+            "[merged_collect] "
+            + json.dumps(
+                {"event": "post_judge_cache_fallback_metrics", **cache_client.metrics()},
+                sort_keys=True,
             ),
+            flush=True,
         )
-        if not samples:
-            append_jsonl(cached_output_path, dict(row))
-            continue
-        cache_payloads = scorer.cache_samples(samples)
-        cached_row = _attach_training_caches(
-            cache_candidate,
-            cache_payloads=cache_payloads,
-            checkpoint_id=checkpoint_id,
-        )
-        append_jsonl(cached_output_path, cached_row)
+        cache_client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1090,7 @@ def _run_cache_inline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Single-process merged collection, judging, metrics, and cache step."
+        description="Sequential collection, teardown, judging, metrics, and cache step."
     )
     parser.add_argument("--config", required=True, help="Path to the train YAML config.")
     parser.add_argument("--checkpoint", required=True, help="Policy checkpoint path.")
@@ -1059,6 +1129,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # Convert launcher SIGTERM into a Python unwind so active policy/judge
+    # children and the collection-scoped retrieval worker run their finally
+    # teardown before this supervisor exits.
+    def handle_termination(signum, _frame) -> None:
+        raise SystemExit(128 + signum)
+
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, handle_termination)
     args = parse_args()
     config = load_train_config(args.config, parse_cli_overrides(args.overrides))
     outputs = run_merged_collect(

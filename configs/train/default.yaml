@@ -53,8 +53,8 @@ rollout:
   max_model_len: 27000
   enable_prefix_caching: true
   max_concurrent_episodes: 50
-  overlap_judge: true
-  # Bound producer lead while allowing rollout, judge, and cache work to overlap.
+  # Deprecated compatibility fields; merged_collect is strictly sequential.
+  overlap_judge: false
   overlap_queue_max_batches: 8
   max_new_tokens: 8192
   temperature: 0.7
@@ -95,15 +95,15 @@ judge:
   enabled: true
   backend: vllm_offline
   model_path: /124090467/Qwen/Qwen3.5-35B-A3B
-  gpu_ids: [1]
-  tensor_parallel_size: 1
+  gpu_ids: [0, 1, 2, 3]
+  tensor_parallel_size: 4
   attention_backend:
   max_model_len: 12000
   max_new_tokens: 8192
   temperature: 0.0
   top_p: 1.0
   do_sample: false
-  # Dynamically coalesce streamed completions for efficient judge inference.
+  # Batch completed eval and training answers after policy/retrieval teardown.
   batch_size: 32
   batch_wait_ms: 25
   # Maximum seconds a single judge micro-batch may take before the worker

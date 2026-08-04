@@ -103,6 +103,8 @@ def _stop_retrieval_worker(process: subprocess.Popen | None, url: str | None) ->
             process.wait(timeout=15)
     if process.poll() is None:
         process.kill()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=15)
 
 
 def _train_dir(config) -> Path:
@@ -753,7 +755,10 @@ def run_training_iteration(
     if training_already_advanced:
         return current.path
 
-    use_overlap_judge = config.rollout.overlap_judge and config.judge.enabled
+    # The primary merged path always judges after collection teardown.  The
+    # legacy overlap_judge setting remains parseable but no longer controls the
+    # lifecycle.
+    use_merged_judge = config.judge.enabled
 
     # ------------------------------------------------------------------
     # Merged collect command (replaces eval_rollout, train_rollout,
@@ -774,7 +779,7 @@ def run_training_iteration(
         "--sample-seed",
         str(config.experiment.seed + iteration),
     ]
-    if use_overlap_judge:
+    if use_merged_judge:
         merged_collect_command.extend(["--train-judged-output", str(judged_rollout_path)])
     if config.dataset.eval_limit > 0:
         merged_collect_command.extend(
@@ -787,7 +792,7 @@ def run_training_iteration(
                 str(eval_iteration),
             ]
         )
-        if use_overlap_judge:
+        if use_merged_judge:
             merged_collect_command.extend(
                 ["--eval-judged-output", str(eval_judged_rollout_path)]
             )
@@ -813,7 +818,7 @@ def run_training_iteration(
         )
     )
     train_judged_complete = (
-        not use_overlap_judge
+        not use_merged_judge
         or should_resume
         and _has_complete_judged_rollouts(
             judged_rollout_path,
@@ -824,7 +829,7 @@ def run_training_iteration(
     )
     eval_judged_complete = (
         config.dataset.eval_limit <= 0
-        or not use_overlap_judge
+        or not use_merged_judge
         or (
             should_resume
             and _has_complete_judged_rollouts(
@@ -841,9 +846,9 @@ def run_training_iteration(
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_train_count,
     )
-    # When overlap judging wrote inline caches directly on the judged
-    # output, we don't need a separate cached file.
-    if not train_cached_complete and use_overlap_judge:
+    # Rollout-native caches survive the sequential judge transform, so a
+    # complete judged artifact can still serve as the cached training input.
+    if not train_cached_complete and use_merged_judge:
         train_cached_complete = _has_inline_cached_rollouts(
             judged_rollout_path,
             checkpoint_id=current.checkpoint_id,
@@ -867,41 +872,24 @@ def run_training_iteration(
         and eval_metrics_complete
     )
 
-    retrieval_worker_process = None
-    retrieval_worker_url = None
-    if config.retrieval.persistent_worker and not merged_collect_done:
-        retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
-            config_path=config_path,
-            train_dir=train_dir,
-            python_executable=python_executable,
-            overrides=overrides,
-            startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
-        )
-
-    if retrieval_worker_url:
-        merged_collect_command.extend(["--retrieval-worker-url", retrieval_worker_url])
-    try:
-        _run_or_skip_phase(
-            phase="merged_collect",
-            iteration=iteration,
-            command=merged_collect_command,
-            command_runner=command_runner,
-            timings_path=phase_timings_path,
-            completed=merged_collect_done,
-            error_message="Merged collect subprocess",
-            timeout_seconds=phase_timeout,
-        )
-    finally:
-        _stop_retrieval_worker(retrieval_worker_process, retrieval_worker_url)
-        retrieval_worker_process = None
-        retrieval_worker_url = None
+    # merged_collect owns retrieval only while policy collection is active and
+    # tears it down before allocating the judge on all four GPUs.
+    _run_or_skip_phase(
+        phase="merged_collect",
+        iteration=iteration,
+        command=merged_collect_command,
+        command_runner=command_runner,
+        timings_path=phase_timings_path,
+        completed=merged_collect_done,
+        error_message="Merged collect subprocess",
+        timeout_seconds=phase_timeout,
+    )
 
     # ------------------------------------------------------------------
-    # Non-overlap fallback: when overlap judging is off, the merged step
-    # only produces raw outputs.  Run separate judge, metrics, and cache
-    # phases to match the old behaviour.
+    # Diagnostic fallback retained only for configurations with judging
+    # disabled in the merged phase.
     # ------------------------------------------------------------------
-    if not use_overlap_judge:
+    if not use_merged_judge:
         if config.dataset.eval_limit > 0:
             eval_judge_command = [
                 python_executable,

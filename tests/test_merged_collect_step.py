@@ -118,27 +118,138 @@ class RecordingResumeJudgeClient:
         ]
 
 
-class RecordingFallbackCacheClient:
-    def __init__(self) -> None:
-        self.submitted_rows: list[dict] = []
-        self.rollout_native_row_count = 0
-
-    def submit(self, rows) -> None:
-        self.submitted_rows.extend(rows)
-
-    def record_rollout_native_rows(self, count: int) -> None:
-        self.rollout_native_row_count += count
-
-    def drain_available(self):
-        return []
-
-    def finish(self):
-        return []
-
-
-def test_collect_split_resume_judges_existing_raw_rows_without_regeneration(
+def test_collect_split_resume_does_not_judge_existing_raw_rows(
     tmp_path: Path,
     monkeypatch,
+) -> None:
+    raw_path = tmp_path / "train.raw.jsonl"
+    raw_row = {
+        "policy_checkpoint_id": "iteration-00000",
+        "query_id": "q1",
+        "rollout_index": 0,
+        "trajectory_records": [],
+        "turn_records": [],
+        "summary_turns": [],
+        "status": "completed",
+        "final_answer": "answer",
+    }
+    raw_path.write_text(json.dumps(raw_row) + "\n", encoding="utf-8")
+    config = SimpleNamespace(
+        experiment=SimpleNamespace(seed=1),
+        collection=SimpleNamespace(train_task_count=None, eval_task_count=None),
+        training=SimpleNamespace(rollout_query_count=None),
+        rollout=SimpleNamespace(max_concurrent_episodes=2),
+        runtime=object(),
+    )
+
+    class NoGenerationRuntime:
+        def run_many_stream(self, episodes, *, max_active_episodes):
+            assert list(episodes) == []
+            assert max_active_episodes == 2
+            return iter(())
+
+    monkeypatch.setattr(
+        merged_collect_step,
+        "build_runtime",
+        lambda *_args, **_kwargs: NoGenerationRuntime(),
+    )
+    merged_collect_step._collect_split(
+        config=config,
+        checkpoint_id="iteration-00000",
+        checkpoint_path=tmp_path / "checkpoint",
+        generator=object(),
+        backend=object(),
+        split="train",
+        examples=[QueryExample(query_id="q1", query="question", answer="answer")],
+        raw_output_path=raw_path,
+        sampling_profile={"extra_sampling_params": {}},
+        profile_id="profile",
+        group_size=1,
+        sample_seed=1,
+        resume=True,
+    )
+
+    assert [json.loads(line) for line in raw_path.read_text(encoding="utf-8").splitlines()] == [raw_row]
+
+
+def test_train_collection_persists_native_cache_before_policy_process_exit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    raw_path = tmp_path / "train.raw.jsonl"
+    config = SimpleNamespace(
+        experiment=SimpleNamespace(seed=1),
+        collection=SimpleNamespace(train_task_count=None, eval_task_count=None),
+        training=SimpleNamespace(rollout_query_count=None),
+        rollout=SimpleNamespace(max_concurrent_episodes=2),
+        runtime=object(),
+    )
+
+    class OneResultRuntime:
+        def run_many_stream(self, episodes, *, max_active_episodes):
+            assert list(episodes) == [("q1", "question")]
+            assert max_active_episodes == 2
+            yield [(0, object())]
+
+    monkeypatch.setattr(
+        merged_collect_step,
+        "build_runtime",
+        lambda *_args, **_kwargs: OneResultRuntime(),
+    )
+    monkeypatch.setattr(
+        merged_collect_step,
+        "serialize_runtime_result",
+        lambda *_args, **_kwargs: {
+            "query_id": "q1",
+            "trajectory_records": [{"turn_id": "interval-0"}],
+            "turn_records": [],
+            "summary_turns": [],
+            "status": "completed",
+            "final_answer": "answer",
+        },
+    )
+
+    def materialize(row, *, checkpoint_id):
+        enriched = dict(row)
+        enriched["trajectory_records"] = [
+            {
+                **row["trajectory_records"][0],
+                "training_cache": {"policy_checkpoint_id": checkpoint_id},
+            }
+        ]
+        return enriched
+
+    monkeypatch.setattr(
+        merged_collect_step,
+        "_materialize_rollout_native_training_caches",
+        materialize,
+    )
+
+    merged_collect_step._collect_split(
+        config=config,
+        checkpoint_id="iteration-00000",
+        checkpoint_path=tmp_path / "checkpoint",
+        generator=object(),
+        backend=object(),
+        split="train",
+        examples=[QueryExample(query_id="q1", query="question", answer="answer")],
+        raw_output_path=raw_path,
+        sampling_profile={"extra_sampling_params": {}},
+        profile_id="profile",
+        group_size=1,
+        sample_seed=1,
+        resume=False,
+    )
+
+    raw_row = json.loads(raw_path.read_text(encoding="utf-8"))
+    assert raw_row["trajectory_records"][0]["training_cache"]["policy_checkpoint_id"] == (
+        "iteration-00000"
+    )
+    assert "turn_rewards" not in raw_row
+
+
+def test_judge_split_resumes_unjudged_raw_rows_without_policy_generation(
+    tmp_path: Path,
 ) -> None:
     raw_path = tmp_path / "train.raw.jsonl"
     judged_path = tmp_path / "train.judged.jsonl"
@@ -157,39 +268,21 @@ def test_collect_split_resume_judges_existing_raw_rows_without_regeneration(
         experiment=SimpleNamespace(seed=1),
         collection=SimpleNamespace(train_task_count=None, eval_task_count=None),
         training=SimpleNamespace(rollout_query_count=None),
-        rollout=SimpleNamespace(max_concurrent_episodes=2),
         judge=SimpleNamespace(batch_size=4),
-        runtime=object(),
-    )
-
-    class NoGenerationRuntime:
-        def run_many_stream(self, episodes, *, max_active_episodes):
-            assert list(episodes) == []
-            assert max_active_episodes == 2
-            return iter(())
-
-    monkeypatch.setattr(
-        merged_collect_step,
-        "build_runtime",
-        lambda *_args, **_kwargs: NoGenerationRuntime(),
     )
     judge_client = RecordingResumeJudgeClient()
 
-    merged_collect_step._collect_split(
+    merged_collect_step._judge_split(
         config=config,
         checkpoint_id="iteration-00000",
-        checkpoint_path=tmp_path / "checkpoint",
-        generator=object(),
-        backend=object(),
-        overlap_judge_client=judge_client,
+        judge_client=judge_client,
         split="train",
         examples=[QueryExample(query_id="q1", query="question", answer="answer")],
         raw_output_path=raw_path,
         judged_output_path=judged_path,
-        sampling_profile={"extra_sampling_params": {}},
-        profile_id="profile",
         group_size=1,
         sample_seed=1,
+        profile_id="profile",
         resume=True,
     )
 
@@ -199,74 +292,106 @@ def test_collect_split_resume_judges_existing_raw_rows_without_regeneration(
     assert judged_rows[0]["judge"]["outcome"] == "correct_answer"
 
 
-def test_collect_split_resume_persists_inline_cache_without_starting_fallback(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    raw_path = tmp_path / "train.raw.jsonl"
-    judged_path = tmp_path / "train.judged.jsonl"
-    cached_path = tmp_path / "train.cached.jsonl"
-    raw_row = {
-        "policy_checkpoint_id": "iteration-00000",
-        "query_id": "q1",
-        "rollout_index": 0,
-        "trajectory_records": [],
-        "turn_records": [],
-        "summary_turns": [],
-        "status": "completed",
-        "final_answer": "answer",
-    }
-    judged_row = {
-        **raw_row,
-        "turn_rewards": {},
-        "trainable_sample_count": 0,
-        "judge": {"outcome": "correct_answer"},
-    }
-    raw_path.write_text(json.dumps(raw_row) + "\n", encoding="utf-8")
-    judged_path.write_text(json.dumps(judged_row) + "\n", encoding="utf-8")
+def test_merged_collect_stops_retrieval_before_starting_judge(tmp_path: Path, monkeypatch) -> None:
+    events: list[str] = []
+    collection_complete = False
+
+    class RetrievalProcess:
+        stopped = False
+
+        def poll(self):
+            return 0 if self.stopped else None
+
+    retrieval_process = RetrievalProcess()
+
+    class JudgeClient:
+        def metrics(self):
+            return {}
+
+        def close(self):
+            events.append("judge_stop")
+
     config = SimpleNamespace(
-        experiment=SimpleNamespace(seed=1),
+        experiment=SimpleNamespace(seed=1, bc_plus_root=tmp_path),
+        dataset=SimpleNamespace(train_limit=1, eval_limit=1),
         collection=SimpleNamespace(train_task_count=None, eval_task_count=None),
-        training=SimpleNamespace(rollout_query_count=None),
-        rollout=SimpleNamespace(max_concurrent_episodes=2),
-        judge=SimpleNamespace(batch_size=4),
-        runtime=object(),
+        training=SimpleNamespace(rollout_query_count=None, group_size=1),
+        evaluation=SimpleNamespace(samples_per_task=1),
+        retrieval=SimpleNamespace(persistent_worker=True, worker_startup_timeout_seconds=10),
+        rollout=SimpleNamespace(overlap_queue_max_batches=2),
+        judge=SimpleNamespace(enabled=True, batch_size=2),
     )
-
-    class NoGenerationRuntime:
-        def run_many_stream(self, episodes, *, max_active_episodes):
-            assert list(episodes) == []
-            assert max_active_episodes == 2
-            return iter(())
-
+    examples = [QueryExample(query_id="q1", query="question", answer="answer")]
+    monkeypatch.setattr(merged_collect_step, "load_query_examples", lambda *_a, **_k: examples)
+    monkeypatch.setattr(merged_collect_step, "split_train_eval_examples", lambda *_a, **_k: (examples, examples))
+    monkeypatch.setattr(merged_collect_step, "_expected_eval_rollout_count", lambda _c: 1)
+    monkeypatch.setattr(merged_collect_step, "_expected_train_rollout_count", lambda _c: 1)
     monkeypatch.setattr(
         merged_collect_step,
-        "build_runtime",
-        lambda *_args, **_kwargs: NoGenerationRuntime(),
+        "_has_complete_raw_rollouts",
+        lambda *_a, **_k: collection_complete,
     )
-    cache_client = RecordingFallbackCacheClient()
-
-    merged_collect_step._collect_split(
-        config=config,
-        checkpoint_id="iteration-00000",
-        checkpoint_path=tmp_path / "checkpoint",
-        generator=object(),
-        backend=object(),
-        overlap_judge_client=RecordingResumeJudgeClient(),
-        split="train",
-        examples=[QueryExample(query_id="q1", query="question", answer="answer")],
-        raw_output_path=raw_path,
-        judged_output_path=judged_path,
-        sampling_profile={"extra_sampling_params": {}},
-        profile_id="profile",
-        group_size=1,
-        sample_seed=1,
-        resume=True,
-        cache_overlap_client=cache_client,
-        cached_output_path=cached_path,
+    monkeypatch.setattr(
+        merged_collect_step,
+        "_start_retrieval_worker",
+        lambda **_k: (events.append("retrieval_start") or retrieval_process, "http://worker"),
     )
 
-    assert cache_client.submitted_rows == []
-    assert cache_client.rollout_native_row_count == 1
-    cached_rows = [json.loads(line) for line in cached_path.read_text(encoding="utf-8").splitlines()]
-    assert cached_rows == [judged_row]
+    def stop_retrieval(process, _url):
+        events.append("retrieval_stop")
+        process.stopped = True
+
+    monkeypatch.setattr(merged_collect_step, "_stop_retrieval_worker", stop_retrieval)
+
+    def collect_process(**kwargs):
+        nonlocal collection_complete
+        events.append(f"collect_{kwargs['split']}")
+        if kwargs["split"] == "train":
+            collection_complete = True
+
+    monkeypatch.setattr(merged_collect_step, "_run_split_collection_process", collect_process)
+
+    def build_judge(**_kwargs):
+        assert retrieval_process.stopped
+        events.append("judge_start")
+        return JudgeClient()
+
+    monkeypatch.setattr(merged_collect_step, "_build_overlap_judge_client", build_judge)
+    monkeypatch.setattr(
+        merged_collect_step,
+        "_judge_split",
+        lambda **kwargs: events.append(f"judge_{kwargs['split']}"),
+    )
+    monkeypatch.setattr(merged_collect_step, "write_eval_metrics", lambda **_k: events.append("metrics"))
+    monkeypatch.setattr(merged_collect_step, "_run_cache_inline", lambda **_k: events.append("cache"))
+    monkeypatch.setattr(
+        merged_collect_step,
+        "resolved_rollout_sampling_profile",
+        lambda _c, *, split: {"split": split},
+    )
+    monkeypatch.setattr(merged_collect_step, "sampling_profile_id", lambda profile: profile["split"])
+
+    merged_collect_step.run_merged_collect(
+        config,
+        config_path=tmp_path / "config.yaml",
+        checkpoint_path=tmp_path / "iteration-00000",
+        train_raw_output=tmp_path / "train.raw.jsonl",
+        train_judged_output=tmp_path / "train.judged.jsonl",
+        train_cached_output=tmp_path / "train.cached.jsonl",
+        eval_raw_output=tmp_path / "eval.raw.jsonl",
+        eval_judged_output=tmp_path / "eval.judged.jsonl",
+        eval_metrics_output=tmp_path / "eval.metrics.jsonl",
+    )
+
+    assert events == [
+        "retrieval_start",
+        "collect_eval",
+        "collect_train",
+        "retrieval_stop",
+        "judge_start",
+        "judge_eval",
+        "judge_train",
+        "judge_stop",
+        "metrics",
+        "cache",
+    ]

@@ -92,6 +92,8 @@ class RolloutConfig:
     max_model_len: int | None = None
     enable_prefix_caching: bool = True
     max_concurrent_episodes: int = 32
+    # Compatibility switch for standalone rollout_collection. The primary
+    # merged collection path is always sequential and ignores this value.
     overlap_judge: bool = True
     overlap_queue_max_batches: int = 8
     max_new_tokens: int | None = None

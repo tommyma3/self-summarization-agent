@@ -192,11 +192,11 @@ def train_config(tmp_path: Path) -> TrainConfig:
 
 
 # ---------------------------------------------------------------------------
-# Merged-collect tests (overlap judging ON by default)
+# Sequential merged-collect tests
 # ---------------------------------------------------------------------------
 
 def test_iteration_launcher_runs_merged_collect_then_train_and_advances_latest(tmp_path: Path) -> None:
-    """With overlap judging on, the pipeline is: merged_collect → train_update (2 phases)."""
+    """The pipeline remains two outer phases: merged_collect → train_update."""
     config = train_config(tmp_path)
     latest_root = tmp_path / "artifacts" / "train" / "demo"
     initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
@@ -241,8 +241,8 @@ def test_iteration_launcher_runs_merged_collect_then_train_and_advances_latest(t
     assert all(row["elapsed_seconds"] >= 0 for row in timing_rows)
 
 
-def test_iteration_launcher_merged_collect_handles_all_outputs_when_overlap_on(tmp_path: Path) -> None:
-    """When overlap judging is on, merged_collect produces raw, judged, and cached outputs."""
+def test_iteration_launcher_merged_collect_handles_all_sequential_outputs(tmp_path: Path) -> None:
+    """Merged collection produces raw, judged, and cached outputs sequentially."""
     config = train_config(tmp_path)
     latest_root = tmp_path / "artifacts" / "train" / "demo"
     initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
@@ -421,7 +421,7 @@ def test_checkpoint_evaluation_runs_final_eval_without_training(tmp_path: Path) 
 # Retrieval worker tests
 # ---------------------------------------------------------------------------
 
-def test_iteration_launcher_scopes_retrieval_workers_to_merged_collect_phase(
+def test_iteration_launcher_delegates_retrieval_ownership_to_merged_collect(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -435,36 +435,21 @@ def test_iteration_launcher_scopes_retrieval_workers_to_merged_collect_phase(
     initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
     write_fake_checkpoint(initial_checkpoint)
     write_latest_checkpoint(latest_root, initial_checkpoint)
-    events = []
-
-    class FakeWorkerProcess:
-        def __init__(self, worker_id):
-            self.worker_id = worker_id
-
-    def fake_start_worker(**kwargs):
-        worker_id = len(events) + 1
-        events.append(f"start:{worker_id}")
-        return FakeWorkerProcess(worker_id), f"http://127.0.0.1:{12344 + worker_id}"
-
-    def fake_stop_worker(process, url):
-        if process is None:
-            return
-        events.append(f"stop:{process.worker_id}")
+    worker_calls = []
 
     monkeypatch.setattr(
         "self_summarization_agent.iteration_launcher._start_retrieval_worker",
-        fake_start_worker,
+        lambda **kwargs: worker_calls.append(("start", kwargs)),
     )
     monkeypatch.setattr(
         "self_summarization_agent.iteration_launcher._stop_retrieval_worker",
-        fake_stop_worker,
+        lambda *args: worker_calls.append(("stop", args)),
     )
 
-    call_events = []
+    calls = []
 
     def runner(command):
-        call_events.append(f"run:{command[command.index('-m') + 1]}")
-        events.append(f"run:{command[command.index('-m') + 1]}")
+        calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
             next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
             write_fake_checkpoint(next_checkpoint)
@@ -479,13 +464,13 @@ def test_iteration_launcher_scopes_retrieval_workers_to_merged_collect_phase(
         python_executable="python",
     )
 
-    # Single retrieval worker start/stop around the merged_collect phase
-    merged_commands = [e for e in call_events if "merged_collect_step" in e]
+    merged_commands = [command for command in calls if "merged_collect_step" in command]
     assert len(merged_commands) == 1
-    assert events.index("stop:1") < events.index("run:self_summarization_agent.train_step")
+    assert "--retrieval-worker-url" not in merged_commands[0]
+    assert worker_calls == []
 
 
-def test_iteration_launcher_stops_retrieval_worker_when_merged_collect_fails(
+def test_iteration_launcher_does_not_own_retrieval_when_merged_collect_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -495,21 +480,16 @@ def test_iteration_launcher_stops_retrieval_worker_when_merged_collect_fails(
     initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
     write_fake_checkpoint(initial_checkpoint)
     write_latest_checkpoint(latest_root, initial_checkpoint)
-    worker_process = object()
-    worker_stops = []
+    worker_calls = []
 
     monkeypatch.setattr(
         "self_summarization_agent.iteration_launcher._start_retrieval_worker",
-        lambda **kwargs: (worker_process, "http://127.0.0.1:12345"),
+        lambda **kwargs: worker_calls.append(("start", kwargs)),
     )
-
-    def fake_stop_worker(process, url):
-        if process is not None:
-            worker_stops.append((process, url))
 
     monkeypatch.setattr(
         "self_summarization_agent.iteration_launcher._stop_retrieval_worker",
-        fake_stop_worker,
+        lambda *args: worker_calls.append(("stop", args)),
     )
 
     try:
@@ -526,7 +506,7 @@ def test_iteration_launcher_stops_retrieval_worker_when_merged_collect_fails(
     else:
         raise AssertionError("Expected merged collect failure")
 
-    assert worker_stops == [(worker_process, "http://127.0.0.1:12345")]
+    assert worker_calls == []
 
 
 def test_iteration_launcher_does_not_advance_latest_when_training_fails(tmp_path: Path) -> None:
@@ -559,7 +539,7 @@ def test_iteration_launcher_does_not_advance_latest_when_training_fails(tmp_path
 
 
 # ---------------------------------------------------------------------------
-# Resume tests — overlap judging ON
+# Resume tests for sequential merged collection
 # ---------------------------------------------------------------------------
 
 def test_iteration_launcher_resume_after_train_collection_runs_cache_then_training(tmp_path: Path) -> None:

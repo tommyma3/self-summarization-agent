@@ -426,6 +426,9 @@ class _SubprocessOverlapJudgeClient:
         if self.process.is_alive():
             self.process.terminate()
             self.process.join(timeout=30)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join(timeout=10)
 
 
 def _build_overlap_judge_client(
