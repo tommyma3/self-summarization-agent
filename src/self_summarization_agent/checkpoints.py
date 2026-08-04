@@ -48,32 +48,6 @@ def is_vllm_loadable_checkpoint(path: str | Path) -> bool:
     return has_config and (has_model_weights or has_sharded_index)
 
 
-def move_incomplete_checkpoint_aside(path: str | Path) -> None:
-    checkpoint_path = Path(path)
-    if not checkpoint_path.exists():
-        return
-    suffix = 1
-    while True:
-        stale = checkpoint_path.with_name(f"{checkpoint_path.name}.stale-{suffix:03d}")
-        if not stale.exists():
-            checkpoint_path.rename(stale)
-            return
-        suffix += 1
-
-
-def publish_checkpoint(partial_checkpoint: str | Path, output_checkpoint: str | Path) -> Path:
-    partial = Path(partial_checkpoint)
-    output = Path(output_checkpoint)
-    if not is_vllm_loadable_checkpoint(partial):
-        raise ValueError(f"Training produced an incomplete checkpoint: {partial}")
-    if output.exists():
-        if is_vllm_loadable_checkpoint(output):
-            raise FileExistsError(f"Refusing to replace complete checkpoint: {output}")
-        move_incomplete_checkpoint_aside(output)
-    os.replace(partial, output)
-    return output
-
-
 def write_latest_checkpoint(root: str | Path, checkpoint_path: str | Path) -> Path:
     root_path = Path(root)
     root_path.mkdir(parents=True, exist_ok=True)

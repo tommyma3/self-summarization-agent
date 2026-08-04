@@ -54,6 +54,7 @@ rollout:
   enable_prefix_caching: true
   # Limit 49k-token KV-cache residency on the two rollout GPUs.
   max_concurrent_episodes: 8
+  overlap_judge: true
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
@@ -90,8 +91,8 @@ judge:
   gpu_ids: [1]
   tensor_parallel_size: 1
   attention_backend:
-  max_model_len: 8192
-  max_new_tokens: 4096
+  max_model_len: 18000
+  max_new_tokens: 12000
   temperature: 0.0
   top_p: 1.0
   do_sample: false

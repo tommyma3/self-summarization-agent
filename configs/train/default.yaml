@@ -15,16 +15,6 @@ dataset:
 collection:
   train_task_count: 50
   eval_task_count: 50
-  # Reference-logprob scoring streams judged training rows on this device while
-  # rollout generation continues on rollout.gpu_ids.
-  cache_gpu_ids: [0]
-  worker_queue_size: 8
-  worker_stall_timeout_seconds: 1800
-  # Judge submission batch size. Kept small (≤ the judge engine's
-  # effective concurrency) so that each submission completes promptly
-  # and the overlapping drain loop sees regular progress, even when the
-  # judge model generates long thinking blocks with a large max_new_tokens.
-  judge_batch_size: 10
 
 retrieval:
   backend: faiss
@@ -63,6 +53,7 @@ rollout:
   max_model_len: 27000
   enable_prefix_caching: true
   max_concurrent_episodes: 50
+  overlap_judge: true
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
@@ -109,8 +100,8 @@ judge:
   gpu_ids: [1]
   tensor_parallel_size: 1
   attention_backend:
-  max_model_len: 12000
-  max_new_tokens: 8192
+  max_model_len: 18000
+  max_new_tokens: 12000
   temperature: 0.0
   top_p: 1.0
   do_sample: false
