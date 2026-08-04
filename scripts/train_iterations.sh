@@ -15,7 +15,6 @@ Required arguments:
 
 Options:
   --config PATH        Training config (default: configs/train/default.yaml).
-  --python PATH        Python executable (default: $PYTHON_BIN or python).
   --set KEY=VALUE      Config override forwarded to every iteration; repeatable.
   -h, --help           Show this help message.
 
@@ -31,7 +30,6 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 TARGET_ITERATIONS=""
 LATEST_ROOT=""
 CONFIG_PATH="${REPO_ROOT}/configs/train/default.yaml"
-PYTHON_EXECUTABLE="uv run"
 CONFIG_OVERRIDES=()
 
 while (($#)); do
@@ -49,11 +47,6 @@ while (($#)); do
         --config)
             [[ $# -ge 2 ]] || { echo "error: --config requires a value" >&2; exit 2; }
             CONFIG_PATH="$2"
-            shift 2
-            ;;
-        --python)
-            [[ $# -ge 2 ]] || { echo "error: --python requires a value" >&2; exit 2; }
-            PYTHON_EXECUTABLE="$2"
             shift 2
             ;;
         --set)
@@ -85,8 +78,8 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
     echo "error: training config does not exist: ${CONFIG_PATH}" >&2
     exit 2
 fi
-if ! command -v "${PYTHON_EXECUTABLE}" >/dev/null 2>&1; then
-    echo "error: Python executable was not found: ${PYTHON_EXECUTABLE}" >&2
+if ! command -v uv >/dev/null 2>&1; then
+    echo "error: uv is required to run this script" >&2
     exit 2
 fi
 
@@ -105,20 +98,7 @@ echo "Latest root: ${LATEST_ROOT}"
 echo "Target iteration: ${TARGET_ITERATIONS}"
 echo "Log file: ${LOG_FILE}"
 
-LATEST_POINTER="${LATEST_ROOT}/latest"
-if [[ ! -f "${LATEST_POINTER}" ]]; then
-    echo "error: missing latest checkpoint pointer: ${LATEST_POINTER}" >&2
-    exit 1
-fi
-
-LATEST_CHECKPOINT="$(<"${LATEST_POINTER}")"
-LATEST_CHECKPOINT="${LATEST_CHECKPOINT%$'\r'}"
-CURRENT_CHECKPOINT_NAME="$(basename -- "${LATEST_CHECKPOINT}")"
-if [[ ! "${CURRENT_CHECKPOINT_NAME}" =~ ^iteration-([0-9]+)$ ]]; then
-    echo "error: latest must point to an iteration-N checkpoint; got: ${LATEST_CHECKPOINT}" >&2
-    exit 1
-fi
-CURRENT_ITERATION=$((10#${BASH_REMATCH[1]}))
+CURRENT_ITERATION=0
 
 if ((CURRENT_ITERATION >= TARGET_ITERATIONS)); then
     echo "Target already reached: current iteration ${CURRENT_ITERATION}."
@@ -131,7 +111,7 @@ cd -- "${REPO_ROOT}"
 for ((iteration = CURRENT_ITERATION + 1; iteration <= TARGET_ITERATIONS; iteration++)); do
     echo
     echo "=== Starting training iteration ${iteration}/${TARGET_ITERATIONS} ==="
-    "${PYTHON_EXECUTABLE}" -m self_summarization_agent.iteration_launcher \
+    uv run -m self_summarization_agent.iteration_launcher \
         --config "${CONFIG_PATH}" \
         --iteration "${iteration}" \
         --latest-root "${LATEST_ROOT}" \
