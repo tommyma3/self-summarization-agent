@@ -31,7 +31,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 TARGET_ITERATIONS=""
 LATEST_ROOT=""
 CONFIG_PATH="${REPO_ROOT}/configs/train/default.yaml"
-PYTHON_EXECUTABLE="${PYTHON_BIN:-python}"
+PYTHON_EXECUTABLE="uv run"
 CONFIG_OVERRIDES=()
 
 while (($#)); do
