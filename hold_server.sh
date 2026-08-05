@@ -9,7 +9,7 @@ while true; do
     else
         echo "[$(date)] GPU free. Running probe..."
         uv run scripts/probe_vllm_collection.py --sample-index 1
-        echo "[$(date)] Probe complete. Sleeping 30 minutes..."
+        echo "[$(date)] Probe complete. Sleeping 60 minutes..."
     fi
-    sleep 1800
+    sleep 3600
 done

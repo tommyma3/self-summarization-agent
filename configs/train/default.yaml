@@ -141,6 +141,7 @@ training:
         VIRTUAL_ENV: "/124090467/self-summarization-agent/.venv"
         PATH: "/root/.local/bin:/124090467/self-summarization-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+        PYTORCH_ALLOC_CONF: "expandable_segments:True"
       excludes:
         - "pyproject.toml"
         - ".python-version"
@@ -149,15 +150,15 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 24000
+      ppo_max_token_len_per_gpu: 8192
       log_prob_micro_batch_size_per_gpu: 1
-      log_prob_max_token_len_per_gpu:
+      log_prob_max_token_len_per_gpu: 8192
       use_dynamic_bsz: true
       use_remove_padding: true
       use_torch_compile: true
-      ulysses_sequence_parallel_size: 1
-      param_offload: false
-      optimizer_offload: false
+      ulysses_sequence_parallel_size: 4
+      param_offload: true
+      optimizer_offload: true
       fsdp_size: -1
       save_hf_model: true
     ignore_reinit_error: true
