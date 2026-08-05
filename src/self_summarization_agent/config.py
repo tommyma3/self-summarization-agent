@@ -178,6 +178,7 @@ class VerlFSDPConfig:
     use_remove_padding: bool = True
     use_torch_compile: bool = True
     ulysses_sequence_parallel_size: int = 1
+    forward_prefetch: bool = False
     param_offload: bool = False
     optimizer_offload: bool = False
     fsdp_size: int = -1

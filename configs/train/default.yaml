@@ -150,13 +150,14 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 8192
+      ppo_max_token_len_per_gpu: 12288
       log_prob_micro_batch_size_per_gpu: 1
-      log_prob_max_token_len_per_gpu: 8192
+      log_prob_max_token_len_per_gpu: 12288
       use_dynamic_bsz: true
       use_remove_padding: true
       use_torch_compile: true
       ulysses_sequence_parallel_size: 4
+      forward_prefetch: true
       param_offload: true
       optimizer_offload: true
       fsdp_size: -1

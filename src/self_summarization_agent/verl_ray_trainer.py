@@ -417,6 +417,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
                 "fsdp_size": fsdp_config.fsdp_size,
                 "use_torch_compile": False,  # disabled: hangs with FSDP + Qwen3.5-9B
                 "ulysses_sequence_parallel_size": fsdp_config.ulysses_sequence_parallel_size,
+                "forward_prefetch": fsdp_config.forward_prefetch,
             },
             "checkpoint": {
                 "_target_": "verl.trainer.config.CheckpointConfig",
