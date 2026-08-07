@@ -89,7 +89,7 @@ runtime:
   generated_token_budget: 36000
   # Per-phase subprocess timeout (seconds). If a rollout/judge/train subprocess
   # does not exit within this limit it is terminated. None = no timeout.
-  phase_timeout_seconds: 3600
+  phase_timeout_seconds: 9000
 
 judge:
   enabled: true

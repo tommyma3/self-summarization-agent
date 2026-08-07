@@ -98,7 +98,7 @@ def run_train_step(
     rows = _load_rollout_rows(rollout_path)
     samples = samples_from_rollout_rows(rows, expected_checkpoint_id=checkpoint_id)
     grouped_samples = group_samples_by_query(samples)
-    print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.")
+    print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.", flush=True)
 
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
@@ -196,6 +196,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    # Register SIGTERM handler so Python dumps all-thread stack traces
+    # to stderr when the launcher kills a timed-out child. Combined with
+    # the 30s SIGTERM grace in _run_timed_phase, this pinpoints the hang
+    # site in the tee'd log instead of leaving a silent timeout.
+    import faulthandler
+    import signal
+    faulthandler.register(signal.SIGTERM, all_threads=True)
+
     args = parse_args()
     config = load_train_config(args.config, parse_cli_overrides(args.overrides))
 

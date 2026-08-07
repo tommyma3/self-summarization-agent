@@ -628,6 +628,22 @@ class VerlRayPolicyTrainer:
             batch.meta_info["epochs"] = self.training_config.update_epochs
             batch.meta_info["seed"] = 42
             self._last_batch_meta = dict(batch.meta_info)
+            expected_steps = int(
+                self.training_config.update_epochs
+                * max(1, (max_contributing + global_mini_batch - 1) // global_mini_batch)
+                if global_mini_batch
+                else self.training_config.update_epochs
+            )
+            print(
+                f"[train_step] FSDP update: contributing={max_contributing} "
+                f"(of {len(policy_batch.contributing)} eligible), "
+                f"mini_batch={global_mini_batch or max_contributing}, "
+                f"steps_per_epoch={max(1, (max_contributing + (global_mini_batch or max_contributing) - 1) // (global_mini_batch or max_contributing))}, "
+                f"epochs={self.training_config.update_epochs} "
+                f"-> {expected_steps} optimizer steps, "
+                f"train_tokens={self._last_batch_meta.get('train_tokens', '?')}",
+                flush=True,
+            )
             started = time.monotonic()
             assert self._worker_group is not None
             worker_metrics = self._worker_group.update_actor(batch)
