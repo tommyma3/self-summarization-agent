@@ -18,6 +18,7 @@ src/self_summarization_agent/judge.py
 src/self_summarization_agent/judge_step.py
 src/self_summarization_agent/judge_worker.py
 src/self_summarization_agent/launcher_utils.py
+src/self_summarization_agent/merged_collect_step.py
 src/self_summarization_agent/models.py
 src/self_summarization_agent/prompts.py
 src/self_summarization_agent/retrieval_worker.py
@@ -50,7 +51,9 @@ tests/test_generation.py
 tests/test_generation_transformers.py
 tests/test_iteration_launcher.py
 tests/test_judge_step.py
+tests/test_judge_worker.py
 tests/test_launchers.py
+tests/test_merged_collect_step.py
 tests/test_probe_compaction_comparison.py
 tests/test_prompts.py
 tests/test_rewards.py
