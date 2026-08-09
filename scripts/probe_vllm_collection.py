@@ -178,6 +178,7 @@ def build_rollout_model_config(config: Any, args: argparse.Namespace):
     return replace(
         config.model,
         backend="vllm",
+        language_model_only=True,
         tensor_parallel_size=args.tensor_parallel_size,
         attention_backend=args.attention_backend,
         max_new_tokens=args.max_new_tokens
@@ -214,9 +215,11 @@ def main() -> None:
         seed=seed,
     )
 
+    # Pin retrieval (FAISS embedding model) to GPU 0.
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
-    if args.vllm_gpus:
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.vllm_gpus
+    # Pin rollout generator to GPUs 2,3.
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
     rollout_model_config = build_rollout_model_config(config, args)
     generator = build_generator(rollout_model_config)
     judge = None
@@ -237,15 +240,15 @@ def main() -> None:
             judge_generator.do_sample = config.judge.do_sample
             judge = RewardJudge(judge_generator)
         else:
-            if config.judge.gpu_ids:
-                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in config.judge.gpu_ids)
+            # Pin judge to GPU 1 (non-overlapping with retrieval on GPU 0
+            # and generator on GPUs 2,3).
+            os.environ["CUDA_VISIBLE_DEVICES"] = "1"
             judge_model_config = replace(
                 config.model,
                 backend=config.judge.backend or config.model.backend,
                 model_path=judge_model_path,
-                tensor_parallel_size=config.judge.tensor_parallel_size
-                if config.judge.tensor_parallel_size is not None
-                else config.model.tensor_parallel_size,
+                language_model_only=True,
+                tensor_parallel_size=1,
                 attention_backend=config.judge.attention_backend
                 if config.judge.attention_backend is not None
                 else config.model.attention_backend,
@@ -253,7 +256,12 @@ def main() -> None:
                 if config.judge.max_model_len is not None
                 else config.model.max_model_len,
             )
-            judge_generator = build_generator(judge_model_config, judge_config=config.judge)
+            # tensor_parallel_size=4 in the YAML judge config would override
+            # model_config's TP=1 inside build_generator, so we force TP=1 here.
+            judge_generator = build_generator(
+                judge_model_config,
+                judge_config=replace(config.judge, tensor_parallel_size=1),
+            )
             judge = RewardJudge(judge_generator)
     runtime = build_runtime(generator, backend, config.runtime)
     output_path = Path(args.output) if args.output else default_output_path(config, example.query_id)
