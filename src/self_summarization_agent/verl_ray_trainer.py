@@ -614,9 +614,23 @@ class VerlRayPolicyTrainer:
             # This must happen *before* building the DataProto because
             # NestedTensors do not support dim-0 slicing.
             assert self._worker_group is not None
-            step_size = self._worker_group.alignment_step
-            max_contributing = (len(policy_batch.contributing) // step_size) * step_size
+            align_step = self._worker_group.alignment_step
+            if len(policy_batch.contributing) < align_step:
+                # Not enough contributing samples to meet the full alignment
+                # step (LCM of world_size and minibatch_size).  Fall back to
+                # world_size-only alignment so we use every available sample
+                # rather than zeroing out the batch.
+                align_step = self._worker_group._world_size
+            max_contributing = (len(policy_batch.contributing) // align_step) * align_step
+            if max_contributing == 0:
+                return _metrics_without_update(policy_batch)
             global_mini_batch = self.training_config.minibatch_size
+            if global_mini_batch is not None and max_contributing < global_mini_batch:
+                # The configured mini-batch size exceeds the actual number of
+                # contributing samples, which would fail verl's divisibility
+                # check (batch_size % mini_batch_size == 0).  Use the actual
+                # count as the effective mini-batch size for this update.
+                global_mini_batch = max_contributing
             batch = build_verl_actor_dataproto(
                 grouped_samples,
                 checkpoint_id=self.checkpoint_id,
