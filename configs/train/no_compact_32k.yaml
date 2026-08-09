@@ -50,7 +50,7 @@ rollout:
   gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend:
-  max_model_len: 40960
+  max_model_len: 49152
   enable_prefix_caching: true
   # Limit KV-cache residency on the two rollout GPUs for long-context episodes.
   max_concurrent_episodes: 8
@@ -83,16 +83,16 @@ evaluation:
 runtime:
   # Effectively disable runtime summarization for the no-compaction baseline.
   context_threshold_tokens: 1000000000
-  max_context_tokens: 32768
+  max_context_tokens: 40960
   # Summary-body cap. Irrelevant when compaction is disabled, kept for field
   # parity with the default config.
   max_summary_tokens: 6400
   tool_budget: 99999
   # Episode budget: model completions plus raw appended tool-result content.
-  generated_token_budget: 24000
+  generated_token_budget: 36000
   # Per-phase subprocess timeout (seconds). If a rollout/judge/train subprocess
   # does not exit within this limit it is terminated. None = no timeout.
-  phase_timeout_seconds: 3600
+  phase_timeout_seconds: 9000
 
 judge:
   enabled: true
@@ -121,9 +121,9 @@ training:
   tensor_parallel_size: 1
   data_parallel_size: 4
   activation_checkpointing: true
-  # Preserve the full 40,960-token rollout (32,768 context + 8,192 generation)
+  # Preserve the full 49,152-token rollout (40,960 context + 8,192 generation)
   # so no-compaction sequences are never left-truncated by the training adapter.
-  max_sequence_length: 40960
+  max_sequence_length: 49152
   epochs: 10
   steps: 10
   group_size: 4

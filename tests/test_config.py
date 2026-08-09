@@ -242,14 +242,14 @@ def test_load_no_compact_32k_training_preset() -> None:
 
     # Runtime: compaction disabled, large active context.
     assert config.runtime.context_threshold_tokens == 1_000_000_000
-    assert config.runtime.max_context_tokens == 32_768
-    assert config.runtime.generated_token_budget == 24_000
-    assert config.runtime.phase_timeout_seconds == 3_600
+    assert config.runtime.max_context_tokens == 40_960
+    assert config.runtime.generated_token_budget == 36_000
+    assert config.runtime.phase_timeout_seconds == 9_000
     # max_summary_tokens is present but irrelevant when compaction is disabled.
     assert config.runtime.max_summary_tokens is not None
 
     # Rollout: long-context vLLM, conservative concurrency.
-    assert config.rollout.max_model_len == 40_960
+    assert config.rollout.max_model_len == 49_152
     assert config.rollout.max_concurrent_episodes == 8
     assert config.rollout.overlap_queue_max_batches is not None
     # API compatibility fields — needed when backend is switched to openai_compatible.
@@ -266,10 +266,10 @@ def test_load_no_compact_32k_training_preset() -> None:
     assert config.training.verl.worker_backend == "verl_fsdp"
     # max_sequence_length matches rollout.max_model_len so sequences are never
     # left-truncated before the verl update.
-    assert config.training.max_sequence_length == 40_960
+    assert config.training.max_sequence_length == 49_152
     assert config.training.gradient_accumulation_microbatch_size == 1
     # With ulysses_sequence_parallel_size=4, each of the four 80 GB A100 ranks
-    # handles 10,240 tokens of the 40,960-token sequence. 12,288 gives headroom.
+    # handles 12,288 tokens of the 49,152-token sequence.
     assert config.training.verl.fsdp.ulysses_sequence_parallel_size == 4
     assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 12_288
     assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 12_288
