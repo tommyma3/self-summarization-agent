@@ -237,23 +237,48 @@ def test_load_no_compact_32k_training_preset() -> None:
 
     config = load_train_config(config_path)
 
+    # Experiment identity.
     assert config.experiment.name == "qwen-bcplus-no-compact-32k-train"
+
+    # Runtime: compaction disabled, large active context.
     assert config.runtime.context_threshold_tokens == 1_000_000_000
-    assert config.runtime.max_context_tokens == 40_960
-    assert config.runtime.generated_token_budget == 32_768
-    assert config.rollout.max_model_len == 49_152
+    assert config.runtime.max_context_tokens == 32_768
+    assert config.runtime.generated_token_budget == 24_000
+    assert config.runtime.phase_timeout_seconds == 3_600
+    # max_summary_tokens is present but irrelevant when compaction is disabled.
+    assert config.runtime.max_summary_tokens is not None
+
+    # Rollout: long-context vLLM, conservative concurrency.
+    assert config.rollout.max_model_len == 40_960
     assert config.rollout.max_concurrent_episodes == 8
-    assert config.evaluation.temperature == 1.0
-    assert config.evaluation.top_p == 0.95
-    assert config.evaluation.extra_sampling_params == {
-        "top_k": 20,
-        "min_p": 0.0,
-        "presence_penalty": 1.5,
-        "repetition_penalty": 1.0,
-    }
+    assert config.rollout.overlap_queue_max_batches is not None
+    # API compatibility fields — needed when backend is switched to openai_compatible.
+    assert config.rollout.api_base_url is not None
+    assert config.rollout.require_exact_token_ids is True
+
+    # Evaluation: deterministic (matches default).
+    assert config.evaluation.temperature == 0.0
+    assert config.evaluation.top_p == 1.0
+    assert config.evaluation.extra_sampling_params == {}
+
+    # Training: verl/FSDP with full-sequence preservation.
     assert config.training.backend == "verl_ray"
     assert config.training.verl.worker_backend == "verl_fsdp"
-    assert config.training.max_sequence_length == 49_152
-    assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 49_152
-    assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 49_152
+    # max_sequence_length matches rollout.max_model_len so sequences are never
+    # left-truncated before the verl update.
+    assert config.training.max_sequence_length == 40_960
+    assert config.training.gradient_accumulation_microbatch_size == 1
+    # With ulysses_sequence_parallel_size=4, each of the four 80 GB A100 ranks
+    # handles 10,240 tokens of the 40,960-token sequence. 12,288 gives headroom.
     assert config.training.verl.fsdp.ulysses_sequence_parallel_size == 4
+    assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 12_288
+    assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 12_288
+    # Efficiency settings inherited from default.
+    assert config.training.verl.fsdp.forward_prefetch is True
+    assert config.training.verl.fsdp.use_dynamic_bsz is True
+    assert config.training.verl.fsdp.use_remove_padding is True
+
+    # Judge: larger context window for long answers.
+    assert config.judge.max_model_len == 18_000
+    assert config.judge.max_new_tokens == 12_000
+    assert config.judge.batch_size is not None

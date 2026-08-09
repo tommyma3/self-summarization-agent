@@ -52,19 +52,29 @@ rollout:
   attention_backend:
   max_model_len: 40960
   enable_prefix_caching: true
-  # Limit 49k-token KV-cache residency on the two rollout GPUs.
+  # Limit KV-cache residency on the two rollout GPUs for long-context episodes.
   max_concurrent_episodes: 8
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: false
+  overlap_queue_max_batches: 8
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
   do_sample: true
+  # Used only when rollout.backend is switched to openai_compatible. The server
+  # must expose the checkpoint and support vLLM's return_token_ids extension.
+  api_base_url: http://127.0.0.1:8000/v1
+  api_model:
+  api_key_env: OPENAI_API_KEY
+  api_timeout_seconds: 600
+  api_max_retries: 2
+  api_extra_body: {}
+  require_exact_token_ids: true
 
 evaluation:
   samples_per_task: 1
   # Deterministic evaluation — measures the policy's most-likely output
-  # rather than a stochastic draw.
+  # rather than a stochastic draw. Independent from the GRPO exploration policy.
   temperature: 0.0
   top_p: 1.0
   do_sample: false
@@ -74,6 +84,9 @@ runtime:
   # Effectively disable runtime summarization for the no-compaction baseline.
   context_threshold_tokens: 1000000000
   max_context_tokens: 32768
+  # Summary-body cap. Irrelevant when compaction is disabled, kept for field
+  # parity with the default config.
+  max_summary_tokens: 6400
   tool_budget: 99999
   # Episode budget: model completions plus raw appended tool-result content.
   generated_token_budget: 24000
@@ -93,6 +106,12 @@ judge:
   temperature: 0.0
   top_p: 1.0
   do_sample: false
+  # Batch completed eval and training answers after policy/retrieval teardown.
+  batch_size: 32
+  batch_wait_ms: 25
+  # Maximum seconds a single judge micro-batch may take before the worker
+  # returns an error and moves on. 0 disables the timeout.
+  batch_timeout_seconds: 600
 
 training:
   backend: verl_ray
@@ -102,8 +121,9 @@ training:
   tensor_parallel_size: 1
   data_parallel_size: 4
   activation_checkpointing: true
-  # Preserve the full 40,960-token prompt plus up to 8,192 generated tokens.
-  max_sequence_length: 32768
+  # Preserve the full 40,960-token rollout (32,768 context + 8,192 generation)
+  # so no-compaction sequences are never left-truncated by the training adapter.
+  max_sequence_length: 40960
   epochs: 10
   steps: 10
   group_size: 4
@@ -135,14 +155,15 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 8192
+      ppo_max_token_len_per_gpu: 12288
       log_prob_micro_batch_size_per_gpu: 1
-      log_prob_max_token_len_per_gpu: 8192
+      log_prob_max_token_len_per_gpu: 12288
       use_dynamic_bsz: true
       use_remove_padding: true
       use_torch_compile: true
       # Ulysses splits long-sequence activation work across all four ranks.
       ulysses_sequence_parallel_size: 4
+      forward_prefetch: true
       param_offload: true
       optimizer_offload: true
       fsdp_size: -1
