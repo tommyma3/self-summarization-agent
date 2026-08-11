@@ -367,16 +367,36 @@ def _training_cache_payload(
     }
 
 
+_CE_SEQUENCE_CHUNK_TOKENS = 2048
+
+
 def _masked_token_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
     completion_mask: torch.Tensor,
 ) -> torch.Tensor:
-    token_losses = torch.nn.functional.cross_entropy(
-        logits.reshape(-1, logits.shape[-1]),
-        labels.reshape(-1),
-        reduction="none",
-    ).reshape_as(labels)
+    """Compute per-token logprobs, chunking cross-entropy to bound peak memory.
+
+    ``cross_entropy(reduction="none")`` computes each token's loss independently,
+    so chunking along the sequence dimension is numerically identical to a single
+    call.  The chunk size caps the log-softmax intermediate allocation at roughly
+    ``chunk_size * vocab_size * dtype_bytes``, keeping the cache-overlap scorer
+    (single-GPU, no FSDP) under the 80 GiB A100 limit for 40 K‑token no‑compact
+    sequences.
+    """
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_labels = labels.reshape(-1)
+    chunk_losses: list[torch.Tensor] = []
+    for start in range(0, flat_logits.shape[0], _CE_SEQUENCE_CHUNK_TOKENS):
+        end = min(start + _CE_SEQUENCE_CHUNK_TOKENS, flat_logits.shape[0])
+        chunk_losses.append(
+            torch.nn.functional.cross_entropy(
+                flat_logits[start:end],
+                flat_labels[start:end],
+                reduction="none",
+            )
+        )
+    token_losses = torch.cat(chunk_losses, dim=0).reshape_as(labels)
     return -token_losses * completion_mask.to(token_losses.dtype)
 
 

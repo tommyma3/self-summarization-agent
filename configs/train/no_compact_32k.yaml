@@ -53,10 +53,10 @@ rollout:
   max_model_len: 49152
   enable_prefix_caching: true
   # Limit KV-cache residency on the two rollout GPUs for long-context episodes.
-  max_concurrent_episodes: 8
+  max_concurrent_episodes: 50
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: false
-  overlap_queue_max_batches: 8
+  overlap_queue_max_batches: 20
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
