@@ -46,7 +46,7 @@ model:
   chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
 
 rollout:
-  backend: vllm_offline
+  backend: sglang
   gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend:
@@ -93,7 +93,7 @@ runtime:
 
 judge:
   enabled: true
-  backend: vllm_offline
+  backend: sglang
   model_path: /124090467/Qwen/Qwen3.5-35B-A3B
   gpu_ids: [0, 1, 2, 3]
   tensor_parallel_size: 4

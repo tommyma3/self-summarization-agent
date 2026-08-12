@@ -248,13 +248,15 @@ def test_load_no_compact_32k_training_preset() -> None:
     # max_summary_tokens is present but irrelevant when compaction is disabled.
     assert config.runtime.max_summary_tokens is not None
 
-    # Rollout: long-context vLLM, conservative concurrency.
+    # Rollout: long-context SGLang, conservative concurrency.
+    assert config.rollout.backend == "sglang"
     assert config.rollout.max_model_len == 49_152
     assert config.rollout.max_concurrent_episodes == 8
     assert config.rollout.overlap_queue_max_batches is not None
     # API compatibility fields — needed when backend is switched to openai_compatible.
     assert config.rollout.api_base_url is not None
     assert config.rollout.require_exact_token_ids is True
+    assert config.judge.backend == "sglang"
 
     # Evaluation: deterministic (matches default).
     assert config.evaluation.temperature == 0.0
