@@ -615,6 +615,10 @@ class SGLangGenerator:
     engine: Any = field(init=False)
 
     def __post_init__(self) -> None:
+        # nvcc uses the system gcc (9.4.0) as host compiler by default, which
+        # does not support -std=c++20 or <concepts>.  Point it at g++-10 (10.5.0)
+        # so sglang's JIT kernel compilation succeeds.
+        os.environ.setdefault("NVCC_CCBIN", "/usr/bin/g++-10")
         try:
             import sglang as sgl
         except ImportError as exc:

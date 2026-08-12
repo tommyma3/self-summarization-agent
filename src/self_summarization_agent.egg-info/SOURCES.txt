@@ -55,6 +55,7 @@ tests/test_judge_worker.py
 tests/test_launchers.py
 tests/test_merged_collect_step.py
 tests/test_probe_compaction_comparison.py
+tests/test_probe_vllm_collection.py
 tests/test_prompts.py
 tests/test_rewards.py
 tests/test_rollout_collection.py
