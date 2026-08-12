@@ -8,8 +8,8 @@ The parent process remains CUDA-free and supervises three sequential phases::
 
 The retrieval worker is owned by the collection phase.  It and every policy
 worker must exit before the judge worker is allowed to start.  Process exit,
-rather than best-effort object deletion, is the authoritative vLLM teardown
-boundary.
+rather than best-effort object deletion, is the authoritative policy-engine
+teardown boundary.
 """
 
 from __future__ import annotations

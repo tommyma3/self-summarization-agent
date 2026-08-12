@@ -130,41 +130,47 @@ def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> N
 
 
 def test_cache_step_reuses_rollout_native_cache_without_rescoring(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "checkpoints" / "step-00001"
-    checkpoint.mkdir(parents=True)
-    judged_path = tmp_path / "judged.jsonl"
-    output_path = tmp_path / "cached.jsonl"
-    row = judged_row("q1", 0)
-    row["trajectory_records"][0]["collection_tokens"] = {
-        "version": 2,
-        "full_token_ids": [1, 2],
-        "assistant_token_mask": [False, True],
-        "generations": [
-            {
-                "prompt_token_ids": [1],
-                "completion_token_ids": [2],
-                "full_token_ids": [1, 2],
-                "completion_token_logprobs": [-0.25],
-                "logprobs_mode": "raw_logprobs",
-            }
-        ],
-    }
-    write_jsonl(judged_path, [row])
-    scorer = FakeScorer()
+    for case_name, generation_source, expected_source in (
+        ("legacy-vllm", None, "vllm_raw_rollout"),
+        ("sglang", "sglang_raw_rollout", "sglang_raw_rollout"),
+    ):
+        case_dir = tmp_path / case_name
+        checkpoint = case_dir / "checkpoints" / "step-00001"
+        checkpoint.mkdir(parents=True)
+        judged_path = case_dir / "judged.jsonl"
+        output_path = case_dir / "cached.jsonl"
+        row = judged_row("q1", 0)
+        generation = {
+            "prompt_token_ids": [1],
+            "completion_token_ids": [2],
+            "full_token_ids": [1, 2],
+            "completion_token_logprobs": [-0.25],
+            "logprobs_mode": "raw_logprobs",
+        }
+        if generation_source is not None:
+            generation["reference_logprob_source"] = generation_source
+        row["trajectory_records"][0]["collection_tokens"] = {
+            "version": 2,
+            "full_token_ids": [1, 2],
+            "assistant_token_mask": [False, True],
+            "generations": [generation],
+        }
+        write_jsonl(judged_path, [row])
+        scorer = FakeScorer()
 
-    run_cache_step(
-        train_config(tmp_path),
-        checkpoint_path=checkpoint,
-        rollout_path=judged_path,
-        output_path=output_path,
-        scorer=scorer,
-    )
+        run_cache_step(
+            train_config(case_dir),
+            checkpoint_path=checkpoint,
+            rollout_path=judged_path,
+            output_path=output_path,
+            scorer=scorer,
+        )
 
-    cached_row = json.loads(output_path.read_text(encoding="utf-8"))
-    cache = cached_row["trajectory_records"][0]["training_cache"]
-    assert scorer.seen_batches == []
-    assert cache["reference_logprob_source"] == "vllm_raw_rollout"
-    assert cache["policy_checkpoint_id"] == "step-00001"
+        cached_row = json.loads(output_path.read_text(encoding="utf-8"))
+        cache = cached_row["trajectory_records"][0]["training_cache"]
+        assert scorer.seen_batches == []
+        assert cache["reference_logprob_source"] == expected_source
+        assert cache["policy_checkpoint_id"] == "step-00001"
 
 
 def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:

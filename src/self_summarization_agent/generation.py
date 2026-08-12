@@ -20,6 +20,10 @@ from self_summarization_agent.config import JudgeConfig, ModelConfig
 from self_summarization_agent.chat_template import configure_tokenizer_chat_template
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
+from self_summarization_agent.trajectory import (
+    REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
+    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+)
 
 
 class TextGenerator(Protocol):
@@ -41,6 +45,7 @@ class GenerationResult:
     cumulative_logprob: float | None = None
     token_logprobs: list[float] | None = None
     token_logprobs_mode: str | None = None
+    reference_logprob_source: str | None = None
     message: Message | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -580,6 +585,11 @@ class VLLMGenerator:
                     else None,
                     token_logprobs=token_logprobs,
                     token_logprobs_mode="raw_logprobs" if token_logprobs is not None else None,
+                    reference_logprob_source=(
+                        REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+                        if token_logprobs is not None
+                        else None
+                    ),
                 )
             )
         return completions
@@ -600,6 +610,7 @@ class SGLangGenerator:
     trust_remote_code: bool = False
     enable_thinking: bool = False
     chat_template_path: str | None = None
+    require_exact_token_ids: bool = True
     tokenizer: Any = field(init=False)
     engine: Any = field(init=False)
 
@@ -685,33 +696,57 @@ class SGLangGenerator:
             sampling_params.update(self.sampling_extra)
         return sampling_params
 
-    def _generate_outputs(self, prompts: list[str], *, return_logprob: bool = False) -> list[dict[str, Any]]:
-        if not prompts:
+    def _tokenize_prompts(self, prompts: list[str]) -> list[list[int]]:
+        return [
+            list(self.tokenizer.encode(prompt, add_special_tokens=False))
+            for prompt in prompts
+        ]
+
+    def _generate_outputs(
+        self,
+        prompt_token_ids: list[list[int]],
+        *,
+        return_logprob: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not prompt_token_ids:
             return []
         outputs = self.engine.generate(
-            prompts,
-            self._sampling_params(),
+            input_ids=prompt_token_ids,
+            sampling_params=self._sampling_params(),
             return_logprob=return_logprob,
         )
         return outputs if isinstance(outputs, list) else [outputs]
 
     def generate_batch(self, prompts: list[str]) -> list[str]:
         formatted_prompts = [self._format_prompt(prompt) for prompt in prompts]
-        return [str(output.get("text") or "") for output in self._generate_outputs(formatted_prompts)]
+        prompt_token_ids = self._tokenize_prompts(formatted_prompts)
+        return [
+            str(output.get("text") or "")
+            for output in self._generate_outputs(prompt_token_ids)
+        ]
 
     def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
         formatted_prompts = [self._format_prompt(prompt) for prompt in prompts]
-        outputs = self._generate_outputs(formatted_prompts, return_logprob=True)
+        prompt_token_ids = self._tokenize_prompts(formatted_prompts)
+        outputs = self._generate_outputs(prompt_token_ids, return_logprob=True)
         completions: list[GenerationResult] = []
-        for prompt, output in zip(formatted_prompts, outputs):
+        for input_ids, output in zip(prompt_token_ids, outputs):
             completion_token_ids, token_logprobs = _extract_sglang_completion_logprobs(output)
             completions.append(
                 GenerationResult(
                     text=str(output.get("text") or ""),
-                    prompt_token_ids=list(self.tokenizer.encode(prompt, add_special_tokens=False)),
+                    # These IDs are authoritative because they are the exact
+                    # pre-tokenized sequence submitted to sgl.Engine.generate.
+                    prompt_token_ids=list(input_ids),
                     completion_token_ids=completion_token_ids,
                     cumulative_logprob=sum(token_logprobs) if token_logprobs is not None else None,
                     token_logprobs=token_logprobs,
+                    token_logprobs_mode="raw_logprobs" if token_logprobs is not None else None,
+                    reference_logprob_source=(
+                        REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT
+                        if token_logprobs is not None
+                        else None
+                    ),
                 )
             )
         return completions
@@ -851,6 +886,7 @@ def build_generator(
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,
+            require_exact_token_ids=model_config.require_exact_token_ids,
         )
     if backend_name in {"openai", "openai_compatible", "openai-compatible"}:
         if not model_config.api_base_url:

@@ -12,9 +12,14 @@ COLLECTION_TOKEN_VERSION = 2
 LEGACY_COLLECTION_TOKEN_VERSION = 1
 REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE = "policy_rescore"
 REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT = "vllm_raw_rollout"
+REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT = "sglang_raw_rollout"
+_RAW_ROLLOUT_REFERENCE_LOGPROB_SOURCES = {
+    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+    REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
+}
 _REFERENCE_LOGPROB_SOURCES = {
     REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
-    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+    *_RAW_ROLLOUT_REFERENCE_LOGPROB_SOURCES,
 }
 
 
@@ -102,7 +107,7 @@ def is_training_cache_current(cache: object) -> bool:
         and "reference_logprobs" in cache
         and source in _REFERENCE_LOGPROB_SOURCES
         and (
-            source != REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+            source not in _RAW_ROLLOUT_REFERENCE_LOGPROB_SOURCES
             or cache.get("logprobs_mode") == "raw_logprobs"
         )
     )
@@ -131,7 +136,7 @@ def _extract_training_cache(
             f"{reference_logprob_source!r}"
         )
     if (
-        reference_logprob_source == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+        reference_logprob_source in _RAW_ROLLOUT_REFERENCE_LOGPROB_SOURCES
         and cache.get("logprobs_mode") != "raw_logprobs"
     ):
         raise ValueError(
@@ -279,7 +284,7 @@ def _extract_collection_tokens(
 def build_rollout_native_training_cache(
     collection_tokens: object,
 ) -> dict[str, Any] | None:
-    """Build a cache from authoritative raw vLLM decode logprobs.
+    """Build a cache from authoritative raw rollout-engine decode logprobs.
 
     This is deliberately fail-closed. The fast path is valid only when every
     generated completion carries finite raw-policy logprobs and every complete
@@ -320,6 +325,7 @@ def build_rollout_native_training_cache(
 
     reference_logprobs = [0.0] * (len(full_token_ids) - 1)
     covered_assistant_positions: set[int] = set()
+    reference_logprob_sources: set[str] = set()
     for generation in generations:
         if not isinstance(generation, Mapping):
             return None
@@ -328,6 +334,14 @@ def build_rollout_native_training_cache(
         completion_logprobs = generation.get("completion_token_logprobs")
         if generation.get("logprobs_mode") != "raw_logprobs":
             return None
+        reference_logprob_source = generation.get("reference_logprob_source")
+        if reference_logprob_source is None:
+            # Collection-token v2 predates explicit engine provenance and was
+            # originally emitted only by vLLM. Preserve those durable rows.
+            reference_logprob_source = REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+        if reference_logprob_source not in _RAW_ROLLOUT_REFERENCE_LOGPROB_SOURCES:
+            return None
+        reference_logprob_sources.add(reference_logprob_source)
         if (
             not isinstance(prompt_ids, list)
             or not isinstance(completion_ids, list)
@@ -368,8 +382,12 @@ def build_rollout_native_training_cache(
             reference_logprobs[full_position - 1] = logprob
             covered_assistant_positions.add(full_position)
 
-    if covered_assistant_positions != expected_assistant_positions:
+    if (
+        covered_assistant_positions != expected_assistant_positions
+        or len(reference_logprob_sources) != 1
+    ):
         return None
+    reference_logprob_source = next(iter(reference_logprob_sources))
     completion_mask = list(assistant_token_mask[1:])
     masked_logprobs = [
         reference_logprobs[index]
@@ -383,7 +401,7 @@ def build_rollout_native_training_cache(
         "completion_mask": completion_mask,
         "reference_logprob": sum(masked_logprobs) / len(masked_logprobs),
         "reference_logprobs": reference_logprobs,
-        "reference_logprob_source": REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+        "reference_logprob_source": reference_logprob_source,
         "logprobs_mode": "raw_logprobs",
     }
 

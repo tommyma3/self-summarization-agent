@@ -596,7 +596,8 @@ def collect_rollouts(
             expected_keys=expected_keys,
             expected_sampling_profile_id=profile_id if split == "eval" else None,
             require_exact_token_ids=(
-                config.rollout.backend.lower().replace("-", "_") in {"openai", "openai_compatible"}
+                config.rollout.backend.lower().replace("-", "_")
+                in {"openai", "openai_compatible", "sglang", "sglang_offline"}
                 and config.rollout.require_exact_token_ids
             ),
         )
