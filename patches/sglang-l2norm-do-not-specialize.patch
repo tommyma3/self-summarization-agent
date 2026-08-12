@@ -1,0 +1,48 @@
+--- a/sglang/srt/layers/attention/fla/l2norm.py
++++ b/sglang/srt/layers/attention/fla/l2norm.py
+@@ -51,17 +51,19 @@
+ #     ],
+ #     key=["D", "NB"],
+ # )
+-@triton.jit
++@triton.jit(do_not_specialize=["T"])
+ def l2norm_fwd_kernel(
+     x,
+     y,
+     eps,
+-    NB: tl.constexpr,
+-    T: tl.constexpr,
++    T,
+     D: tl.constexpr,
+     BT: tl.constexpr,
+     BD: tl.constexpr,
+ ):
++    # do_not_specialize args arrive as pointers; load the runtime scalar so
++    # the kernel is compiled once and reused for every sequence length.
++    T = tl.load(T)
+     i_t = tl.program_id(0)
+     p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+     b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+@@ -91,7 +93,11 @@
+         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
+
+     if D <= 512:
+-        NB = triton.cdiv(T, 2048)
++        # T is passed as a runtime scalar so the kernel is compiled once and
++        # reused for every sequence length.  Passing a python int here would
++        # specialize the kernel per length and trigger a triton recompile for
++        # every new sequence shape (compile storm that wedges the scheduler).
++        T_scalar = torch.tensor(T, dtype=torch.int32, device=x.device)
+
+         def grid(meta):
+             return (triton.cdiv(T, meta["BT"]),)
+@@ -100,8 +106,7 @@
+             x,
+             y,
+             eps,
+-            NB=NB,
+-            T=T,
++            T_scalar,
+             D=D,
+             BD=BD,
+             BT=16,

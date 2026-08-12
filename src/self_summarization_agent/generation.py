@@ -611,6 +611,7 @@ class SGLangGenerator:
     enable_thinking: bool = False
     chat_template_path: str | None = None
     require_exact_token_ids: bool = True
+    disable_radix_cache: bool = False
     tokenizer: Any = field(init=False)
     engine: Any = field(init=False)
 
@@ -637,6 +638,7 @@ class SGLangGenerator:
             "attention_backend": self.attention_backend,
             "context_length": self.max_model_len,
             "trust_remote_code": self.trust_remote_code,
+            "disable_radix_cache": self.disable_radix_cache,
         }
         self.engine = sgl.Engine(**{key: value for key, value in engine_kwargs.items() if value is not None})
 
@@ -891,6 +893,7 @@ def build_generator(
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,
             require_exact_token_ids=model_config.require_exact_token_ids,
+            disable_radix_cache=model_config.disable_radix_cache,
         )
     if backend_name in {"openai", "openai_compatible", "openai-compatible"}:
         if not model_config.api_base_url:

@@ -470,6 +470,7 @@ def _build_rollout_generator(config, checkpoint: Path, *, split: str) -> Any:
         else config.model.max_model_len,
         language_model_only=True,
         enable_prefix_caching=config.rollout.enable_prefix_caching,
+        disable_radix_cache=config.rollout.disable_radix_cache,
         api_base_url=config.rollout.api_base_url,
         api_model=config.rollout.api_model,
         api_key_env=config.rollout.api_key_env,
