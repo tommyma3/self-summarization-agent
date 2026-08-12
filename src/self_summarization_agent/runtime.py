@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator, Protocol
 
@@ -310,6 +311,10 @@ class EpisodeRuntime:
     max_tool_calls: int | None = None
     generated_token_budget: int | None = None
     token_counter: Callable[[str], int] = field(default=lambda text: len(text.split()))
+    # Maximum wall-clock seconds for all tool calls (search + get_document)
+    # within a single round.  Remaining calls are skipped with an error string
+    # so the episode can still complete.  None = no limit.
+    tool_execution_timeout_seconds: float | None = 600
 
     def __post_init__(self) -> None:
         if self.max_summary_tokens < 1:
@@ -901,6 +906,8 @@ class EpisodeRuntime:
             state.messages.append(Message(role="user", content=format_tool_response(tool_result)))
 
     def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
+        tool_started = time.monotonic()
+
         search_actions = [action for action in actions if action.tool_name == "search"]
         if search_actions:
             queries = [str(action.arguments["query"]) for action in search_actions]
@@ -911,6 +918,19 @@ class EpisodeRuntime:
 
         for action in actions:
             if action.tool_name != "get_document":
+                continue
+            if (
+                self.tool_execution_timeout_seconds is not None
+                and time.monotonic() - tool_started >= self.tool_execution_timeout_seconds
+            ):
+                LOGGER.warning(
+                    "Tool execution timeout (%.0fs) reached; skipping get_document for %s",
+                    self.tool_execution_timeout_seconds,
+                    action.arguments.get("doc_id", "unknown"),
+                )
+                error_result = "Error: Tool execution timed out during document retrieval."
+                action.active.tool_call_counts["get_document"] += 1
+                self._apply_tool_result(action, error_result)
                 continue
             doc_id = str(action.arguments["doc_id"])
             self._record_retrieved_docids(action.active.retrieved_docids, [doc_id])

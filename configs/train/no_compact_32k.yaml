@@ -51,7 +51,7 @@ rollout:
   tensor_parallel_size: 2
   attention_backend:
   max_model_len: 49152
-  enable_prefix_caching: true
+  enable_prefix_caching: false
   # Limit KV-cache residency on the two rollout GPUs for long-context episodes.
   max_concurrent_episodes: 50
   # Deprecated compatibility fields; merged_collect is strictly sequential.
@@ -70,6 +70,10 @@ rollout:
   api_max_retries: 2
   api_extra_body: {}
   require_exact_token_ids: true
+  # Per-split timeout for the collection subprocess. Each split (eval, train)
+  # runs as a separate child process; this gives a tighter failure boundary than
+  # the outer phase_timeout_seconds alone. None = no limit.
+  per_split_collection_timeout_seconds: 5400
 
 evaluation:
   samples_per_task: 1
@@ -93,6 +97,10 @@ runtime:
   # Per-phase subprocess timeout (seconds). If a rollout/judge/train subprocess
   # does not exit within this limit it is terminated. None = no timeout.
   phase_timeout_seconds: 9000
+  # Maximum wall-clock seconds for all retrieval tool calls (search + get_document)
+  # within a single collection round. Remaining calls are skipped with an error
+  # string so the episode can still produce a result.
+  tool_execution_timeout_seconds: 600
 
 judge:
   enabled: true

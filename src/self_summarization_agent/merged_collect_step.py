@@ -558,6 +558,7 @@ def _run_split_collection_process(
     sample_seed: int | None,
     resume: bool,
     retrieval_worker_url: str | None,
+    per_split_timeout_seconds: float | None = None,
 ) -> None:
     """Run and join a policy child; successful return is the teardown barrier."""
 
@@ -577,7 +578,28 @@ def _run_split_collection_process(
     )
     process.start()
     try:
-        process.join()
+        process.join(timeout=per_split_timeout_seconds)
+        if process.is_alive():
+            # timeout expired — child is still running
+            print(
+                f"[merged_collect] {split.capitalize()} policy collection timed out "
+                f"after {per_split_timeout_seconds:.0f}s. Terminating (pid={process.pid})...",
+                flush=True,
+            )
+            process.terminate()
+            process.join(timeout=30)
+            if process.is_alive():
+                print(
+                    f"[merged_collect] {split.capitalize()} policy collection "
+                    f"did not respond to SIGTERM, killing (pid={process.pid})...",
+                    flush=True,
+                )
+                process.kill()
+                process.join(timeout=10)
+            raise RuntimeError(
+                f"{split.capitalize()} policy collection timed out "
+                f"after {per_split_timeout_seconds:.0f}s"
+            )
     except BaseException:
         if process.is_alive():
             process.terminate()
@@ -828,6 +850,7 @@ def run_merged_collect(
     needs_collection = eval_raw_needed or train_raw_needed
     owned_retrieval_process = None
     active_retrieval_url = retrieval_worker_url
+    per_split_timeout = getattr(config.rollout, "per_split_collection_timeout_seconds", None)
     if needs_collection:
         try:
             if config.retrieval.persistent_worker and active_retrieval_url is None:
@@ -851,6 +874,7 @@ def run_merged_collect(
                     sample_seed=None,
                     resume=resume,
                     retrieval_worker_url=active_retrieval_url,
+                    per_split_timeout_seconds=per_split_timeout,
                 )
                 outputs["eval_raw"] = Path(eval_raw_output)
 
@@ -865,6 +889,7 @@ def run_merged_collect(
                     sample_seed=sample_seed,
                     resume=resume,
                     retrieval_worker_url=active_retrieval_url,
+                    per_split_timeout_seconds=per_split_timeout,
                 )
                 outputs["train_raw"] = Path(train_raw_output)
         finally:

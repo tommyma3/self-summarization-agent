@@ -107,6 +107,9 @@ class RolloutConfig:
     api_max_retries: int = 2
     api_extra_body: dict[str, Any] = field(default_factory=dict)
     require_exact_token_ids: bool = True
+    # Per-split timeout for the collection subprocess inside merged_collect.
+    # None = no limit (relies on the outer phase_timeout_seconds).
+    per_split_collection_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.max_concurrent_episodes < 1:
@@ -123,6 +126,7 @@ class RuntimeConfig:
     tool_budget: int = 16
     generated_token_budget: int | None = None
     phase_timeout_seconds: int | None = None
+    tool_execution_timeout_seconds: float = 600
 
 
 @dataclass(slots=True)

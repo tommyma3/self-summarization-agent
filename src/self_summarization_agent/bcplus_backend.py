@@ -68,6 +68,11 @@ class RealBrowseCompBackend:
                 )
                 self.snippet_tokenizer = None
 
+    # Generous worst-case bound: CJK text at ~1 char/token × 50 margin.
+    # Caps the input to tokenizer.encode so a 1.3M-token corpus passage
+    # (like the one in BrowseComp+) never hogs the retrieval worker's CPU.
+    _MAX_CHARS_PER_TOKEN = 50
+
     def _truncate_text(self, text: str, max_tokens: int | None) -> str:
         if (
             not max_tokens
@@ -75,6 +80,9 @@ class RealBrowseCompBackend:
             or self.snippet_tokenizer is None
         ):
             return text
+        max_input_chars = max_tokens * self._MAX_CHARS_PER_TOKEN
+        if len(text) > max_input_chars:
+            text = text[:max_input_chars]
         tokens = self.snippet_tokenizer.encode(text, add_special_tokens=False)
         if len(tokens) <= max_tokens:
             return text

@@ -85,6 +85,9 @@ def build_runtime(
         max_tool_calls=runtime_config.tool_budget,
         generated_token_budget=runtime_config.generated_token_budget,
         token_counter=token_counter,
+        tool_execution_timeout_seconds=getattr(
+            runtime_config, "tool_execution_timeout_seconds", 600
+        ),
     )
 
 
