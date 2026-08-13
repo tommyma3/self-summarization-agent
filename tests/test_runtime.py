@@ -10,7 +10,7 @@ from self_summarization_agent.generation import GenerationResult
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import (
-    REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
+    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
     build_rollout_native_training_cache,
     extract_trainable_samples,
 )
@@ -70,7 +70,6 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
                 cumulative_logprob=-0.3,
                 token_logprobs=[-0.1, -0.2],
                 token_logprobs_mode="raw_logprobs",
-                reference_logprob_source=REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
                 message=Message(
                     role="assistant",
                     reasoning_content="search first",
@@ -85,7 +84,6 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
                 cumulative_logprob=-0.7,
                 token_logprobs=[-0.3, -0.4],
                 token_logprobs_mode="raw_logprobs",
-                reference_logprob_source=REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
                 message=Message(
                     role="assistant",
                     reasoning_content="answer",
@@ -136,7 +134,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
     assert cache["completion_mask"] == [False, True, True, False, True, True]
     assert cache["reference_logprobs"] == [0.0, -0.1, -0.2, 0.0, -0.3, -0.4]
     assert cache["reference_logprob"] == -0.25
-    assert cache["reference_logprob_source"] == REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT
+    assert cache["reference_logprob_source"] == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
     assert result.token_usage["budget_consumed_tokens"] == (
         result.token_usage["total_generated_tokens"] + result.token_usage["tool_result_tokens"]
     )
@@ -152,7 +150,6 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 cumulative_logprob=-0.1,
                 token_logprobs=[-0.1],
                 token_logprobs_mode="raw_logprobs",
-                reference_logprob_source=REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
                 message=Message(
                     role="assistant",
                     tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
@@ -165,7 +162,6 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 cumulative_logprob=-0.2,
                 token_logprobs=[-0.2],
                 token_logprobs_mode="raw_logprobs",
-                reference_logprob_source=REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
                 message=Message(
                     role="assistant",
                     reasoning_content="compact",
@@ -179,7 +175,6 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 cumulative_logprob=-0.3,
                 token_logprobs=[-0.3],
                 token_logprobs_mode="raw_logprobs",
-                reference_logprob_source=REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT,
                 message=Message(
                     role="assistant",
                     tool_calls=[ToolCall(id="call-finish", name="finish", arguments={"answer": "done"})],
@@ -240,8 +235,6 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
         0.0,
         -0.3,
     ]
-    assert summary_cache["reference_logprob_source"] == REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT
-    assert final_cache["reference_logprob_source"] == REFERENCE_LOGPROB_SOURCE_SGLANG_ROLLOUT
 
 
 def test_rollout_native_cache_rejects_completion_without_exact_conditioning_prefix() -> None:

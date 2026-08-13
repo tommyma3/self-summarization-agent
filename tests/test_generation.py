@@ -59,26 +59,20 @@ class FakeLLM:
 
 class FakeSGLangEngine:
     def __init__(self) -> None:
-        self.input_ids: list[list[int]] = []
+        self.prompts: list[str] = []
         self.params: dict | None = None
         self.return_logprob = False
 
-    def generate(
-        self,
-        *,
-        input_ids: list[list[int]],
-        sampling_params: dict,
-        return_logprob: bool = False,
-    ) -> list[dict]:
-        self.input_ids = input_ids
-        self.params = sampling_params
+    def generate(self, prompts: list[str], params: dict, *, return_logprob: bool = False) -> list[dict]:
+        self.prompts = prompts
+        self.params = params
         self.return_logprob = return_logprob
         return [
             {
-                "text": f"response:{index}",
+                "text": f"response:{prompt}",
                 "meta_info": {"output_token_logprobs": [[-0.75, 11], [-1.25, 12]]},
             }
-            for index, _ in enumerate(input_ids)
+            for prompt in prompts
         ]
 
 
@@ -162,7 +156,6 @@ def test_build_generator_accepts_sglang_backend(monkeypatch) -> None:
     assert generator.tensor_parallel_size == 2
     assert generator.attention_backend == "flashinfer"
     assert generator.max_model_len == 8192
-    assert generator.require_exact_token_ids is True
 
 
 def test_sglang_generator_maps_model_options_to_offline_engine(monkeypatch) -> None:
@@ -320,14 +313,12 @@ def test_sglang_generator_batches_prompts_and_returns_metadata(monkeypatch) -> N
 
     outputs = generator.generate_batch_with_metadata(["first", "second"])
 
-    assert [output.text for output in outputs] == ["response:0", "response:1"]
+    assert [output.text for output in outputs] == ["response:first", "response:second"]
     assert outputs[0].prompt_token_ids == [1, 2]
     assert outputs[0].completion_token_ids == [11, 12]
     assert outputs[0].cumulative_logprob == -2.0
     assert outputs[0].token_logprobs == [-0.75, -1.25]
-    assert outputs[0].token_logprobs_mode == "raw_logprobs"
-    assert outputs[0].reference_logprob_source == "sglang_raw_rollout"
-    assert generator.engine.input_ids == [[1, 2], [1, 2]]
+    assert generator.engine.prompts == ["first", "second"]
     assert generator.engine.params == {"max_new_tokens": 16, "temperature": 0.7, "top_p": 0.95}
     assert generator.engine.return_logprob is True
 

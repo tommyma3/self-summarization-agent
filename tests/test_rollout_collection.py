@@ -476,48 +476,46 @@ def test_collect_rollouts_resume_rejects_different_checkpoint(tmp_path: Path) ->
         raise AssertionError("Expected resume to reject rollout rows from another checkpoint")
 
 
-def test_exact_collection_resume_rejects_rows_without_token_ids(tmp_path: Path) -> None:
-    examples = [QueryExample(query_id="q1", query="question", answer="done")]
-    for backend_name in ("openai_compatible", "sglang"):
-        case_dir = tmp_path / backend_name
-        config = train_config(case_dir)
-        config.rollout.backend = backend_name
-        checkpoint = case_dir / "checkpoints" / "step-00001"
-        checkpoint.mkdir(parents=True)
-        output_path = case_dir / "rollouts.jsonl"
-        output_path.write_text(
-            json.dumps(
-                {
-                    "policy_checkpoint_id": "step-00001",
-                    "rollout_index": 0,
-                    "query_id": "q1",
-                    "trajectory_records": [
-                        {
-                            "schema_version": 3,
-                            "kind": "trajectory",
-                            "turn_id": "trajectory-1",
-                        }
-                    ],
-                }
-            )
-            + "\n",
-            encoding="utf-8",
+def test_openai_collection_resume_rejects_rows_without_exact_token_ids(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    config.rollout.backend = "openai_compatible"
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    output_path = tmp_path / "rollouts.jsonl"
+    output_path.write_text(
+        json.dumps(
+            {
+                "policy_checkpoint_id": "step-00001",
+                "rollout_index": 0,
+                "query_id": "q1",
+                "trajectory_records": [
+                    {
+                        "schema_version": 3,
+                        "kind": "trajectory",
+                        "turn_id": "trajectory-1",
+                    }
+                ],
+            }
         )
+        + "\n",
+        encoding="utf-8",
+    )
+    examples = [QueryExample(query_id="q1", query="question", answer="done")]
 
-        try:
-            collect_rollouts(
-                config,
-                checkpoint_path=checkpoint,
-                output_path=output_path,
-                examples=examples,
-                backend=FakeBackend(search_index={}, documents={}),
-                generator=CyclingGenerator([]),
-                resume=True,
-            )
-        except ValueError as exc:
-            assert "missing exact collection_tokens" in str(exc)
-        else:
-            raise AssertionError(f"Expected {backend_name} resume to reject non-exact rows")
+    try:
+        collect_rollouts(
+            config,
+            checkpoint_path=checkpoint,
+            output_path=output_path,
+            examples=examples,
+            backend=FakeBackend(search_index={}, documents={}),
+            generator=CyclingGenerator([]),
+            resume=True,
+        )
+    except ValueError as exc:
+        assert "missing exact collection_tokens" in str(exc)
+    else:
+        raise AssertionError("Expected OpenAI-compatible resume to reject non-exact rows")
 
 
 def test_collection_resume_rejects_previous_trajectory_contract(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ Current scope:
 Partially implemented / still minimal:
 - the legacy training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
 - retrieval and judge dependencies still come from the local `bc-plus` environment
-- process-isolated rollout/training orchestration defaults to owned offline SGLang collection, with optional offline vLLM and OpenAI-compatible serving paths
+- process-isolated rollout/training orchestration supports OpenAI-compatible vLLM serving, plus legacy offline vLLM or SGLang collection
 - the FSDP2/context-parallel full-training backend is represented in config and launcher contracts, but must be run in the GPU training environment
 
 ## Setup
@@ -26,7 +26,7 @@ Install dependencies with `uv`:
 uv sync --group dev
 ```
 
-The default Qwen3.5 rollout and judge paths use an owned offline SGLang engine. SGLang receives pre-tokenized prompt IDs and returns sampled-token logprobs during decoding, allowing the collection worker to persist authoritative training tokens and materialize native caches without a second policy-model load. The GPU training environment also needs an Accelerate release with FSDP2/context-parallel support available to the Python environment used for training subprocesses.
+The default Qwen3.5 rollout path expects an OpenAI-compatible vLLM server. The server must support native chat tool calls and vLLM's `return_token_ids` Chat Completions extension. The GPU training environment also needs an Accelerate release with FSDP2/context-parallel support available to the Python environment used for training subprocesses.
 
 For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
 
@@ -189,7 +189,7 @@ Each training interval begins with the same system instructions and the same ori
 
 This context contract is trajectory schema version 3. Older rollout rows must be recollected under a fresh artifact root rather than resumed or mixed with schema-v3 data.
 
-Every exact-token collection request preserves the exact prompt and completion token IDs seen by the inference engine. SGLang receives the tokenizer-produced prompt IDs directly; the offline vLLM and OpenAI-compatible paths use their engine-returned token evidence. The runtime stores every request under `collection_tokens.generations`; at an interval boundary it also stores the final inference sequence as `collection_tokens.full_token_ids` plus an assistant-token mask. Earlier sampled completions must be exact subsequences of the final prompt. Missing IDs or a mismatch terminates collection with an error; the cache step never substitutes retokenized text for an exact-token trajectory. Cache v5 and training use the stored IDs directly.
+Every collection request asks vLLM to return its exact server-side prompt and completion token IDs. The runtime stores every request under `collection_tokens.generations`; at an interval boundary it also stores the final inference sequence as `collection_tokens.full_token_ids` plus an assistant-token mask. Earlier sampled completions must be exact subsequences of the final server-rendered prompt. Missing IDs or a mismatch terminates collection with an error; the cache step never substitutes locally retokenized text for these API trajectories. Cache v4 and training then use the stored IDs directly.
 
 ## How To Run Real Experiments
 
@@ -245,11 +245,11 @@ Training notes:
 - reward verification is done in-process with the same local base model family as judge
 - `bm25` and `faiss` retrieval are both supported from config
 - legacy `train_launcher` expects `training.backend: transformers`
-- the default training presets use the owned offline SGLang engine for both policy rollout and judging; `sglang_offline` is accepted as an alias
+- the default `rollout.backend: openai_compatible` uses Chat Completions against `rollout.api_base_url`; `openai`, `openai-compatible`, and `openai_compatible` are accepted aliases
 - `rollout.api_model` must be the model name exposed by the server; when it is unset the resolved checkpoint path is sent as the model name
 - `rollout.enable_prefix_caching` defaults to `true`; `vllm_offline` passes it directly to the owned vLLM engine
 - the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning, native tool parsing, and `--enable-prefix-caching`; prefix caching is an engine-startup option and cannot be enabled by a Chat Completions request, while restarting or hot-swapping that server at an iteration boundary remains an external orchestration responsibility
-- `rollout.backend: vllm_offline` and the OpenAI-compatible aliases remain available when their corresponding runtime dependencies or external server are provided
+- legacy `rollout.backend: vllm_offline` and `rollout.backend: sglang` remain available; SGLang is an optional runtime dependency and must be installed separately
 - the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` consume the same cached trajectory contract
 - each iteration evaluates the selected checkpoint, collects its training trajectories, caches the exact collected token sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
@@ -277,10 +277,10 @@ python -m self_summarization_agent.iteration_launcher --config configs/train/def
 For the intended GPU run:
 
 - each iteration's eval-then-train collection uses one collection-scoped FAISS worker; it is shut down and joined together with the policy collection boundary before judging begins
-- eval and training policy engines run in isolated subprocesses with their corresponding sampling profiles; process exit is the authoritative policy-engine teardown boundary
+- eval and training policy engines run in isolated subprocesses with their corresponding sampling profiles; process exit is the authoritative vLLM teardown boundary
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes, emits completed rollouts after each runtime round, and immediately refills freed slots instead of waiting for the slowest episode in a fixed batch
-- exact SGLang and `vllm_offline` training generations retain raw sampled-token logprobs; SGLang submits pre-tokenized prompt IDs directly to its engine so those IDs remain authoritative. Both paths assemble v5 training caches from the collected IDs and assistant masks without policy rescoring
-- after both raw artifacts are complete and policy/retrieval teardown is confirmed, one judge engine loads on GPUs 0-3 with tensor parallel size 4 and judges all pending eval rows followed by all pending training rows
+- exact `vllm_offline` training generations retain raw sampled-token logprobs and assemble v5 training caches directly from authoritative collection IDs and assistant masks before the policy process exits
+- after both raw artifacts are complete and policy/retrieval teardown is confirmed, one judge vLLM loads on GPUs 0-3 with tensor parallel size 4 and judges all pending eval rows followed by all pending training rows
 - `rollout.overlap_judge` and `rollout.overlap_queue_max_batches` remain parseable for compatibility but do not enable policy/judge overlap in `merged_collect`
 - `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; its generator is constructed from the resolved evaluation profile instead of mutating the training generator
 - raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
@@ -293,7 +293,7 @@ For the intended GPU run:
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
-To override another preset onto the SGLang policy rollout path (`sglang_offline` is also accepted):
+To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 
 ```powershell
 python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer

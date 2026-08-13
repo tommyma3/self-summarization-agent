@@ -73,9 +73,6 @@ class ModelConfig:
     chat_template_path: str | None = None
     language_model_only: bool = False
     enable_prefix_caching: bool = False
-    # Disable sglang's radix cache; works around scheduler hangs with mamba
-    # no_buffer models (see sglang's "not compatible with overlap schedule" warning).
-    disable_radix_cache: bool = False
     api_base_url: str | None = None
     api_model: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -94,7 +91,6 @@ class RolloutConfig:
     attention_backend: str | None = None
     max_model_len: int | None = None
     enable_prefix_caching: bool = True
-    disable_radix_cache: bool = False
     max_concurrent_episodes: int = 32
     # Compatibility switch for standalone rollout_collection. The primary
     # merged collection path is always sequential and ignores this value.

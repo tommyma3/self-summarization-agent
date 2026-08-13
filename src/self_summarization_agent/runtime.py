@@ -282,7 +282,6 @@ class _GeneratedOutput:
     cumulative_logprob: float | None = None
     token_logprobs: list[float] | None = None
     token_logprobs_mode: str | None = None
-    reference_logprob_source: str | None = None
     message: Message | None = None
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
@@ -421,7 +420,6 @@ class EpisodeRuntime:
                         list(output.token_logprobs) if output.token_logprobs is not None else None
                     ),
                     "logprobs_mode": output.token_logprobs_mode,
-                    "reference_logprob_source": output.reference_logprob_source,
                     "finish_reason": output.finish_reason,
                 }
             )
@@ -641,11 +639,6 @@ class EpisodeRuntime:
                             else None
                         ),
                         token_logprobs_mode=getattr(result, "token_logprobs_mode", None),
-                        reference_logprob_source=getattr(
-                            result,
-                            "reference_logprob_source",
-                            None,
-                        ),
                         message=getattr(result, "message", None),
                         finish_reason=getattr(result, "finish_reason", None),
                         usage=getattr(result, "usage", None),

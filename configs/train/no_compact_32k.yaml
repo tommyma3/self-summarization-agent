@@ -46,17 +46,14 @@ model:
   chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
 
 rollout:
-  backend: sglang
+  backend: vllm_offline
   gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend:
   max_model_len: 49152
   enable_prefix_caching: false
-  # Work around sglang scheduler hangs with mamba no_buffer: the radix cache
-  # is not compatible with this model's overlap schedule.
-  disable_radix_cache: false
   # Limit KV-cache residency on the two rollout GPUs for long-context episodes.
-  max_concurrent_episodes: 10
+  max_concurrent_episodes: 50
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: false
   overlap_queue_max_batches: 20
@@ -107,7 +104,7 @@ runtime:
 
 judge:
   enabled: true
-  backend: sglang
+  backend: vllm_offline
   model_path: /124090467/Qwen/Qwen3.5-35B-A3B
   gpu_ids: [0, 1, 2, 3]
   tensor_parallel_size: 4
