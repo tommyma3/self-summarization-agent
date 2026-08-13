@@ -1,7 +1,11 @@
 import json
+import os
 from pathlib import Path
 from queue import Queue
+import sys
 from types import SimpleNamespace
+
+import pytest
 
 from self_summarization_agent import merged_collect_step
 from self_summarization_agent.dataset import QueryExample
@@ -74,6 +78,7 @@ def test_cache_overlap_worker_microbatches_samples_across_judged_rows(monkeypatc
         response_queue=response_queue,
     )
 
+    assert response_queue.get_nowait() == merged_collect_step.READY
     response = response_queue.get_nowait()
     assert scorer.batch_sizes == [2, 1]
     assert len(response["rows"]) == 3
@@ -395,3 +400,137 @@ def test_merged_collect_stops_retrieval_before_starting_judge(tmp_path: Path, mo
         "metrics",
         "cache",
     ]
+
+
+class _FakeExitError(Exception):
+    def __init__(self, code: int) -> None:
+        super().__init__(f"os._exit({code})")
+        self.code = code
+
+
+def _stub_worker_dependencies(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    collect_raises: Exception | None = None,
+) -> tuple[list[str], list[int]]:
+    """Stub everything _run_split_collection_worker touches; return its event log."""
+    events: list[str] = []
+    exit_codes: list[int] = []
+    fake_generator = object()
+    config = SimpleNamespace(
+        experiment=SimpleNamespace(bc_plus_root=tmp_path, seed=1),
+        dataset=SimpleNamespace(train_limit=None, eval_limit=None),
+        training=SimpleNamespace(group_size=4),
+        evaluation=SimpleNamespace(samples_per_task=1),
+        retrieval=object(),
+    )
+    monkeypatch.setattr(
+        merged_collect_step, "load_train_config", lambda *_args, **_kwargs: config
+    )
+    monkeypatch.setattr(merged_collect_step, "parse_cli_overrides", lambda overrides: list(overrides))
+    monkeypatch.setattr(
+        merged_collect_step, "checkpoint_id_from_path", lambda _path: "iteration-00000"
+    )
+    monkeypatch.setattr(merged_collect_step, "load_query_examples", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        merged_collect_step, "split_train_eval_examples", lambda *_args, **_kwargs: ([], [])
+    )
+    monkeypatch.setattr(
+        merged_collect_step,
+        "resolved_rollout_sampling_profile",
+        lambda _config, *, split: {"extra_sampling_params": {}},
+    )
+    monkeypatch.setattr(merged_collect_step, "sampling_profile_id", lambda _profile: "profile")
+    monkeypatch.setattr(
+        merged_collect_step, "_build_rollout_generator", lambda *_args, **_kwargs: fake_generator
+    )
+
+    def collect_split(**kwargs):
+        if collect_raises is not None:
+            raise collect_raises
+        events.append("collect")
+
+    monkeypatch.setattr(merged_collect_step, "_collect_split", collect_split)
+
+    def terminate(generator):
+        assert generator is fake_generator
+        events.append("terminate")
+
+    monkeypatch.setattr(merged_collect_step, "_terminate_collection_child", terminate)
+
+    def fake_os_exit(code):
+        exit_codes.append(code)
+        events.append("os_exit")
+        # os._exit is terminal; model that so control never reaches the
+        # code after the exit call.
+        raise _FakeExitError(code)
+
+    monkeypatch.setattr(os, "_exit", fake_os_exit)
+    monkeypatch.setitem(
+        sys.modules,
+        "self_summarization_agent.bcplus_backend",
+        SimpleNamespace(build_backend=lambda *_args, **_kwargs: object()),
+    )
+    return events, exit_codes
+
+
+def _run_worker(tmp_path: Path) -> None:
+    merged_collect_step._run_split_collection_worker(
+        config_path="config.yaml",
+        overrides=[],
+        checkpoint_path=str(tmp_path / "iteration-00000"),
+        split="train",
+        raw_output_path=str(tmp_path / "train.raw.jsonl"),
+        sample_seed=1,
+        resume=False,
+        retrieval_worker_url=None,
+    )
+
+
+def test_split_collection_worker_exits_via_terminate_and_os_exit(
+    monkeypatch, tmp_path
+) -> None:
+    events, exit_codes = _stub_worker_dependencies(monkeypatch, tmp_path)
+
+    with pytest.raises(_FakeExitError) as excinfo:
+        _run_worker(tmp_path)
+
+    assert excinfo.value.code == 0
+    assert events == ["collect", "terminate", "os_exit"]
+    assert exit_codes == [0]
+
+
+def test_split_collection_worker_failure_exits_after_terminate(
+    monkeypatch, tmp_path
+) -> None:
+    events, exit_codes = _stub_worker_dependencies(
+        monkeypatch, tmp_path, collect_raises=ValueError("boom")
+    )
+
+    with pytest.raises(_FakeExitError) as excinfo:
+        _run_worker(tmp_path)
+
+    assert excinfo.value.code == 1
+    assert events == ["terminate", "os_exit"]
+    assert exit_codes == [1]
+
+
+def test_terminate_collection_child_kills_engine_process_tree(monkeypatch) -> None:
+    calls: list[tuple[int, bool]] = []
+
+    def fake_kill(parent_pid, include_parent=True, skip_pid=None):
+        calls.append((parent_pid, include_parent))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.utils.common",
+        SimpleNamespace(kill_process_tree=fake_kill),
+    )
+    merged_collect_step._terminate_collection_child(object())
+    assert calls == [(os.getpid(), False)]
+
+
+def test_terminate_collection_child_noop_without_sglang(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "sglang.srt.utils.common", None)
+    merged_collect_step._terminate_collection_child(None)

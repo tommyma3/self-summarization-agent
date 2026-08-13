@@ -1,0 +1,15 @@
+--- a/verl/models/transformers/monkey_patch.py
++++ b/verl/models/transformers/monkey_patch.py
+@@ -138,7 +138,11 @@
+
+         # (bsz, seq_len/n) -> (bsz, seq_len)
+         position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
+-        torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
++        if position_ids.dim() == 3:
++            position_ids = position_ids[0]  # mrope (t,h,w,bsz,seq) -> (bsz,seq); FA2 needs 2-D ids
++        torch.distributed.all_gather(
++            position_ids_list, position_ids.contiguous(), group=get_ulysses_sequence_parallel_group()
++        )
+         position_ids = torch.concat(position_ids_list, dim=-1)
+
+     # (bsz, seq_len, n_head/n, head_dim)

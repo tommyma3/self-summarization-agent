@@ -98,7 +98,7 @@ echo "Latest root: ${LATEST_ROOT}"
 echo "Target iteration: ${TARGET_ITERATIONS}"
 echo "Log file: ${LOG_FILE}"
 
-CURRENT_ITERATION=0
+CURRENT_ITERATION=3
 
 if ((CURRENT_ITERATION >= TARGET_ITERATIONS)); then
     echo "Target already reached: current iteration ${CURRENT_ITERATION}."

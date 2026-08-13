@@ -491,6 +491,33 @@ def _collect_split(
     )
 
 
+def _terminate_collection_child(generator: Any | None) -> None:
+    """SIGKILL the offline policy engine's subprocess tree from the child.
+
+    sglang's Engine spawns scheduler, tensor-parallel, and detokenizer
+    subprocesses and registers an atexit shutdown hook, but the collection
+    child then hangs in Python interpreter teardown (zmq context teardown,
+    mp finalizers, GC) after a completed split.  Every rollout row is
+    already persisted by append_jsonl before the completion event, so the
+    parent only needs exit code 0 and the GPUs released; bypassing
+    interpreter teardown with os._exit is therefore safe.
+
+    This is the same bounded psutil operation sglang's Engine.shutdown()
+    performs.  It is invoked directly rather than via engine.shutdown() to
+    avoid any watchdog or zmq involvement in the teardown path.  It is a
+    no-op for backends without subprocesses (transformers,
+    openai_compatible, vllm offline).
+    """
+    try:
+        from sglang.srt.utils.common import kill_process_tree
+    except ImportError:
+        return
+    try:
+        kill_process_tree(os.getpid(), include_parent=False)
+    except Exception:
+        pass
+
+
 def _run_split_collection_worker(
     *,
     config_path: str,
@@ -523,29 +550,40 @@ def _run_split_collection_worker(
     profile_id = sampling_profile_id(sampling_profile)
     group_size = config.evaluation.samples_per_task if split == "eval" else config.training.group_size
 
-    from self_summarization_agent.bcplus_backend import build_backend
+    generator = None
+    try:
+        from self_summarization_agent.bcplus_backend import build_backend
 
-    backend = build_backend(
-        config.experiment.bc_plus_root,
-        config.retrieval,
-        worker_url=retrieval_worker_url,
-    )
-    generator = _build_rollout_generator(config, checkpoint, split=split)
-    _collect_split(
-        config=config,
-        checkpoint_id=checkpoint_id,
-        checkpoint_path=checkpoint,
-        generator=generator,
-        backend=backend,
-        split=split,
-        examples=split_examples,
-        raw_output_path=Path(raw_output_path),
-        sampling_profile=sampling_profile,
-        profile_id=profile_id,
-        group_size=group_size,
-        sample_seed=sample_seed,
-        resume=resume,
-    )
+        backend = build_backend(
+            config.experiment.bc_plus_root,
+            config.retrieval,
+            worker_url=retrieval_worker_url,
+        )
+        generator = _build_rollout_generator(config, checkpoint, split=split)
+        _collect_split(
+            config=config,
+            checkpoint_id=checkpoint_id,
+            checkpoint_path=checkpoint,
+            generator=generator,
+            backend=backend,
+            split=split,
+            examples=split_examples,
+            raw_output_path=Path(raw_output_path),
+            sampling_profile=sampling_profile,
+            profile_id=profile_id,
+            group_size=group_size,
+            sample_seed=sample_seed,
+            resume=resume,
+        )
+    except BaseException:
+        # All rows are persisted per-row, so a failure needs no further
+        # policy-engine work; release GPUs and exit without interpreter
+        # teardown so the parent's join() returns promptly.
+        traceback.print_exc()
+        _terminate_collection_child(generator)
+        os._exit(1)
+    _terminate_collection_child(generator)
+    os._exit(0)
 
 
 def _run_split_collection_process(
@@ -604,6 +642,9 @@ def _run_split_collection_process(
         if process.is_alive():
             process.terminate()
             process.join(timeout=30)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
         raise
     if process.exitcode != 0:
         raise RuntimeError(
