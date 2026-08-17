@@ -250,7 +250,7 @@ def test_load_no_compact_32k_training_preset() -> None:
 
     # Rollout: long-context vLLM, conservative concurrency.
     assert config.rollout.max_model_len == 49_152
-    assert config.rollout.max_concurrent_episodes == 8
+    assert config.rollout.max_concurrent_episodes == 10
     assert config.rollout.overlap_queue_max_batches is not None
     # API compatibility fields — needed when backend is switched to openai_compatible.
     assert config.rollout.api_base_url is not None
@@ -282,3 +282,49 @@ def test_load_no_compact_32k_training_preset() -> None:
     assert config.judge.max_model_len == 18_000
     assert config.judge.max_new_tokens == 12_000
     assert config.judge.batch_size is not None
+
+
+def test_load_compact_6k_training_preset() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "compact_6k.yaml"
+
+    config = load_train_config(config_path)
+
+    assert config.experiment.name == "qwen-bcplus-compact-6k-train"
+    assert config.runtime.context_threshold_tokens == 6_000
+    assert config.runtime.max_context_tokens == 24_000
+    assert config.rollout.max_model_len == 32_768
+    assert config.rollout.max_concurrent_episodes == 50
+    assert config.training.max_sequence_length == 32_768
+    assert config.training.gradient_accumulation_microbatch_size == 2
+    assert config.training.verl.fsdp.ulysses_sequence_parallel_size == 4
+    assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 8_192
+    assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 8_192
+    assert config.rollout.max_model_len >= config.runtime.max_context_tokens + config.rollout.max_new_tokens
+    assert (
+        config.training.verl.fsdp.ppo_max_token_len_per_gpu
+        * config.training.verl.fsdp.ulysses_sequence_parallel_size
+        >= config.training.max_sequence_length
+    )
+
+
+def test_load_compact_24k_training_preset() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "compact_24k.yaml"
+
+    config = load_train_config(config_path)
+
+    assert config.experiment.name == "qwen-bcplus-compact-24k-train"
+    assert config.runtime.context_threshold_tokens == 24_000
+    assert config.runtime.max_context_tokens == 40_960
+    assert config.rollout.max_model_len == 49_152
+    assert config.rollout.max_concurrent_episodes == 10
+    assert config.training.max_sequence_length == 49_152
+    assert config.training.gradient_accumulation_microbatch_size == 1
+    assert config.training.verl.fsdp.ulysses_sequence_parallel_size == 4
+    assert config.training.verl.fsdp.ppo_max_token_len_per_gpu == 12_288
+    assert config.training.verl.fsdp.log_prob_max_token_len_per_gpu == 12_288
+    assert config.rollout.max_model_len >= config.runtime.max_context_tokens + config.rollout.max_new_tokens
+    assert (
+        config.training.verl.fsdp.ppo_max_token_len_per_gpu
+        * config.training.verl.fsdp.ulysses_sequence_parallel_size
+        >= config.training.max_sequence_length
+    )
