@@ -380,6 +380,31 @@ class EpisodeRuntime:
             )
         return ConversationPrompt(messages, generation_kind="forced_answer")
 
+    def _terminate_on_context_overflow(self, active: _ActiveEpisode, prompt: ConversationPrompt) -> bool:
+        """Penalize and finish an episode whose next prompt exceeds the safe context limit.
+
+        Tool results are appended to the episode state after the round-level
+        budget checks, so a large retrieval payload can push the following
+        round's prompt past the safe limit before the generated-token budget
+        trips.  Letting ContextManager.assert_fits raise here would abort the
+        whole collection process; terminate just this episode instead.
+        Returns True when the episode was terminated rather than queued for
+        generation.
+        """
+        try:
+            active.context_manager.assert_fits(prompt)
+        except ValueError as exc:
+            LOGGER.warning("Terminating episode %s: %s", active.state.query_id, exc)
+            self._finalize_trajectory(
+                active,
+                list(active.state.messages),
+                termination_kind="context_overflow",
+                prompt=prompt,
+            )
+            active.result = self._penalized_result(active, status="context_length_exceeded")
+            return True
+        return False
+
     def _next_tool_turn_id(self, state: EpisodeState) -> str:
         return f"tool-{state.tool_turn_count + 1}"
 
@@ -1154,12 +1179,14 @@ class EpisodeRuntime:
             if forced_reasons:
                 active.token_usage.forced_answer_reasons.extend(forced_reasons)
                 acting_prompt = self._build_forced_answer_prompt(active)
-                active.context_manager.assert_fits(acting_prompt)
+                if self._terminate_on_context_overflow(active, acting_prompt):
+                    continue
                 prompt_tokens = self._prompt_token_count(active, acting_prompt)
                 action_items.append((active, acting_prompt, prompt_tokens, True))
                 continue
             acting_prompt = self._build_runtime_prompt(active.state)
-            active.context_manager.assert_fits(acting_prompt)
+            if self._terminate_on_context_overflow(active, acting_prompt):
+                continue
             prompt_tokens = self._prompt_token_count(active, acting_prompt)
             action_items.append((active, acting_prompt, prompt_tokens, False))
 

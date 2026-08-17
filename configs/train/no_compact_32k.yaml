@@ -51,9 +51,9 @@ rollout:
   tensor_parallel_size: 2
   attention_backend:
   max_model_len: 49152
-  enable_prefix_caching: false
+  enable_prefix_caching: true
   # Limit KV-cache residency on the two rollout GPUs for long-context episodes.
-  max_concurrent_episodes: 50
+  max_concurrent_episodes: 10
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: false
   overlap_queue_max_batches: 20

@@ -359,6 +359,49 @@ def test_runtime_stops_on_malformed_tool_call() -> None:
     assert result.turn_rewards == {"trajectory-1": -1.0}
 
 
+def test_runtime_terminates_episode_when_tool_result_overflows_context() -> None:
+    # A large tool result is appended after the round-level budget checks, so
+    # the following round's prompt can exceed the safe context limit.  The
+    # episode must be penalized instead of raising out of collection.
+    get_document = tool_output('{"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}')
+    backend = FakeBackend(search_index={}, documents={"doc-1": "word " * 1200})
+    model = ScriptedModel(outputs=[get_document])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=10**9,
+        max_context_tokens=1024,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "context_length_exceeded"
+    assert result.final_answer is None
+    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.trajectory_records[0]["termination_kind"] == "context_overflow"
+
+
+def test_runtime_terminates_episode_when_forced_answer_prompt_overflows_context() -> None:
+    # The generated-token budget trips only after a large tool result is
+    # appended, so the forced-answer prompt itself can exceed the safe limit.
+    get_document = tool_output('{"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}')
+    backend = FakeBackend(search_index={}, documents={"doc-1": "word " * 1200})
+    model = ScriptedModel(outputs=[get_document])
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=backend,
+        context_threshold_tokens=10**9,
+        max_context_tokens=1024,
+        generated_token_budget=500,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "context_length_exceeded"
+    assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
+    assert result.turn_rewards == {"trajectory-1": -1.0}
+
+
 def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
     first_search = tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')
     overlong_summary = "<think>compact</think>\n<summary>one two three</summary>"
@@ -1085,7 +1128,7 @@ def test_serialize_runtime_result_includes_token_usage() -> None:
     ]
 
 
-def test_runtime_raises_when_acting_prompt_exceeds_fit_limit() -> None:
+def test_runtime_terminates_episode_when_acting_prompt_exceeds_fit_limit() -> None:
     backend = FakeBackend(search_index={}, documents={})
     model = ScriptedModel(outputs=[tool_output('{"tool_name": "finish", "arguments": {"answer": "done"}}')])
     runtime = EpisodeRuntime(
@@ -1096,12 +1139,12 @@ def test_runtime_raises_when_acting_prompt_exceeds_fit_limit() -> None:
         token_counter=lambda text: len(text.split()),
     )
 
-    try:
-        runtime.run(query_id="q1", user_prompt="question with too many words")
-    except ValueError as exc:
-        assert "Packed prompt exceeds safe limit" in str(exc)
-    else:
-        raise AssertionError("Expected ValueError for oversized acting prompt")
+    result = runtime.run(query_id="q1", user_prompt="question with too many words")
+
+    assert result.status == "context_length_exceeded"
+    assert result.final_answer is None
+    assert result.turn_rewards == {}
+    assert result.trajectory_records == []
 
 
 def test_cli_smoke_helper_returns_run_record() -> None:

@@ -525,27 +525,49 @@ def _run_split_collection_worker(
 
     from self_summarization_agent.bcplus_backend import build_backend
 
-    backend = build_backend(
-        config.experiment.bc_plus_root,
-        config.retrieval,
-        worker_url=retrieval_worker_url,
-    )
-    generator = _build_rollout_generator(config, checkpoint, split=split)
-    _collect_split(
-        config=config,
-        checkpoint_id=checkpoint_id,
-        checkpoint_path=checkpoint,
-        generator=generator,
-        backend=backend,
-        split=split,
-        examples=split_examples,
-        raw_output_path=Path(raw_output_path),
-        sampling_profile=sampling_profile,
-        profile_id=profile_id,
-        group_size=group_size,
-        sample_seed=sample_seed,
-        resume=resume,
-    )
+    generator = None
+    try:
+        backend = build_backend(
+            config.experiment.bc_plus_root,
+            config.retrieval,
+            worker_url=retrieval_worker_url,
+        )
+        generator = _build_rollout_generator(config, checkpoint, split=split)
+        _collect_split(
+            config=config,
+            checkpoint_id=checkpoint_id,
+            checkpoint_path=checkpoint,
+            generator=generator,
+            backend=backend,
+            split=split,
+            examples=split_examples,
+            raw_output_path=Path(raw_output_path),
+            sampling_profile=sampling_profile,
+            profile_id=profile_id,
+            group_size=group_size,
+            sample_seed=sample_seed,
+            resume=resume,
+        )
+    except BaseException:
+        # multiprocessing's _bootstrap runs util._exit_function() — which joins
+        # child processes with no timeout — BEFORE its exception handler prints
+        # the traceback.  With the policy engine child still alive, that join
+        # blocks forever and the real error is never logged.  Log first, then
+        # stop the engine via vLLM's bounded shutdown, then hard-exit.
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        engine_core_client = getattr(
+            getattr(getattr(generator, "llm", None), "llm_engine", None),
+            "engine_core",
+            None,
+        )
+        if engine_core_client is not None:
+            try:
+                engine_core_client.shutdown()
+            except Exception:
+                pass
+        os._exit(1)
 
 
 def _run_split_collection_process(

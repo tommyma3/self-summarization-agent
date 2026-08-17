@@ -5,7 +5,12 @@ from typing import Literal
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted"]
 TRAINABLE_TURN_KINDS = {"trajectory"}
 PENALIZED_RUNTIME_STATUSES = frozenset(
-    {"malformed_tool_call", "empty_summary", "summary_length_exceeded"}
+    {
+        "malformed_tool_call",
+        "empty_summary",
+        "summary_length_exceeded",
+        "context_length_exceeded",
+    }
 )
 
 
