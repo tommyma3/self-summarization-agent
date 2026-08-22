@@ -227,6 +227,7 @@ class TrainingConfig:
     checkpoint_interval: int = 100
     eval_interval: int = 0
     max_grad_norm: float = 1.0
+    train_compaction_tokens: bool = True
     verl: VerlRayConfig = field(default_factory=VerlRayConfig)
 
 

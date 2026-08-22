@@ -14,6 +14,7 @@ from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
+    apply_training_loss_mask,
     build_rollout_native_training_cache,
     extract_trainable_samples,
     is_training_cache_current,
@@ -79,7 +80,11 @@ def _validate_cached_row(row: dict[str, Any], *, index: int, expected_checkpoint
         )
 
 
-def _row_has_current_training_cache(row: dict[str, Any]) -> bool:
+def _row_has_current_training_cache(
+    row: dict[str, Any],
+    *,
+    train_compaction_tokens: bool = True,
+) -> bool:
     if row.get("trainable_sample_count") == 0:
         return True
     rewards = row.get("turn_rewards")
@@ -94,7 +99,10 @@ def _row_has_current_training_cache(row: dict[str, Any]) -> bool:
         for record in trajectory_records
         if isinstance(record, dict)
         and isinstance(record.get("turn_id"), str)
-        and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+        and is_training_cache_current(
+            record.get(TOKEN_CACHE_FIELD),
+            train_compaction_tokens=train_compaction_tokens,
+        )
     }
     if not rewarded_ids <= current_cache_ids:
         return False
@@ -110,7 +118,10 @@ def _row_has_current_training_cache(row: dict[str, Any]) -> bool:
         if isinstance(record, dict)
         and isinstance(record.get("turn_id"), str)
         and record.get("turn_id") in sample_turn_ids
-        and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+        and is_training_cache_current(
+            record.get(TOKEN_CACHE_FIELD),
+            train_compaction_tokens=train_compaction_tokens,
+        )
     }
     return sample_turn_ids <= cached_turn_ids
 
@@ -119,6 +130,7 @@ def _materialize_rollout_native_training_caches(
     row: dict[str, Any],
     *,
     checkpoint_id: str,
+    train_compaction_tokens: bool = True,
 ) -> dict[str, Any]:
     """Copy a row, build valid rollout-native caches, and bind the checkpoint."""
 
@@ -127,9 +139,23 @@ def _materialize_rollout_native_training_caches(
     for record in row.get("trajectory_records", []):
         cached_record = dict(record)
         cache = record.get(TOKEN_CACHE_FIELD) if isinstance(record, dict) else None
-        if not is_training_cache_current(cache) and isinstance(record, dict):
+        if not is_training_cache_current(
+            cache,
+            train_compaction_tokens=train_compaction_tokens,
+        ) and isinstance(record, dict):
             cache = build_rollout_native_training_cache(record.get("collection_tokens"))
-        if is_training_cache_current(cache):
+            if cache is not None:
+                cache = apply_training_loss_mask(
+                    record,
+                    cache,
+                    train_compaction_tokens=train_compaction_tokens,
+                )
+            if cache is None:
+                cached_record.pop(TOKEN_CACHE_FIELD, None)
+        if is_training_cache_current(
+            cache,
+            train_compaction_tokens=train_compaction_tokens,
+        ):
             cached_record[TOKEN_CACHE_FIELD] = {
                 **cache,
                 "policy_checkpoint_id": checkpoint_id,
@@ -139,7 +165,12 @@ def _materialize_rollout_native_training_caches(
     return cached_row
 
 
-def _completed_cached_rows(path: Path, *, expected_checkpoint_id: str) -> dict[tuple[str, int], dict[str, Any]]:
+def _completed_cached_rows(
+    path: Path,
+    *,
+    expected_checkpoint_id: str,
+    train_compaction_tokens: bool = True,
+) -> dict[tuple[str, int], dict[str, Any]]:
     if not path.exists():
         return {}
     rows = _load_rollout_rows(path)
@@ -149,7 +180,10 @@ def _completed_cached_rows(path: Path, *, expected_checkpoint_id: str) -> dict[t
         key = _rollout_key(row, index=index)
         if key in completed:
             raise ValueError(f"Cached rollout row {index} duplicates rollout key {key!r}")
-        if _row_has_current_training_cache(row):
+        if _row_has_current_training_cache(
+            row,
+            train_compaction_tokens=train_compaction_tokens,
+        ):
             _validate_cached_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
             completed[key] = row
     return completed
@@ -167,6 +201,7 @@ def _attach_training_caches(
     *,
     cache_payloads: list[dict[str, Any]],
     checkpoint_id: str,
+    train_compaction_tokens: bool = True,
 ) -> dict[str, Any]:
     row_samples = extract_trainable_samples(
         row["trajectory_records"],
@@ -177,10 +212,23 @@ def _attach_training_caches(
         raise ValueError(
             f"Scorer returned {len(cache_payloads)} cache payloads for {len(row_samples)} trainable samples"
         )
-    payload_by_turn_id = {
-        sample.turn_id: {**payload, "policy_checkpoint_id": checkpoint_id}
-        for sample, payload in zip(row_samples, cache_payloads)
+    record_by_turn_id = {
+        record.get("turn_id"): record
+        for record in row["trajectory_records"]
+        if isinstance(record, dict) and isinstance(record.get("turn_id"), str)
     }
+    payload_by_turn_id = {}
+    for sample, payload in zip(row_samples, cache_payloads):
+        record = record_by_turn_id[sample.turn_id]
+        masked_payload = apply_training_loss_mask(
+            record,
+            payload,
+            train_compaction_tokens=train_compaction_tokens,
+        )
+        payload_by_turn_id[sample.turn_id] = {
+            **masked_payload,
+            "policy_checkpoint_id": checkpoint_id,
+        }
     cached_row = dict(row)
     cached_records: list[dict[str, Any]] = []
     for record in row["trajectory_records"]:
@@ -264,7 +312,11 @@ def run_cache_step(
     ensure_dir(output.parent)
     completed_keys: set[tuple[str, int]] = set()
     if resume:
-        completed_rows = _completed_cached_rows(output, expected_checkpoint_id=checkpoint_id)
+        completed_rows = _completed_cached_rows(
+            output,
+            expected_checkpoint_id=checkpoint_id,
+            train_compaction_tokens=config.training.train_compaction_tokens,
+        )
         completed_keys = set(completed_rows)
         expected_keys = {_rollout_key(row, index=index) for index, row in enumerate(rows, start=1)}
         unexpected_keys = sorted(completed_keys - expected_keys)
@@ -292,8 +344,12 @@ def run_cache_step(
         cache_candidate = _materialize_rollout_native_training_caches(
             row,
             checkpoint_id=checkpoint_id,
+            train_compaction_tokens=config.training.train_compaction_tokens,
         )
-        if _row_has_current_training_cache(cache_candidate):
+        if _row_has_current_training_cache(
+            cache_candidate,
+            train_compaction_tokens=config.training.train_compaction_tokens,
+        ):
             if _is_main_process(active_scorer):
                 append_jsonl(output, cache_candidate)
             continue
@@ -311,6 +367,7 @@ def run_cache_step(
             cache_candidate,
             cache_payloads=cache_payloads,
             checkpoint_id=checkpoint_id,
+            train_compaction_tokens=config.training.train_compaction_tokens,
         )
         if _is_main_process(active_scorer):
             append_jsonl(output, cached_row)

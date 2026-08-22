@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
-from self_summarization_agent.cache_step import build_cache_scorer, run_cache_step
+from self_summarization_agent.cache_step import (
+    _attach_training_caches,
+    build_cache_scorer,
+    run_cache_step,
+)
+from self_summarization_agent.trajectory import is_training_cache_current
 from self_summarization_agent.config import (
     DatasetConfig,
     ExperimentConfig,
@@ -100,6 +105,91 @@ def judged_row(query_id: str, rollout_index: int, checkpoint_id: str = "step-000
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def summary_interval_row(query_id: str = "q1") -> dict:
+    row = judged_row(query_id, 0)
+    row["summary_turns"] = ["summary-1"]
+    record = row["trajectory_records"][0]
+    record["termination_kind"] = "compaction"
+    record["turn_ids"] = ["tool-1", "summary-1"]
+    record["collection_tokens"] = {
+        "version": 2,
+        "full_token_ids": [10, 11, 20, 21],
+        "assistant_token_mask": [False, True, False, True],
+        "generations": [
+            {
+                "prompt_token_ids": [10],
+                "completion_token_ids": [11],
+                "full_token_ids": [10, 11],
+                "completion_token_logprobs": [-0.1],
+                "logprobs_mode": "raw_logprobs",
+            },
+            {
+                "prompt_token_ids": [10, 11, 20],
+                "completion_token_ids": [21],
+                "full_token_ids": [10, 11, 20, 21],
+                "completion_token_logprobs": [-0.3],
+                "logprobs_mode": "raw_logprobs",
+            },
+        ],
+    }
+    return row
+
+
+def test_native_cache_masks_only_compaction_generation_for_ablation(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    judged_path = tmp_path / "judged.jsonl"
+    output_path = tmp_path / "cached.jsonl"
+    write_jsonl(judged_path, [summary_interval_row()])
+    config = train_config(tmp_path)
+    config.training.train_compaction_tokens = False
+
+    run_cache_step(
+        config,
+        checkpoint_path=checkpoint,
+        rollout_path=judged_path,
+        output_path=output_path,
+        scorer=FakeScorer(),
+    )
+
+    cache = json.loads(output_path.read_text(encoding="utf-8"))["trajectory_records"][0][
+        "training_cache"
+    ]
+    assert cache["input_ids"] == [10, 11, 20]
+    assert cache["labels"] == [11, 20, 21]
+    assert cache["completion_mask"] == [True, False, False]
+    assert cache["reference_logprobs"] == [-0.1, 0.0, -0.3]
+    assert cache["reference_logprob"] == -0.1
+    assert cache["loss_mask_policy"] == "tool_calls_only"
+    assert is_training_cache_current(cache, train_compaction_tokens=False)
+    assert not is_training_cache_current(cache, train_compaction_tokens=True)
+
+
+def test_fallback_cache_uses_same_compaction_mask() -> None:
+    row = summary_interval_row()
+    payload = {
+        "version": 5,
+        "input_ids": [10, 11, 20],
+        "labels": [11, 20, 21],
+        "completion_mask": [True, False, True],
+        "reference_logprob": -0.2,
+        "reference_logprobs": [-0.1, 0.0, -0.3],
+        "reference_logprob_source": "policy_rescore",
+    }
+
+    cached = _attach_training_caches(
+        row,
+        cache_payloads=[payload],
+        checkpoint_id="step-00001",
+        train_compaction_tokens=False,
+    )
+
+    cache = cached["trajectory_records"][0]["training_cache"]
+    assert cache["completion_mask"] == [True, False, False]
+    assert cache["reference_logprob"] == -0.1
+    assert cache["loss_mask_policy"] == "tool_calls_only"
 
 
 def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> None:

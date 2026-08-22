@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from self_summarization_agent.config import (
+    config_to_dict,
     load_run_config,
     load_train_config,
     resolved_rollout_sampling_profile,
@@ -328,3 +329,20 @@ def test_load_compact_24k_training_preset() -> None:
         * config.training.verl.fsdp.ulysses_sequence_parallel_size
         >= config.training.max_sequence_length
     )
+
+
+def test_no_compaction_loss_preset_only_changes_ablation_identity_and_mask() -> None:
+    config_root = Path(__file__).resolve().parents[1] / "configs" / "train"
+    default = config_to_dict(load_train_config(config_root / "default.yaml"))
+    ablation = config_to_dict(load_train_config(config_root / "no_compaction_loss.yaml"))
+
+    assert default["training"]["train_compaction_tokens"] is True
+    assert ablation["training"]["train_compaction_tokens"] is False
+    assert ablation["experiment"]["name"] == "qwen-bcplus-no-compaction-loss"
+    assert ablation["experiment"]["output_root"].endswith("/ablations/no-compaction-loss/")
+
+    for config in (default, ablation):
+        config["experiment"].pop("name")
+        config["experiment"].pop("output_root")
+        config["training"].pop("train_compaction_tokens")
+    assert ablation == default

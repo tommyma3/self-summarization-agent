@@ -12,6 +12,8 @@ COLLECTION_TOKEN_VERSION = 2
 LEGACY_COLLECTION_TOKEN_VERSION = 1
 REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE = "policy_rescore"
 REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT = "vllm_raw_rollout"
+LOSS_MASK_POLICY_ALL_ASSISTANT = "all_assistant"
+LOSS_MASK_POLICY_TOOL_CALLS_ONLY = "tool_calls_only"
 _REFERENCE_LOGPROB_SOURCES = {
     REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
     REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
@@ -93,10 +95,26 @@ def _validate_float_list(value: Any, *, field_name: str, turn_id: str) -> list[f
     return output
 
 
-def is_training_cache_current(cache: object) -> bool:
+def loss_mask_policy(*, train_compaction_tokens: bool) -> str:
+    return (
+        LOSS_MASK_POLICY_ALL_ASSISTANT
+        if train_compaction_tokens
+        else LOSS_MASK_POLICY_TOOL_CALLS_ONLY
+    )
+
+
+def is_training_cache_current(
+    cache: object,
+    *,
+    train_compaction_tokens: bool = True,
+) -> bool:
     if not isinstance(cache, Mapping):
         return False
     source = cache.get("reference_logprob_source")
+    cached_loss_mask_policy = cache.get(
+        "loss_mask_policy",
+        LOSS_MASK_POLICY_ALL_ASSISTANT,
+    )
     return (
         cache.get("version") == TOKEN_CACHE_VERSION
         and "reference_logprobs" in cache
@@ -105,7 +123,100 @@ def is_training_cache_current(cache: object) -> bool:
             source != REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
             or cache.get("logprobs_mode") == "raw_logprobs"
         )
+        and cached_loss_mask_policy
+        == loss_mask_policy(train_compaction_tokens=train_compaction_tokens)
     )
+
+
+def _record_ends_with_summary_generation(record: Mapping[str, object]) -> bool:
+    turn_ids = record.get("turn_ids")
+    return (
+        isinstance(turn_ids, list)
+        and bool(turn_ids)
+        and isinstance(turn_ids[-1], str)
+        and turn_ids[-1].startswith("summary-")
+    )
+
+
+def apply_training_loss_mask(
+    record: Mapping[str, object],
+    cache: Mapping[str, object],
+    *,
+    train_compaction_tokens: bool,
+) -> dict[str, Any]:
+    """Apply the configured gradient mask without changing collected tokens."""
+
+    updated = deepcopy(dict(cache))
+    policy = loss_mask_policy(train_compaction_tokens=train_compaction_tokens)
+    updated["loss_mask_policy"] = policy
+    if train_compaction_tokens or not _record_ends_with_summary_generation(record):
+        return updated
+
+    collection_tokens = record.get("collection_tokens")
+    if not isinstance(collection_tokens, Mapping):
+        raise ValueError(
+            f"Trajectory {record.get('turn_id')} cannot mask compaction tokens without "
+            "authoritative collection tokens"
+        )
+    generations = collection_tokens.get("generations")
+    if not isinstance(generations, list) or not generations:
+        raise ValueError(
+            f"Trajectory {record.get('turn_id')} cannot identify its summary generation"
+        )
+    final_generation = generations[-1]
+    if not isinstance(final_generation, Mapping):
+        raise ValueError(
+            f"Trajectory {record.get('turn_id')} has an invalid final generation"
+        )
+    prompt_ids = final_generation.get("prompt_token_ids")
+    completion_ids = final_generation.get("completion_token_ids")
+    full_token_ids = collection_tokens.get("full_token_ids")
+    if (
+        not isinstance(prompt_ids, list)
+        or not isinstance(completion_ids, list)
+        or not completion_ids
+        or not isinstance(full_token_ids, list)
+        or prompt_ids + completion_ids != full_token_ids
+    ):
+        raise ValueError(
+            f"Trajectory {record.get('turn_id')} summary generation is not the exact final prefix"
+        )
+
+    raw_mask = updated.get("completion_mask")
+    raw_reference_logprobs = updated.get("reference_logprobs")
+    if (
+        not isinstance(raw_mask, list)
+        or not isinstance(raw_reference_logprobs, list)
+        or len(raw_mask) != len(full_token_ids) - 1
+        or len(raw_reference_logprobs) != len(raw_mask)
+    ):
+        raise ValueError(
+            f"Trajectory {record.get('turn_id')} cache does not align with exact collection tokens"
+        )
+
+    completion_mask = [bool(value) for value in raw_mask]
+    summary_start = len(prompt_ids)
+    for full_position in range(summary_start, len(full_token_ids)):
+        if full_position <= 0 or not completion_mask[full_position - 1]:
+            raise ValueError(
+                f"Trajectory {record.get('turn_id')} summary tokens are not fully trainable "
+                "in the source mask"
+            )
+        completion_mask[full_position - 1] = False
+    if not any(completion_mask):
+        raise ValueError(
+            f"Trajectory {record.get('turn_id')} has no trainable tool-call tokens after "
+            "masking compaction"
+        )
+
+    selected_logprobs = [
+        float(logprob)
+        for logprob, is_trainable in zip(raw_reference_logprobs, completion_mask)
+        if is_trainable
+    ]
+    updated["completion_mask"] = completion_mask
+    updated["reference_logprob"] = sum(selected_logprobs) / len(selected_logprobs)
+    return updated
 
 
 def _extract_training_cache(

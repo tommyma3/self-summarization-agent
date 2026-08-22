@@ -130,6 +130,7 @@ def _run_cache_overlap_worker(
                     row,
                     cache_payloads=cache_payloads,
                     checkpoint_id=expected_checkpoint_id,
+                    train_compaction_tokens=config.training.train_compaction_tokens,
                 )
                 cached_rows.append(cached_row)
             response_queue.put({"batch_id": batch_id, "rows": cached_rows})
@@ -471,6 +472,7 @@ def _collect_split(
                     row = _materialize_rollout_native_training_caches(
                         row,
                         checkpoint_id=checkpoint_id,
+                        train_compaction_tokens=config.training.train_compaction_tokens,
                     )
                 append_jsonl(raw_output_path, row)
                 generated_row_count += 1
@@ -1055,7 +1057,11 @@ def _run_cache_inline(
     ensure_dir(cached_output_path.parent)
     completed_keys: set[tuple[str, int]] = set()
     if resume:
-        completed_rows = _completed_cached_rows(cached_output_path, expected_checkpoint_id=checkpoint_id)
+        completed_rows = _completed_cached_rows(
+            cached_output_path,
+            expected_checkpoint_id=checkpoint_id,
+            train_compaction_tokens=config.training.train_compaction_tokens,
+        )
         completed_keys = set(completed_rows)
         # Write back completed rows to preserve resume ordering
         ordered = [
@@ -1091,8 +1097,12 @@ def _run_cache_inline(
         cache_candidate = _materialize_rollout_native_training_caches(
             row,
             checkpoint_id=checkpoint_id,
+            train_compaction_tokens=config.training.train_compaction_tokens,
         )
-        if _row_has_current_training_cache(cache_candidate):
+        if _row_has_current_training_cache(
+            cache_candidate,
+            train_compaction_tokens=config.training.train_compaction_tokens,
+        ):
             append_jsonl(cached_output_path, cache_candidate)
             continue
         fallback_rows.append(cache_candidate)

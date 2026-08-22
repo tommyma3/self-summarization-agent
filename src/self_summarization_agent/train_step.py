@@ -13,7 +13,11 @@ from self_summarization_agent.config import load_train_config, parse_cli_overrid
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
-from self_summarization_agent.trajectory import extract_trainable_samples
+from self_summarization_agent.trajectory import (
+    TOKEN_CACHE_FIELD,
+    extract_trainable_samples,
+    is_training_cache_current,
+)
 
 
 def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -49,7 +53,12 @@ def _average_summary_tokens(rows: list[dict[str, Any]]) -> float:
     return summary_tokens / len(rows) if rows else 0.0
 
 
-def samples_from_rollout_rows(rows: list[dict[str, Any]], *, expected_checkpoint_id: str) -> list[Any]:
+def samples_from_rollout_rows(
+    rows: list[dict[str, Any]],
+    *,
+    expected_checkpoint_id: str,
+    train_compaction_tokens: bool = True,
+) -> list[Any]:
     samples = []
     for index, row in enumerate(rows, start=1):
         checkpoint_id = row.get("policy_checkpoint_id")
@@ -70,6 +79,21 @@ def samples_from_rollout_rows(rows: list[dict[str, Any]], *, expected_checkpoint
             )
         if row.get("trainable_sample_count") == 0:
             continue
+        incompatible_cache_turn_ids = [
+            str(record.get("turn_id"))
+            for record in trajectory_records
+            if isinstance(record, dict)
+            and record.get("turn_id") in turn_rewards
+            and not is_training_cache_current(
+                record.get(TOKEN_CACHE_FIELD),
+                train_compaction_tokens=train_compaction_tokens,
+            )
+        ]
+        if incompatible_cache_turn_ids:
+            raise ValueError(
+                f"Rollout row {index} has caches with the wrong loss-mask policy: "
+                f"{', '.join(incompatible_cache_turn_ids)}"
+            )
         row_samples = extract_trainable_samples(
             trajectory_records,
             turn_rewards,
@@ -96,7 +120,11 @@ def run_train_step(
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
     rows = _load_rollout_rows(rollout_path)
-    samples = samples_from_rollout_rows(rows, expected_checkpoint_id=checkpoint_id)
+    samples = samples_from_rollout_rows(
+        rows,
+        expected_checkpoint_id=checkpoint_id,
+        train_compaction_tokens=config.training.train_compaction_tokens,
+    )
     grouped_samples = group_samples_by_query(samples)
     print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.", flush=True)
 

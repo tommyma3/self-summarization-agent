@@ -358,6 +358,7 @@ def _has_complete_cached_rollouts(
     *,
     checkpoint_id: str,
     expected_count: int | None,
+    train_compaction_tokens: bool = True,
 ) -> bool:
     if not path.exists():
         return False
@@ -395,7 +396,10 @@ def _has_complete_cached_rollouts(
             for record in trajectory_records
             if isinstance(record, dict)
             and isinstance(record.get("turn_id"), str)
-            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+            and is_training_cache_current(
+                record.get(TOKEN_CACHE_FIELD),
+                train_compaction_tokens=train_compaction_tokens,
+            )
         }
         if not rewarded_ids <= current_cache_ids:
             return False
@@ -427,7 +431,10 @@ def _has_complete_cached_rollouts(
             if isinstance(record, dict)
             and isinstance(record.get("turn_id"), str)
             and record.get("turn_id") in trainable_turn_ids
-            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+            and is_training_cache_current(
+                record.get(TOKEN_CACHE_FIELD),
+                train_compaction_tokens=train_compaction_tokens,
+            )
         }
         if not trainable_turn_ids <= current_cache_turn_ids:
             return False
@@ -439,6 +446,7 @@ def _has_inline_cached_rollouts(
     *,
     checkpoint_id: str,
     expected_count: int | None,
+    train_compaction_tokens: bool = True,
 ) -> bool:
     if not path.exists():
         return False
@@ -474,7 +482,10 @@ def _has_inline_cached_rollouts(
             for record in trajectory_records
             if isinstance(record, dict)
             and isinstance(record.get("turn_id"), str)
-            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+            and is_training_cache_current(
+                record.get(TOKEN_CACHE_FIELD),
+                train_compaction_tokens=train_compaction_tokens,
+            )
         }
         if not rewarded_ids <= current_cache_ids:
             return False
@@ -494,7 +505,10 @@ def _has_inline_cached_rollouts(
             if isinstance(record, dict)
             and isinstance(record.get("turn_id"), str)
             and record.get("turn_id") in trainable_turn_ids
-            and is_training_cache_current(record.get(TOKEN_CACHE_FIELD))
+            and is_training_cache_current(
+                record.get(TOKEN_CACHE_FIELD),
+                train_compaction_tokens=train_compaction_tokens,
+            )
         }
         if not trainable_turn_ids <= current_cache_turn_ids:
             return False
@@ -845,6 +859,7 @@ def run_training_iteration(
         cached_rollout_path,
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_train_count,
+        train_compaction_tokens=config.training.train_compaction_tokens,
     )
     # Rollout-native caches survive the sequential judge transform, so a
     # complete judged artifact can still serve as the cached training input.
@@ -853,6 +868,7 @@ def run_training_iteration(
             judged_rollout_path,
             checkpoint_id=current.checkpoint_id,
             expected_count=expected_train_count,
+            train_compaction_tokens=config.training.train_compaction_tokens,
         )
     eval_metrics_complete = config.dataset.eval_limit <= 0 or (
         should_resume
@@ -1007,12 +1023,14 @@ def run_training_iteration(
             judged_rollout_path,
             checkpoint_id=current.checkpoint_id,
             expected_count=expected_train_count,
+            train_compaction_tokens=config.training.train_compaction_tokens,
         )
         train_cached_complete = should_resume and (
             _has_complete_cached_rollouts(
                 cached_rollout_path,
                 checkpoint_id=current.checkpoint_id,
                 expected_count=expected_train_count,
+                train_compaction_tokens=config.training.train_compaction_tokens,
             )
         )
         train_cached_complete = inline_cached_rollouts or train_cached_complete
@@ -1045,6 +1063,7 @@ def run_training_iteration(
         judged_rollout_path,
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_train_count,
+        train_compaction_tokens=config.training.train_compaction_tokens,
     ):
         train_command[train_command.index("--rollouts") + 1] = str(judged_rollout_path)
     checkpoint_complete = should_resume and (
