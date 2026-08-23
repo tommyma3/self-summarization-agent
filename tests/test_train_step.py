@@ -356,3 +356,99 @@ def test_run_train_step_rejects_uncached_judged_rollouts(tmp_path: Path) -> None
         raise AssertionError("Expected uncached judged rollout rows to be rejected")
 
     assert trainer.grouped_samples is None
+
+
+def summary_only_record(record_id: str) -> dict:
+    record = trajectory_record(record_id, termination_kind="compaction", cache=False)
+    record["turn_ids"] = ["summary-1"]
+    record["collection_tokens"] = {
+        "version": 2,
+        "full_token_ids": [10, 11, 21],
+        "assistant_token_mask": [False, False, True],
+        "generations": [
+            {
+                "prompt_token_ids": [10, 11],
+                "completion_token_ids": [21],
+                "full_token_ids": [10, 11, 21],
+                "completion_token_logprobs": [-0.3],
+                "logprobs_mode": "raw_logprobs",
+            },
+        ],
+    }
+    return record
+
+
+def test_run_train_step_skips_summary_only_records_under_tool_calls_only(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    trainable_record = trajectory_record("trajectory-1", termination_kind="final_answer")
+    trainable_record["training_cache"] = {
+        **training_cache(-0.5),
+        "loss_mask_policy": "tool_calls_only",
+    }
+    trajectory_records = [trainable_record, summary_only_record("trajectory-2")]
+    row = {
+        "policy_checkpoint_id": "step-00001",
+        "query_id": "q1",
+        "rollout_index": 0,
+        "trainable_sample_count": len(trajectory_records),
+        "turn_records": [
+            {
+                "query_id": "q1",
+                "turn_id": "final-answer",
+                "kind": "final_answer",
+                "prompt": "prompt",
+                "completion": "completion",
+            }
+        ],
+        "trajectory_records": trajectory_records,
+        "turn_rewards": {record["turn_id"]: 1.0 for record in trajectory_records},
+    }
+    rollout_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    output_checkpoint = tmp_path / "checkpoints" / "step-00002"
+    trainer = FakeTrainer()
+    config = train_config(tmp_path)
+    config.training.train_compaction_tokens = False
+
+    run_train_step(
+        config,
+        checkpoint_path=checkpoint,
+        rollout_path=rollout_path,
+        output_checkpoint_path=output_checkpoint,
+        trainer=trainer,
+    )
+
+    assert [sample.turn_id for sample in trainer.grouped_samples["q1"]] == ["trajectory-1"]
+    assert trainer.saved_checkpoints == [str(output_checkpoint)]
+
+
+def test_run_train_step_all_excluded_rows_produce_empty_update(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    row = {
+        "policy_checkpoint_id": "step-00001",
+        "query_id": "q1",
+        "rollout_index": 0,
+        "trainable_sample_count": 1,
+        "turn_records": [],
+        "trajectory_records": [summary_only_record("trajectory-1")],
+        "turn_rewards": {"trajectory-1": 1.0},
+    }
+    rollout_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    output_checkpoint = tmp_path / "checkpoints" / "step-00002"
+    trainer = FakeTrainer()
+    config = train_config(tmp_path)
+    config.training.train_compaction_tokens = False
+
+    run_train_step(
+        config,
+        checkpoint_path=checkpoint,
+        rollout_path=rollout_path,
+        output_checkpoint_path=output_checkpoint,
+        trainer=trainer,
+    )
+
+    assert trainer.grouped_samples == {}
+    assert trainer.saved_checkpoints == [str(output_checkpoint)]

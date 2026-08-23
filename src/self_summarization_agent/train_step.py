@@ -15,7 +15,7 @@ from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
-    extract_trainable_samples,
+    extract_training_samples,
     is_training_cache_current,
 )
 
@@ -79,11 +79,22 @@ def samples_from_rollout_rows(
             )
         if row.get("trainable_sample_count") == 0:
             continue
+        row_samples = extract_training_samples(
+            trajectory_records,
+            turn_rewards,
+            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+            train_compaction_tokens=train_compaction_tokens,
+        )
+        if not row_samples:
+            # Every record is excluded under this policy; nothing to train.
+            continue
+        sample_turn_ids = {sample.turn_id for sample in row_samples}
         incompatible_cache_turn_ids = [
             str(record.get("turn_id"))
             for record in trajectory_records
             if isinstance(record, dict)
-            and record.get("turn_id") in turn_rewards
+            and record.get(TOKEN_CACHE_FIELD) is not None
+            and record.get("turn_id") in sample_turn_ids
             and not is_training_cache_current(
                 record.get(TOKEN_CACHE_FIELD),
                 train_compaction_tokens=train_compaction_tokens,
@@ -94,11 +105,6 @@ def samples_from_rollout_rows(
                 f"Rollout row {index} has caches with the wrong loss-mask policy: "
                 f"{', '.join(incompatible_cache_turn_ids)}"
             )
-        row_samples = extract_trainable_samples(
-            trajectory_records,
-            turn_rewards,
-            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
-        )
         missing_cache_turn_ids = [sample.turn_id for sample in row_samples if not sample.has_training_cache]
         if missing_cache_turn_ids:
             raise ValueError(

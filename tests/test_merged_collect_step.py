@@ -180,7 +180,7 @@ def test_train_collection_persists_native_cache_before_policy_process_exit(
     config = SimpleNamespace(
         experiment=SimpleNamespace(seed=1),
         collection=SimpleNamespace(train_task_count=None, eval_task_count=None),
-        training=SimpleNamespace(rollout_query_count=None),
+        training=SimpleNamespace(rollout_query_count=None, train_compaction_tokens=True),
         rollout=SimpleNamespace(max_concurrent_episodes=2),
         runtime=object(),
     )
@@ -209,7 +209,7 @@ def test_train_collection_persists_native_cache_before_policy_process_exit(
         },
     )
 
-    def materialize(row, *, checkpoint_id):
+    def materialize(row, *, checkpoint_id, train_compaction_tokens):
         enriched = dict(row)
         enriched["trajectory_records"] = [
             {

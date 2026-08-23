@@ -29,7 +29,7 @@ from self_summarization_agent.rewards import (
 )
 from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import TransformersPolicyTrainer
-from self_summarization_agent.trajectory import extract_trainable_samples
+from self_summarization_agent.trajectory import extract_training_samples
 
 
 @dataclass(slots=True)
@@ -213,10 +213,11 @@ def train_experiment(
                 else:
                     judged_count += 1
                 all_samples.extend(
-                    extract_trainable_samples(
+                    extract_training_samples(
                         result.trajectory_records,
                         result.turn_rewards,
                         rollout_id=f"{example.query_id}:{rollout_index}",
+                        train_compaction_tokens=config.training.train_compaction_tokens,
                     )
                 )
                 append_jsonl(

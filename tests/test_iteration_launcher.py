@@ -149,6 +149,70 @@ def test_complete_cached_rollouts_requires_v5_training_cache(tmp_path: Path) -> 
     )
 
 
+def test_complete_cached_rollouts_accepts_excluded_summary_only_rows(tmp_path: Path) -> None:
+    cached_path = tmp_path / "cached.jsonl"
+    cached_path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "policy_checkpoint_id": "iteration-00000",
+        "rollout_index": 0,
+        "query_id": "q0",
+        "turn_records": [
+            {
+                "query_id": "q0",
+                "turn_id": "summary-1",
+                "kind": "summary",
+                "prompt": "prompt",
+                "completion": "completion",
+            }
+        ],
+        "trajectory_records": [
+            {
+                "schema_version": 3,
+                "query_id": "q0",
+                "turn_id": "trajectory-1",
+                "kind": "trajectory",
+                "termination_kind": "compaction",
+                "turn_ids": ["summary-1"],
+                "messages": [
+                    {"role": "system", "content": "instructions"},
+                    {"role": "user", "content": "question"},
+                    {"role": "assistant", "content": "answer"},
+                ],
+                "collection_tokens": {
+                    "version": 2,
+                    "full_token_ids": [10, 11, 21],
+                    "assistant_token_mask": [False, False, True],
+                    "generations": [
+                        {
+                            "prompt_token_ids": [10, 11],
+                            "completion_token_ids": [21],
+                            "full_token_ids": [10, 11, 21],
+                            "completion_token_logprobs": [-0.3],
+                            "logprobs_mode": "raw_logprobs",
+                        },
+                    ],
+                },
+            }
+        ],
+        "turn_rewards": {"trajectory-1": 1.0},
+        "trainable_sample_count": 1,
+        "judge": {"outcome": "wrong_answer", "parse_error": False},
+    }
+    cached_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    assert _has_complete_cached_rollouts(
+        cached_path,
+        checkpoint_id="iteration-00000",
+        expected_count=1,
+        train_compaction_tokens=False,
+    )
+    assert not _has_complete_cached_rollouts(
+        cached_path,
+        checkpoint_id="iteration-00000",
+        expected_count=1,
+    )
+
+
 def test_expected_eval_rollout_count_includes_samples_per_task(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     config.collection.eval_task_count = 3

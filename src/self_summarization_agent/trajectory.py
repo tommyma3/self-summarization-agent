@@ -143,8 +143,13 @@ def apply_training_loss_mask(
     cache: Mapping[str, object],
     *,
     train_compaction_tokens: bool,
-) -> dict[str, Any]:
-    """Apply the configured gradient mask without changing collected tokens."""
+) -> dict[str, Any] | None:
+    """Apply the configured gradient mask without changing collected tokens.
+
+    Returns ``None`` when masking the compaction summary leaves no trainable
+    tokens: the record has nothing to optimize under the configured policy
+    and must be excluded from training.
+    """
 
     updated = deepcopy(dict(cache))
     policy = loss_mask_policy(train_compaction_tokens=train_compaction_tokens)
@@ -204,10 +209,7 @@ def apply_training_loss_mask(
             )
         completion_mask[full_position - 1] = False
     if not any(completion_mask):
-        raise ValueError(
-            f"Trajectory {record.get('turn_id')} has no trainable tool-call tokens after "
-            "masking compaction"
-        )
+        return None
 
     selected_logprobs = [
         float(logprob)
@@ -217,6 +219,46 @@ def apply_training_loss_mask(
     updated["completion_mask"] = completion_mask
     updated["reference_logprob"] = sum(selected_logprobs) / len(selected_logprobs)
     return updated
+
+
+def record_has_training_tokens(
+    record: Mapping[str, object],
+    *,
+    train_compaction_tokens: bool,
+) -> bool:
+    """Whether a record keeps trainable tokens under the loss-mask policy.
+
+    Mirrors ``apply_training_loss_mask``: under the tool-calls-only policy a
+    summary-ending record keeps trainable content only when its assistant
+    mask has a True position before the final (summary) generation. Returns
+    True (fail-closed) when the record cannot be classified, so the masking
+    path raises its own validation error instead of silently dropping data.
+    """
+
+    if train_compaction_tokens or not _record_ends_with_summary_generation(record):
+        return True
+    collection_tokens = record.get("collection_tokens")
+    if not isinstance(collection_tokens, Mapping):
+        return True
+    generations = collection_tokens.get("generations")
+    if not isinstance(generations, list) or not generations:
+        return True
+    final_generation = generations[-1]
+    if not isinstance(final_generation, Mapping):
+        return True
+    prompt_ids = final_generation.get("prompt_token_ids")
+    full_token_ids = collection_tokens.get("full_token_ids")
+    assistant_token_mask = collection_tokens.get("assistant_token_mask")
+    if (
+        not isinstance(prompt_ids, list)
+        or not prompt_ids
+        or not isinstance(full_token_ids, list)
+        or not isinstance(assistant_token_mask, list)
+        or len(assistant_token_mask) != len(full_token_ids)
+        or len(prompt_ids) > len(full_token_ids)
+    ):
+        return True
+    return any(assistant_token_mask[1 : len(prompt_ids)])
 
 
 def _extract_training_cache(
@@ -571,6 +613,39 @@ def extract_trainable_samples(
     if unknown_reward_ids:
         raise ValueError(f"Reward ids do not match any trajectory record: {', '.join(unknown_reward_ids)}")
     return samples
+
+
+def extract_training_samples(
+    records: list[Mapping[str, object]],
+    rewards: dict[str, float],
+    *,
+    rollout_id: str | None = None,
+    train_compaction_tokens: bool = True,
+) -> list[RLSample]:
+    """Extract the samples that are trainable under the loss-mask policy.
+
+    Identical to :func:`extract_trainable_samples` when training compaction
+    tokens; under the tool-calls-only policy it drops records whose mask
+    would empty out (summary-only intervals with no tool-call content).
+    """
+
+    samples = extract_trainable_samples(records, rewards, rollout_id=rollout_id)
+    if train_compaction_tokens:
+        return samples
+    record_by_turn_id = {
+        record.get("turn_id"): record
+        for record in records
+        if isinstance(record, Mapping) and isinstance(record.get("turn_id"), str)
+    }
+    return [
+        sample
+        for sample in samples
+        if record_by_turn_id.get(sample.turn_id) is None
+        or record_has_training_tokens(
+            record_by_turn_id[sample.turn_id],
+            train_compaction_tokens=train_compaction_tokens,
+        )
+    ]
 
 
 def _coerce_token_ids(value: object) -> list[int]:

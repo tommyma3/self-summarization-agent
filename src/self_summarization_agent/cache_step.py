@@ -17,7 +17,9 @@ from self_summarization_agent.trajectory import (
     apply_training_loss_mask,
     build_rollout_native_training_cache,
     extract_trainable_samples,
+    extract_training_samples,
     is_training_cache_current,
+    record_has_training_tokens,
 )
 
 
@@ -63,14 +65,21 @@ def _validate_judged_row(row: dict[str, Any], *, index: int, expected_checkpoint
     _rollout_key(row, index=index)
 
 
-def _validate_cached_row(row: dict[str, Any], *, index: int, expected_checkpoint_id: str) -> None:
+def _validate_cached_row(
+    row: dict[str, Any],
+    *,
+    index: int,
+    expected_checkpoint_id: str,
+    train_compaction_tokens: bool = True,
+) -> None:
     _validate_judged_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
     if row.get("trainable_sample_count") == 0:
         return
-    samples = extract_trainable_samples(
+    samples = extract_training_samples(
         row["trajectory_records"],
         row["turn_rewards"],
         rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+        train_compaction_tokens=train_compaction_tokens,
     )
     missing_cache_turn_ids = [sample.turn_id for sample in samples if not sample.has_training_cache]
     if missing_cache_turn_ids:
@@ -93,37 +102,32 @@ def _row_has_current_training_cache(
     trajectory_records = row.get("trajectory_records")
     if not isinstance(trajectory_records, list):
         return False
-    rewarded_ids = set(rewards)
-    current_cache_ids = {
+    trainable_turn_ids = {
         record.get("turn_id")
         for record in trajectory_records
         if isinstance(record, dict)
         and isinstance(record.get("turn_id"), str)
-        and is_training_cache_current(
-            record.get(TOKEN_CACHE_FIELD),
+        and record.get("turn_id") in rewards
+        and record_has_training_tokens(
+            record,
             train_compaction_tokens=train_compaction_tokens,
         )
     }
-    if not rewarded_ids <= current_cache_ids:
-        return False
-    samples = extract_trainable_samples(
-        trajectory_records,
-        rewards,
-        rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
-    )
-    sample_turn_ids = {sample.turn_id for sample in samples}
+    if not trainable_turn_ids:
+        # Every record is excluded under this policy; the row is complete as-is.
+        return True
     cached_turn_ids = {
         record.get("turn_id")
-        for record in row["trajectory_records"]
+        for record in trajectory_records
         if isinstance(record, dict)
         and isinstance(record.get("turn_id"), str)
-        and record.get("turn_id") in sample_turn_ids
+        and record.get("turn_id") in trainable_turn_ids
         and is_training_cache_current(
             record.get(TOKEN_CACHE_FIELD),
             train_compaction_tokens=train_compaction_tokens,
         )
     }
-    return sample_turn_ids <= cached_turn_ids
+    return trainable_turn_ids <= cached_turn_ids
 
 
 def _materialize_rollout_native_training_caches(
@@ -184,7 +188,12 @@ def _completed_cached_rows(
             row,
             train_compaction_tokens=train_compaction_tokens,
         ):
-            _validate_cached_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
+            _validate_cached_row(
+                row,
+                index=index,
+                expected_checkpoint_id=expected_checkpoint_id,
+                train_compaction_tokens=train_compaction_tokens,
+            )
             completed[key] = row
     return completed
 
@@ -220,11 +229,20 @@ def _attach_training_caches(
     payload_by_turn_id = {}
     for sample, payload in zip(row_samples, cache_payloads):
         record = record_by_turn_id[sample.turn_id]
+        if not record_has_training_tokens(
+            record,
+            train_compaction_tokens=train_compaction_tokens,
+        ):
+            # Excluded under this policy: keep the record, attach no cache.
+            continue
         masked_payload = apply_training_loss_mask(
             record,
             payload,
             train_compaction_tokens=train_compaction_tokens,
         )
+        if masked_payload is None:
+            # Defensive: record_has_training_tokens already excludes these.
+            continue
         payload_by_turn_id[sample.turn_id] = {
             **masked_payload,
             "policy_checkpoint_id": checkpoint_id,

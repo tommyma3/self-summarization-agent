@@ -3,6 +3,8 @@ from pathlib import Path
 
 from self_summarization_agent.cache_step import (
     _attach_training_caches,
+    _row_has_current_training_cache,
+    _validate_cached_row,
     build_cache_scorer,
     run_cache_step,
 )
@@ -190,6 +192,88 @@ def test_fallback_cache_uses_same_compaction_mask() -> None:
     assert cache["completion_mask"] == [True, False, False]
     assert cache["reference_logprob"] == -0.1
     assert cache["loss_mask_policy"] == "tool_calls_only"
+
+
+def summary_only_row(query_id: str = "q1") -> dict:
+    """A row whose only trajectory record is a pure summary generation."""
+    row = judged_row(query_id, 0)
+    row["summary_turns"] = ["summary-1"]
+    record = row["trajectory_records"][0]
+    record["termination_kind"] = "compaction"
+    record["turn_ids"] = ["summary-1"]
+    record["collection_tokens"] = {
+        "version": 2,
+        "full_token_ids": [10, 11, 21],
+        "assistant_token_mask": [False, False, True],
+        "generations": [
+            {
+                "prompt_token_ids": [10, 11],
+                "completion_token_ids": [21],
+                "full_token_ids": [10, 11, 21],
+                "completion_token_logprobs": [-0.3],
+                "logprobs_mode": "raw_logprobs",
+            },
+        ],
+    }
+    return row
+
+
+def test_attach_training_caches_skips_excluded_summary_only_record() -> None:
+    row = summary_only_row()
+    payload = {
+        "version": 5,
+        "input_ids": [10, 11],
+        "labels": [11, 21],
+        "completion_mask": [False, True],
+        "reference_logprob": -0.3,
+        "reference_logprobs": [0.0, -0.3],
+        "reference_logprob_source": "policy_rescore",
+    }
+
+    cached = _attach_training_caches(
+        row,
+        cache_payloads=[payload],
+        checkpoint_id="step-00001",
+        train_compaction_tokens=False,
+    )
+
+    assert "training_cache" not in cached["trajectory_records"][0]
+
+
+def test_summary_only_row_counts_as_current_cache_under_ablation() -> None:
+    row = summary_only_row()
+
+    assert _row_has_current_training_cache(row, train_compaction_tokens=False)
+    assert not _row_has_current_training_cache(row, train_compaction_tokens=True)
+    _validate_cached_row(
+        row,
+        index=1,
+        expected_checkpoint_id="step-00001",
+        train_compaction_tokens=False,
+    )
+
+
+def test_cache_step_excludes_summary_only_record_from_training(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoints" / "step-00001"
+    checkpoint.mkdir(parents=True)
+    judged_path = tmp_path / "judged.jsonl"
+    output_path = tmp_path / "cached.jsonl"
+    write_jsonl(judged_path, [summary_only_row()])
+    config = train_config(tmp_path)
+    config.training.train_compaction_tokens = False
+    scorer = FakeScorer()
+
+    run_cache_step(
+        config,
+        checkpoint_path=checkpoint,
+        rollout_path=judged_path,
+        output_path=output_path,
+        scorer=scorer,
+    )
+
+    record = json.loads(output_path.read_text(encoding="utf-8"))["trajectory_records"][0]
+    assert "training_cache" not in record
+    assert scorer.seen_batches == []
 
 
 def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> None:
