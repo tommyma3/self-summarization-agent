@@ -16,6 +16,9 @@ Required arguments:
 Options:
   --config PATH        Training config (default: configs/train/default.yaml).
   --set KEY=VALUE      Config override forwarded to every iteration; repeatable.
+  --current-iteration N
+                       Iteration to resume from (default: 0); must be a
+                       non-negative integer smaller than --iterations.
   -h, --help           Show this help message.
 
 All stdout and stderr are streamed to the terminal and appended to a timestamped
@@ -31,6 +34,7 @@ TARGET_ITERATIONS=""
 LATEST_ROOT=""
 CONFIG_PATH="${REPO_ROOT}/configs/train/default.yaml"
 CONFIG_OVERRIDES=()
+CURRENT_ITERATION=0
 
 while (($#)); do
     case "$1" in
@@ -54,6 +58,11 @@ while (($#)); do
             CONFIG_OVERRIDES+=(--set "$2")
             shift 2
             ;;
+        --current-iteration)
+            [[ $# -ge 2 ]] || { echo "error: --current-iteration requires a value" >&2; exit 2; }
+            CURRENT_ITERATION="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -68,6 +77,14 @@ done
 
 if [[ ! "${TARGET_ITERATIONS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: --iterations must be a positive integer" >&2
+    exit 2
+fi
+if [[ ! "${CURRENT_ITERATION}" =~ ^[0-9]+$ ]]; then
+    echo "error: --current-iteration must be a non-negative integer" >&2
+    exit 2
+fi
+if ((CURRENT_ITERATION >= TARGET_ITERATIONS)); then
+    echo "error: --current-iteration must be smaller than --iterations" >&2
     exit 2
 fi
 if [[ -z "${LATEST_ROOT}" ]]; then
@@ -98,7 +115,7 @@ echo "Latest root: ${LATEST_ROOT}"
 echo "Target iteration: ${TARGET_ITERATIONS}"
 echo "Log file: ${LOG_FILE}"
 
-CURRENT_ITERATION=0
+echo "Current iteration: ${CURRENT_ITERATION}"
 
 if ((CURRENT_ITERATION >= TARGET_ITERATIONS)); then
     echo "Target already reached: current iteration ${CURRENT_ITERATION}."
