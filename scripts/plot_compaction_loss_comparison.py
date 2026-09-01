@@ -30,7 +30,7 @@ TRAIN_COLOR = "#2a78d6"
 ABLATION_COLOR = "#4a3aa7"
 
 TRAIN_RUN = "qwen-bcplus-train"
-ABLATION_RUN = "qwen-bcplus-no-compaction-loss-old"
+ABLATION_RUN = "qwen-bcplus-no-compaction-loss"
 
 
 @dataclasses.dataclass(frozen=True)
