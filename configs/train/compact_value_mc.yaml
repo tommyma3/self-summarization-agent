@@ -36,7 +36,9 @@ model:
   backend: transformers
   model_path: /124090467/Qwen/Qwen3.5-9B
   dtype: bfloat16
-  device_map: auto
+  # Spread the trainable backbone, gradients, and optimizer state across all
+  # four reserved GPUs instead of letting auto-placement pack weights on GPU 0.
+  device_map: balanced
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
@@ -50,8 +52,8 @@ rollout:
   gpu_ids: [2, 3]
   tensor_parallel_size: 2
   attention_backend:
-  # 24,000 prompt tokens plus up to 8,192 generated tokens, with headroom.
-  max_model_len: 32768
+  # Keep rollout limits identical to the default training experiment.
+  max_model_len: 27000
   enable_prefix_caching: true
   max_concurrent_episodes: 50
   # Deprecated compatibility fields; merged_collect is strictly sequential.
@@ -77,11 +79,9 @@ evaluation:
   extra_sampling_params: {}
 
 runtime:
-  context_threshold_tokens: 6000
-  # After the 6,400-token summary reservation and 256-token safety margin,
-  # summary prompts may reach 17,344 tokens. This accommodates a large
-  # completed retrieval round after crossing the 6k threshold.
-  max_context_tokens: 24000
+  # Match the default compaction and context thresholds exactly.
+  context_threshold_tokens: 12000
+  max_context_tokens: 28000
   max_summary_tokens: 6400
   tool_budget: 99999
   generated_token_budget: 36000
@@ -118,16 +118,20 @@ training:
   tensor_parallel_size: 1
   data_parallel_size: 4
   activation_checkpointing: true
-  # Match rollout.max_model_len so exact interval tokens are never truncated.
-  max_sequence_length: 32768
+  # Match the default training cap. Longer intervals fail closed rather than
+  # being left-truncated, preserving the append-only trajectory contract.
+  max_sequence_length: 24000
   epochs: 10
   steps: 10
   group_size: 4
-  update_epochs: 2
-  minibatch_size: 128
+  # The Transformers actor-critic materializes token logits and the final
+  # hidden state together. Keep one sequence per forward/backward and only
+  # accumulate four intervals before each optimizer step to bound GPU memory.
+  update_epochs: 1
+  minibatch_size: 4
   clip_range: 0.2
   target_kl: 0.03
-  gradient_accumulation_microbatch_size: 2
+  gradient_accumulation_microbatch_size: 1
   learning_rate: 1.0e-6
   checkpoint_interval: 5
   eval_interval: 0
@@ -136,7 +140,8 @@ training:
     address:
     namespace: self-summarization-agent
     num_cpus:
-    num_gpus_per_worker:
+    # Reserve all four GPUs for the single model-parallel Transformers actor.
+    num_gpus_per_worker: 4
     runtime_env:
       env_vars:
         VIRTUAL_ENV: "/124090467/self-summarization-agent/.venv"
@@ -151,10 +156,9 @@ training:
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
-      # Ulysses-4 gives 32,768 tokens of aggregate sequence capacity.
-      ppo_max_token_len_per_gpu: 8192
+      ppo_max_token_len_per_gpu: 12288
       log_prob_micro_batch_size_per_gpu: 1
-      log_prob_max_token_len_per_gpu: 8192
+      log_prob_max_token_len_per_gpu: 12288
       use_dynamic_bsz: true
       use_remove_padding: true
       use_torch_compile: true
@@ -167,4 +171,3 @@ training:
     ignore_reinit_error: true
     log_to_driver: true
     shutdown_ray: true
-

@@ -349,8 +349,10 @@ def test_load_compact_6k_training_preset() -> None:
 
 def test_load_compaction_mc_value_training_preset() -> None:
     config_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "compact_value_mc.yaml"
+    default_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "default.yaml"
 
     config = load_train_config(config_path)
+    default = load_train_config(default_path)
 
     assert config.experiment.name == "qwen-bcplus-compact-value-mc"
     assert config.training.advantage_estimator == "compaction_mc_value"
@@ -358,6 +360,18 @@ def test_load_compaction_mc_value_training_preset() -> None:
     assert config.training.value.zero_initialize_head is True
     assert config.training.value.state_anchor == "first_generation_prompt_end"
     assert config.training.verl.worker_backend == "transformers"
+    assert config.runtime.context_threshold_tokens == default.runtime.context_threshold_tokens
+    assert config.runtime.max_context_tokens == default.runtime.max_context_tokens
+    assert config.runtime.max_summary_tokens == default.runtime.max_summary_tokens
+    assert config.runtime.generated_token_budget == default.runtime.generated_token_budget
+    assert config.rollout.max_model_len == default.rollout.max_model_len
+    assert config.rollout.max_new_tokens == default.rollout.max_new_tokens
+    assert config.training.max_sequence_length == default.training.max_sequence_length
+    assert config.training.gradient_accumulation_microbatch_size == 1
+    assert config.training.minibatch_size == 4
+    assert config.training.update_epochs == 1
+    assert config.training.verl.num_gpus_per_worker == 4
+    assert config.model.device_map == "balanced"
 
 
 def test_load_compact_24k_training_preset() -> None:
