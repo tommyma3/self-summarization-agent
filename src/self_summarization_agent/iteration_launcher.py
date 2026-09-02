@@ -4,6 +4,7 @@ import argparse
 from contextlib import suppress
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -159,6 +160,35 @@ def _append_cli_overrides(command: list[str], overrides: Sequence[str]) -> None:
         command.extend(["--set", override])
 
 
+def _subprocess_group_options() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return {"creationflags": creation_flag} if creation_flag else {}
+
+
+def _signal_subprocess_tree(process: subprocess.Popen, *, force: bool) -> None:
+    if os.name == "posix":
+        signal_number = signal.SIGKILL if force else signal.SIGTERM
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal_number)
+        return
+    if force:
+        process.kill()
+    else:
+        process.terminate()
+
+
+def _read_progress(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _run_timed_phase(
     *,
     phase: str,
@@ -167,6 +197,7 @@ def _run_timed_phase(
     command_runner: CommandRunner,
     timings_path: Path,
     timeout_seconds: float | None = None,
+    progress_path: Path | None = None,
 ) -> int:
     print(f"[iteration_launcher] starting {phase}", flush=True)
     started = time.perf_counter()
@@ -174,7 +205,7 @@ def _run_timed_phase(
         status = command_runner(command)
     else:
         try:
-            proc = subprocess.Popen(list(command))
+            proc = subprocess.Popen(list(command), **_subprocess_group_options())
             try:
                 proc.wait(timeout=timeout_seconds)
                 status = proc.returncode
@@ -184,7 +215,7 @@ def _run_timed_phase(
                     f"Terminating (pid={proc.pid})...",
                     flush=True,
                 )
-                proc.terminate()
+                _signal_subprocess_tree(proc, force=False)
                 try:
                     proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
@@ -193,8 +224,22 @@ def _run_timed_phase(
                         f"killing (pid={proc.pid})...",
                         flush=True,
                     )
-                    proc.kill()
-                    proc.wait(timeout=10)
+                    _signal_subprocess_tree(proc, force=True)
+                    with suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=10)
+                elapsed_seconds = time.perf_counter() - started
+                append_jsonl(
+                    timings_path,
+                    {
+                        "iteration": iteration,
+                        "timestamp_utc": utc_timestamp(),
+                        "phase": phase,
+                        "elapsed_seconds": elapsed_seconds,
+                        "exit_code": proc.returncode,
+                        "timed_out": True,
+                        "last_progress": _read_progress(progress_path),
+                    },
+                )
                 raise
         except subprocess.TimeoutExpired:
             raise  # re-raise so the launcher can handle it
@@ -230,6 +275,37 @@ def _record_skipped_phase(*, phase: str, iteration: int, timings_path: Path) -> 
             "skipped": True,
         },
     )
+
+
+def _move_incomplete_checkpoint_aside(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    suffix = 1
+    while True:
+        stale = path.with_name(f"{path.name}.stale-{suffix:03d}")
+        if not stale.exists():
+            break
+        suffix += 1
+    os.replace(path, stale)
+    print(f"[iteration_launcher] moved incomplete checkpoint aside: {path} -> {stale}", flush=True)
+    return stale
+
+
+def _promote_staged_checkpoint(
+    staged: Path,
+    destination: Path,
+    *,
+    require_value_head: bool,
+) -> Path:
+    if not is_vllm_loadable_checkpoint(staged, require_value_head=require_value_head):
+        raise RuntimeError(f"Training subprocess did not produce a complete checkpoint: {staged}")
+    if destination.exists():
+        if is_vllm_loadable_checkpoint(destination, require_value_head=require_value_head):
+            raise RuntimeError(f"Refusing to replace an existing complete checkpoint: {destination}")
+        _move_incomplete_checkpoint_aside(destination)
+    os.replace(staged, destination)
+    print(f"[iteration_launcher] published checkpoint: {destination}", flush=True)
+    return destination
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -526,6 +602,7 @@ def _run_or_skip_phase(
     completed: bool,
     error_message: str,
     timeout_seconds: float | None = None,
+    progress_path: Path | None = None,
 ) -> None:
     if completed:
         _record_skipped_phase(phase=phase, iteration=iteration, timings_path=timings_path)
@@ -538,6 +615,7 @@ def _run_or_skip_phase(
             command_runner=command_runner,
             timings_path=timings_path,
             timeout_seconds=timeout_seconds,
+            progress_path=progress_path,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(
@@ -727,6 +805,9 @@ def run_training_iteration(
     if iteration < 1:
         raise ValueError(f"iteration must be at least 1, got {iteration}")
     phase_timeout = config.runtime.phase_timeout_seconds
+    train_update_timeout = config.runtime.train_update_timeout_seconds
+    if train_update_timeout is None:
+        train_update_timeout = phase_timeout
     train_dir = ensure_dir(latest_root or _train_dir(config))
     current = resolve_latest_checkpoint(train_dir)
     should_resume = resume or resume_rollouts
@@ -745,6 +826,8 @@ def run_training_iteration(
         resolved_rollout_sampling_profile(config, split="eval")
     )
     next_checkpoint = checkpoints_dir / f"iteration-{iteration:05d}"
+    staged_checkpoint = checkpoints_dir / f".iteration-{iteration:05d}.incomplete"
+    train_progress_path = train_dir / f"iteration-{iteration:05d}.train-progress.json"
     training_already_advanced = should_resume and current.checkpoint_id == checkpoint_id_from_path(next_checkpoint)
     eval_checkpoint = current.path
     eval_checkpoint_id = current.checkpoint_id
@@ -1032,6 +1115,26 @@ def run_training_iteration(
             timeout_seconds=phase_timeout,
         )
 
+    require_value_head = config.training.value.enabled
+    checkpoint_complete = is_vllm_loadable_checkpoint(
+        next_checkpoint,
+        require_value_head=require_value_head,
+    )
+    if not checkpoint_complete and is_vllm_loadable_checkpoint(
+        staged_checkpoint,
+        require_value_head=require_value_head,
+    ):
+        _promote_staged_checkpoint(
+            staged_checkpoint,
+            next_checkpoint,
+            require_value_head=require_value_head,
+        )
+        checkpoint_complete = True
+    elif not checkpoint_complete and staged_checkpoint.exists():
+        _move_incomplete_checkpoint_aside(staged_checkpoint)
+    if not checkpoint_complete and next_checkpoint.exists():
+        _move_incomplete_checkpoint_aside(next_checkpoint)
+
     train_command = [
         *_train_step_command_prefix(config, python_executable),
         "--config",
@@ -1041,9 +1144,13 @@ def run_training_iteration(
         "--rollouts",
         str(cached_rollout_path),
         "--output-checkpoint",
-        str(next_checkpoint),
+        str(staged_checkpoint),
+        "--output-checkpoint-id",
+        checkpoint_id_from_path(next_checkpoint),
         "--metrics",
         str(metrics_path),
+        "--progress",
+        str(train_progress_path),
     ]
     _append_cli_overrides(train_command, overrides)
     if _has_inline_cached_rollouts(
@@ -1054,10 +1161,6 @@ def run_training_iteration(
         retain_critic_only_states=config.training.value.enabled,
     ):
         train_command[train_command.index("--rollouts") + 1] = str(judged_rollout_path)
-    checkpoint_complete = should_resume and is_vllm_loadable_checkpoint(
-        next_checkpoint,
-        require_value_head=config.training.value.enabled,
-    )
     _run_or_skip_phase(
         phase="train_update",
         iteration=iteration,
@@ -1066,8 +1169,15 @@ def run_training_iteration(
         timings_path=phase_timings_path,
         completed=checkpoint_complete,
         error_message="Training subprocess",
-        timeout_seconds=phase_timeout,
+        timeout_seconds=train_update_timeout,
+        progress_path=train_progress_path,
     )
+    if not checkpoint_complete:
+        _promote_staged_checkpoint(
+            staged_checkpoint,
+            next_checkpoint,
+            require_value_head=require_value_head,
+        )
     advanced = advance_latest_checkpoint(train_dir, next_checkpoint)
     return advanced.path
 

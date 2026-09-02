@@ -12,7 +12,11 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path, mark_c
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.train_grpo import group_samples_by_query
-from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
+from self_summarization_agent.trainer import (
+    FSDP2ContextParallelPolicyTrainer,
+    TransformersPolicyTrainer,
+    _write_training_progress,
+)
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
     extract_training_samples,
@@ -52,6 +56,30 @@ def _average_summary_tokens(rows: list[dict[str, Any]]) -> float:
             if isinstance(value, int | float):
                 summary_tokens += float(value)
     return summary_tokens / len(rows) if rows else 0.0
+
+
+def _percentile(values: list[int], fraction: float) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, int((len(ordered) - 1) * fraction))
+    return ordered[index]
+
+
+def _sample_diagnostics(samples: list[Any]) -> dict[str, int]:
+    lengths = [len(sample.input_ids or []) for sample in samples]
+    trainable = [sum(bool(value) for value in (sample.completion_mask or [])) for sample in samples]
+    prefixes = [int(sample.state_prefix_length or 0) for sample in samples]
+    return {
+        "total_tokens": sum(lengths),
+        "trainable_tokens": sum(trainable),
+        "prefix_tokens": sum(prefixes),
+        "max_sequence_length": max(lengths, default=0),
+        "p50_sequence_length": _percentile(lengths, 0.50),
+        "p95_sequence_length": _percentile(lengths, 0.95),
+        "max_prefix_length": max(prefixes, default=0),
+        "p95_prefix_length": _percentile(prefixes, 0.95),
+    }
 
 
 def samples_from_rollout_rows(
@@ -123,7 +151,9 @@ def run_train_step(
     checkpoint_path: str | Path,
     rollout_path: str | Path,
     output_checkpoint_path: str | Path,
+    output_checkpoint_id: str | None = None,
     metrics_path: str | Path | None = None,
+    progress_path: str | Path | None = None,
     trainer: Any | None = None,
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
@@ -148,7 +178,26 @@ def run_train_step(
         retain_critic_only_states=config.training.value.enabled,
     )
     grouped_samples = group_samples_by_query(samples)
-    print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.", flush=True)
+    diagnostics = _sample_diagnostics(samples)
+    print(
+        f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, "
+        f"{len(grouped_samples)} groups; total_tokens={diagnostics['total_tokens']}, "
+        f"trainable_tokens={diagnostics['trainable_tokens']}, "
+        f"sequence_length_p50={diagnostics['p50_sequence_length']}, "
+        f"sequence_length_p95={diagnostics['p95_sequence_length']}, "
+        f"sequence_length_max={diagnostics['max_sequence_length']}, "
+        f"prefix_length_p95={diagnostics['p95_prefix_length']}",
+        flush=True,
+    )
+    progress = str(progress_path) if progress_path is not None else None
+    _write_training_progress(
+        progress,
+        "samples_loaded",
+        rollout_rows=len(rows),
+        sample_count=len(samples),
+        group_count=len(grouped_samples),
+        **diagnostics,
+    )
 
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
@@ -186,6 +235,7 @@ def run_train_step(
                 model_config,
                 config.training,
                 checkpoint_id=checkpoint_id,
+                progress_path=progress,
             )
         elif config.training.backend == "fsdp2_context_parallel":
             if config.training.value.enabled:
@@ -199,11 +249,11 @@ def run_train_step(
                     "Falling back to 'transformers' backend for single-process execution.",
                     stacklevel=2,
                 )
-                trainer = TransformersPolicyTrainer(model_config, config.training)
+                trainer = TransformersPolicyTrainer(model_config, config.training, progress_path=progress)
             else:
                 trainer = FSDP2ContextParallelPolicyTrainer(model_config, config.training)
         elif config.training.backend == "transformers":
-            trainer = TransformersPolicyTrainer(model_config, config.training)
+            trainer = TransformersPolicyTrainer(model_config, config.training, progress_path=progress)
         else:
             raise NotImplementedError(
                 "The local environment cannot execute backend="
@@ -211,25 +261,32 @@ def run_train_step(
                 "'fsdp2_context_parallel', and 'verl_ray'."
             )
 
+    _write_training_progress(progress, "update_start", sample_count=len(samples), **diagnostics)
     metrics = trainer.step(grouped_samples)
+    _write_training_progress(progress, "update_complete", sample_count=metrics.sample_count)
     print(
         f"[train_step] Done: sample_count={metrics.sample_count}, mean_reward={metrics.mean_reward:.4f}, "
         f"mean_advantage={metrics.mean_advantage:.4f}, loss={metrics.loss:.4f}, "
         f"optimizer_steps={getattr(metrics, 'optimizer_step_count', 0)}, "
         f"mean_policy_kl={getattr(metrics, 'mean_policy_kl', 0.0):.4f}, "
-        f"clip_fraction={getattr(metrics, 'clip_fraction', 0.0):.4f}"
+        f"clip_fraction={getattr(metrics, 'clip_fraction', 0.0):.4f}",
+        flush=True,
     )
     output_checkpoint = Path(output_checkpoint_path)
     ensure_dir(output_checkpoint)
+    print(f"[train_step] Saving checkpoint to {output_checkpoint}", flush=True)
+    _write_training_progress(progress, "checkpoint_save_start", output_checkpoint=str(output_checkpoint))
     trainer.save_checkpoint(str(output_checkpoint))
     is_main = int(os.environ.get("RANK", "0")) == 0
     if is_main:
         mark_checkpoint_complete(output_checkpoint)
+        _write_training_progress(progress, "checkpoint_complete", output_checkpoint=str(output_checkpoint))
+        print(f"[train_step] Checkpoint complete: {output_checkpoint}", flush=True)
 
     if metrics_path is not None and is_main:
         metrics_payload = {
             "policy_checkpoint_id": checkpoint_id,
-            "next_checkpoint_id": checkpoint_id_from_path(output_checkpoint),
+            "next_checkpoint_id": output_checkpoint_id or checkpoint_id_from_path(output_checkpoint),
             "training_backend": config.training.backend,
             "sample_count": metrics.sample_count,
             "mean_reward": metrics.mean_reward,
@@ -251,7 +308,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, help="Input policy checkpoint path.")
     parser.add_argument("--rollouts", required=True, help="Rollout JSONL path.")
     parser.add_argument("--output-checkpoint", required=True, help="Output checkpoint directory.")
+    parser.add_argument(
+        "--output-checkpoint-id",
+        default=None,
+        help="Logical checkpoint id when writing through an incomplete staging directory.",
+    )
     parser.add_argument("--metrics", default=None, help="Optional metrics JSONL path.")
+    parser.add_argument("--progress", default=None, help="Optional atomic training progress JSON path.")
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -278,7 +341,9 @@ def main() -> None:
         checkpoint_path=args.checkpoint,
         rollout_path=args.rollouts,
         output_checkpoint_path=args.output_checkpoint,
+        output_checkpoint_id=args.output_checkpoint_id,
         metrics_path=args.metrics,
+        progress_path=args.progress,
     )
     print(output_checkpoint)
 

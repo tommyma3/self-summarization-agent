@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -326,6 +328,12 @@ def test_compaction_value_step_freezes_old_values_across_update_epochs() -> None
             hidden = self.model(features)
             return hidden, torch.ones_like(hidden, dtype=torch.bool), self.value_head(hidden)
 
+        def _value_logits(self, samples: list[RLSample]):
+            features = torch.tensor(
+                [[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32
+            )
+            return self.value_head(self.model(features))
+
         def _old_values(self, samples: list[RLSample], *, microbatch_size: int):
             self.old_value_calls += 1
             return super()._old_values(samples, microbatch_size=microbatch_size)
@@ -402,6 +410,14 @@ def test_compaction_value_step_handles_split_policy_value_devices() -> None:
                 self.value_head(hidden.to("cuda:1")),
             )
 
+        def _value_logits(self, samples: list[RLSample]):
+            features = torch.tensor(
+                [[feature_by_turn[sample.turn_id]] for sample in samples],
+                dtype=torch.float32,
+                device="cuda:0",
+            )
+            return self.value_head(self.model(features).to("cuda:1"))
+
     def cached(turn_id: str, reward: float, rollout_id: str) -> RLSample:
         return RLSample(
             query_id="q1",
@@ -446,3 +462,74 @@ def test_compaction_value_step_handles_split_policy_value_devices() -> None:
     assert metrics.optimizer_step_count == 1
     assert "value/loss" in metrics.extra_metrics
     assert any(torch.count_nonzero(parameter) for parameter in trainer.value_head.parameters())
+
+
+def test_compaction_value_forward_selects_only_anchor_and_trainable_logits() -> None:
+    class SelectedLogitModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embedding = torch.nn.Embedding(16, 4)
+            self.lm_head = torch.nn.Linear(4, 16, bias=False)
+            self.last_positions = None
+            self.last_input_length = None
+
+        @property
+        def device(self):
+            return self.embedding.weight.device
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+        def forward(self, input_ids, logits_to_keep=0, use_cache=False):
+            del use_cache
+            self.last_input_length = input_ids.shape[1]
+            hidden = self.embedding(input_ids)
+            positions = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            self.last_positions = logits_to_keep
+            return SimpleNamespace(logits=self.lm_head(hidden[:, positions, :]))
+
+    sample = RLSample(
+        query_id="q1",
+        turn_id="trajectory-1",
+        prompt="",
+        completion="",
+        reward=1.0,
+        trainable_kind="trajectory",
+        rollout_id="q1:0",
+        input_ids=[1, 2, 3, 4],
+        labels=[2, 3, 4, 5],
+        completion_mask=[False, True, False, True],
+        reference_logprob=0.0,
+        reference_logprobs=[0.0, 0.0, 0.0, 0.0],
+        state_prefix_length=1,
+    )
+    trainer = TransformersPolicyTrainer.__new__(TransformersPolicyTrainer)
+    trainer.training_config = TrainingConfig(
+        advantage_estimator="compaction_mc_value",
+        value=CompactionValueConfig(enabled=True),
+    )
+    trainer.model = SelectedLogitModel()
+    trainer.value_head = CompactionValueHead(4, zero_initialize=False)
+
+    token_logprobs, completion_mask, value_logits = trainer._actor_critic_outputs([sample])
+
+    assert trainer.model.last_input_length == 4
+    assert trainer.model.last_positions == [0, 1, 3]
+    assert token_logprobs.shape == completion_mask.shape == (1, 4)
+    assert token_logprobs[0, 0].item() == 0.0
+    assert token_logprobs[0, 2].item() == 0.0
+    assert value_logits.shape == (1, 2)
+    full_hidden = trainer.model.embedding(torch.tensor([sample.input_ids]))
+    full_logits = trainer.model.lm_head(full_hidden)
+    expected_logprobs = -torch.nn.functional.cross_entropy(
+        full_logits.reshape(-1, full_logits.shape[-1]),
+        torch.tensor(sample.labels),
+        reduction="none",
+    ).reshape(1, -1) * torch.tensor([sample.completion_mask])
+    expected_value_logits = trainer.value_head(full_hidden[:, sample.state_prefix_length - 1])
+    assert torch.allclose(token_logprobs, expected_logprobs)
+    assert torch.allclose(value_logits, expected_value_logits)
+
+    trainer._value_logits([sample])
+    assert trainer.model.last_input_length == 1
+    assert trainer.model.last_positions == 1

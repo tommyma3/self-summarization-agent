@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+import subprocess
+
+import pytest
 
 from self_summarization_agent.checkpoints import (
     mark_checkpoint_complete,
@@ -22,6 +25,7 @@ from self_summarization_agent.config import (
 from self_summarization_agent.iteration_launcher import (
     _expected_eval_rollout_count,
     _has_complete_cached_rollouts,
+    _run_timed_phase,
     _start_retrieval_worker,
     run_checkpoint_evaluation,
     run_training_iteration,
@@ -44,6 +48,57 @@ def write_fake_checkpoint(path: Path) -> None:
     (path / "config.json").write_text("{}", encoding="utf-8")
     (path / "model.safetensors").write_text("weights", encoding="utf-8")
     mark_checkpoint_complete(path)
+
+
+def write_fake_checkpoint_from_train_command(command) -> Path:
+    output = Path(command[command.index("--output-checkpoint") + 1])
+    write_fake_checkpoint(output)
+    return output
+
+
+def test_timed_phase_records_last_progress_before_terminating(tmp_path: Path, monkeypatch) -> None:
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(json.dumps({"stage": "policy_value_update", "completed": 12}))
+    signals = []
+
+    class Process:
+        pid = 1234
+        returncode = -15
+
+        def __init__(self):
+            self.wait_count = 0
+
+        def wait(self, timeout):
+            self.wait_count += 1
+            if self.wait_count == 1:
+                raise subprocess.TimeoutExpired(["train"], timeout)
+            return self.returncode
+
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher.subprocess.Popen",
+        lambda *_args, **_kwargs: Process(),
+    )
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._signal_subprocess_tree",
+        lambda _process, *, force: signals.append(force),
+    )
+    timings_path = tmp_path / "phase_timings.jsonl"
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_timed_phase(
+            phase="train_update",
+            iteration=1,
+            command=["train"],
+            command_runner=lambda _command: 0,
+            timings_path=timings_path,
+            timeout_seconds=1,
+            progress_path=progress_path,
+        )
+
+    timing = json.loads(timings_path.read_text(encoding="utf-8"))
+    assert signals == [False]
+    assert timing["timed_out"] is True
+    assert timing["last_progress"]["stage"] == "policy_value_update"
 
 
 def write_raw_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
@@ -273,8 +328,7 @@ def test_iteration_launcher_runs_merged_collect_then_train_and_advances_latest(t
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
-            write_fake_checkpoint(next_checkpoint)
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     next_checkpoint = run_training_iteration(
@@ -331,7 +385,7 @@ def test_iteration_launcher_merged_collect_handles_all_sequential_outputs(tmp_pa
                 count=2,
             )
         if "self_summarization_agent.train_step" in command:
-            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -365,8 +419,7 @@ def test_iteration_launcher_can_pass_resume_to_merged_collect(tmp_path: Path) ->
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
-            write_fake_checkpoint(next_checkpoint)
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -393,8 +446,7 @@ def test_iteration_launcher_forwards_cli_overrides_to_subprocesses(tmp_path: Pat
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
-            write_fake_checkpoint(next_checkpoint)
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -424,8 +476,7 @@ def test_iteration_launcher_merged_collect_includes_both_splits(tmp_path: Path) 
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
-            write_fake_checkpoint(next_checkpoint)
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -550,8 +601,7 @@ def test_iteration_launcher_delegates_retrieval_ownership_to_merged_collect(
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            next_checkpoint = latest_root / "checkpoints" / "iteration-00001"
-            write_fake_checkpoint(next_checkpoint)
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -655,7 +705,7 @@ def test_iteration_launcher_resume_after_train_collection_runs_cache_then_traini
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -692,7 +742,7 @@ def test_iteration_launcher_resume_uses_collection_train_task_count(tmp_path: Pa
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -724,7 +774,7 @@ def test_iteration_launcher_resume_after_train_judge_runs_cache_next(tmp_path: P
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -757,7 +807,7 @@ def test_iteration_launcher_skips_merged_collect_when_all_outputs_exist(tmp_path
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -790,7 +840,7 @@ def test_iteration_launcher_resume_after_train_cache_runs_training_next(tmp_path
     def runner(command):
         calls.append(list(command))
         if "self_summarization_agent.train_step" in command:
-            write_fake_checkpoint(latest_root / "checkpoints" / "iteration-00001")
+            write_fake_checkpoint_from_train_command(command)
         return 0
 
     run_training_iteration(
@@ -816,9 +866,13 @@ def test_iteration_launcher_resume_after_train_cache_runs_training_next(tmp_path
             "--rollouts",
             str(latest_root / "rollouts" / "iteration-00001.jsonl"),
             "--output-checkpoint",
-            str(latest_root / "checkpoints" / "iteration-00001"),
+            str(latest_root / "checkpoints" / ".iteration-00001.incomplete"),
+            "--output-checkpoint-id",
+            "iteration-00001",
             "--metrics",
             str(latest_root / "step_metrics.jsonl"),
+            "--progress",
+            str(latest_root / "iteration-00001.train-progress.json"),
         ]
     ]
 
@@ -860,6 +914,62 @@ def test_iteration_launcher_resume_with_completed_update_collects_missing_preupd
     assert "--eval-raw-output" in calls[0]
     assert str(latest_root / "rollouts" / "iteration-00000.eval.raw.jsonl") in calls[0]
     assert "--resume" in calls[0]
+
+
+def test_iteration_launcher_promotes_completed_staged_checkpoint_without_retraining(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    staged_checkpoint = latest_root / "checkpoints" / ".iteration-00001.incomplete"
+    write_fake_checkpoint(initial_checkpoint)
+    write_fake_checkpoint(staged_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    calls = []
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=lambda command: calls.append(list(command)) or 0,
+        python_executable="python",
+        resume=True,
+    )
+
+    assert not staged_checkpoint.exists()
+    assert (latest_root / "checkpoints" / "iteration-00001" / ".complete").exists()
+    assert all("self_summarization_agent.train_step" not in command for command in calls)
+    assert resolve_latest_checkpoint(latest_root).checkpoint_id == "iteration-00001"
+
+
+def test_iteration_launcher_moves_incomplete_staging_aside_before_retry(tmp_path: Path) -> None:
+    config = train_config(tmp_path)
+    latest_root = tmp_path / "artifacts" / "train" / "demo"
+    initial_checkpoint = latest_root / "checkpoints" / "iteration-00000"
+    staged_checkpoint = latest_root / "checkpoints" / ".iteration-00001.incomplete"
+    write_fake_checkpoint(initial_checkpoint)
+    write_latest_checkpoint(latest_root, initial_checkpoint)
+    staged_checkpoint.mkdir(parents=True)
+    (staged_checkpoint / "partial.safetensors").write_text("partial", encoding="utf-8")
+
+    def runner(command):
+        if "self_summarization_agent.train_step" in command:
+            write_fake_checkpoint_from_train_command(command)
+        return 0
+
+    run_training_iteration(
+        config,
+        config_path="train.yaml",
+        iteration=1,
+        latest_root=latest_root,
+        command_runner=runner,
+        python_executable="python",
+        resume=True,
+    )
+
+    stale = latest_root / "checkpoints" / ".iteration-00001.incomplete.stale-001"
+    assert (stale / "partial.safetensors").exists()
+    assert resolve_latest_checkpoint(latest_root).checkpoint_id == "iteration-00001"
 
 
 def test_iteration_launcher_resume_after_eval_rollout_runs_eval_judge_next(tmp_path: Path, monkeypatch) -> None:

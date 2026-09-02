@@ -256,12 +256,14 @@ def test_run_train_step_writes_backend_and_extra_metrics(tmp_path: Path) -> None
         checkpoint_path=checkpoint,
         rollout_path=rollout_path,
         output_checkpoint_path=output_checkpoint,
+        output_checkpoint_id="iteration-00002",
         metrics_path=metrics_path,
         trainer=MetricsTrainer(),
     )
 
     metric_row = json.loads(metrics_path.read_text(encoding="utf-8").strip())
     assert metric_row["training_backend"] == "verl_ray"
+    assert metric_row["next_checkpoint_id"] == "iteration-00002"
     assert metric_row["backend"] == "verl_ray"
     assert metric_row["verl_ray/sample_count"] == 2
     assert metric_row["avg_summary_tokens"] == 3

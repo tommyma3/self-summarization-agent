@@ -554,7 +554,12 @@ def _promote_huggingface_checkpoint(output_path: Path) -> None:
 
 
 class _VerlRayTrainerActor:
-    def __init__(self, model_config: ModelConfig, training_config: TrainingConfig):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        training_config: TrainingConfig,
+        progress_path: str | None = None,
+    ):
         worker_backend = training_config.verl.worker_backend
         if worker_backend != "transformers":
             raise ValueError(
@@ -564,10 +569,18 @@ class _VerlRayTrainerActor:
         self.trainer = TransformersPolicyTrainer(
             model_config,
             replace(training_config, backend=worker_backend),
+            progress_path=progress_path,
         )
+
+    def ready(self) -> dict[str, str]:
+        return {"status": "ready", "worker_backend": "transformers"}
 
     def step(self, batch: Any) -> dict[str, Any]:
         grouped_samples = grouped_samples_from_verl_dataproto(batch)
+        print(
+            f"[VerlRayTrainerActor] Starting update for {sum(len(group) for group in grouped_samples.values())} states",
+            flush=True,
+        )
         started = time.monotonic()
         metrics = _metrics_to_dict(self.trainer.step(grouped_samples))
         metrics.setdefault("extra_metrics", {})
@@ -580,7 +593,9 @@ class _VerlRayTrainerActor:
         return metrics
 
     def save_checkpoint(self, path: str) -> None:
+        print(f"[VerlRayTrainerActor] Saving checkpoint to {path}", flush=True)
         self.trainer.save_checkpoint(path)
+        print(f"[VerlRayTrainerActor] Finished saving checkpoint to {path}", flush=True)
 
 
 @dataclass(slots=True)
@@ -588,6 +603,7 @@ class VerlRayPolicyTrainer:
     model_config: ModelConfig
     training_config: TrainingConfig
     checkpoint_id: str
+    progress_path: str | None = None
     _ray: Any = field(init=False, repr=False)
     _actor: Any = field(default=None, init=False, repr=False)
     _worker_group: VerlFSDPWorkerGroup | None = field(default=None, init=False, repr=False)
@@ -611,6 +627,7 @@ class VerlRayPolicyTrainer:
             init_kwargs["num_cpus"] = self.training_config.verl.num_cpus
         self._owns_ray = not ray.is_initialized()
         if self._owns_ray:
+            print("[VerlRayPolicyTrainer] Initializing local Ray runtime", flush=True)
             ray.init(**init_kwargs)
 
         worker_backend = self.training_config.verl.worker_backend
@@ -630,7 +647,17 @@ class VerlRayPolicyTrainer:
         if self.training_config.verl.num_cpus is not None:
             actor_options["num_cpus"] = self.training_config.verl.num_cpus
         remote_cls = ray.remote(**actor_options)(_VerlRayTrainerActor)
-        self._actor = remote_cls.remote(self.model_config, self.training_config)
+        print(
+            f"[VerlRayPolicyTrainer] Starting Transformers actor with num_gpus={num_gpus}",
+            flush=True,
+        )
+        actor_started = time.monotonic()
+        self._actor = remote_cls.remote(self.model_config, self.training_config, self.progress_path)
+        ready = self._ray.get(self._actor.ready.remote())
+        print(
+            f"[VerlRayPolicyTrainer] Actor ready after {time.monotonic() - actor_started:.1f}s: {ready}",
+            flush=True,
+        )
 
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
         if self.training_config.verl.worker_backend == "verl_fsdp":
@@ -733,6 +760,13 @@ class VerlRayPolicyTrainer:
             max_sequence_length=self.training_config.max_sequence_length,
         )
         self._last_batch_meta = dict(batch.meta_info)
+        print(
+            "[VerlRayPolicyTrainer] Dispatching update: "
+            f"samples={self._last_batch_meta.get('sample_count', 0)}, "
+            f"total_tokens={self._last_batch_meta.get('total_tokens', 0)}, "
+            f"max_sequence_length={self._last_batch_meta.get('max_sequence_length', 0)}",
+            flush=True,
+        )
         started = time.monotonic()
         metrics_payload = self._ray.get(self._actor.step.remote(batch))
         metrics = _metrics_from_dict(metrics_payload)
@@ -758,6 +792,9 @@ class VerlRayPolicyTrainer:
             _promote_huggingface_checkpoint(output_path)
             self._last_batch_meta["verl_fsdp/checkpoint_export_seconds"] = time.monotonic() - started
         else:
+            print(f"[VerlRayPolicyTrainer] Requesting checkpoint save to {output_path}", flush=True)
             self._ray.get(self._actor.save_checkpoint.remote(str(output_path)))
         if self.training_config.verl.shutdown_ray and self._owns_ray:
+            print("[VerlRayPolicyTrainer] Shutting down Ray", flush=True)
             self._ray.shutdown()
+            print("[VerlRayPolicyTrainer] Ray shutdown complete", flush=True)

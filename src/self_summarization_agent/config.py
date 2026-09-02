@@ -129,6 +129,9 @@ class RuntimeConfig:
     tool_budget: int = 16
     generated_token_budget: int | None = None
     phase_timeout_seconds: int | None = None
+    # Optional training-only wall-clock limit. When unset, the general phase
+    # timeout remains authoritative for backward compatibility.
+    train_update_timeout_seconds: int | None = None
     tool_execution_timeout_seconds: float = 600
 
 

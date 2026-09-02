@@ -313,6 +313,7 @@ For the intended GPU run:
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` preserves complete rollout-native v6 caches without loading a model; when fallback rescoring is required, a GPU-0 policy scorer starts only after the judge process exits. Resume preserves completed v6 rows and regenerates older cache versions as v6
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
+- training checkpoints are written through `.iteration-NNNNN.incomplete`; a complete staged checkpoint is promoted on resume, while an incomplete one is retained as `.stale-NNN` before the update is retried
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs
 - iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
@@ -323,7 +324,9 @@ For the intended GPU run:
 
 [`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
 
-The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved beside it as `compaction_value_head.safetensors` plus `compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: transformers`, because the native verl FSDP actor does not currently expose the required hidden state or sidecar checkpoint hooks.
+The value trainer exploits causal prefix equivalence for the frozen `V_old` pass: it evaluates only through the exact state anchor. During the joint update, Qwen's `logits_to_keep` path materializes vocabulary logits only for the state anchor and trainable assistant-token positions. This optimization is gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing backend and loss path.
+
+The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved beside it as `compaction_value_head.safetensors` plus `compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: transformers`, because the native verl FSDP actor does not currently expose the required hidden state or sidecar checkpoint hooks. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
 
 To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import functools
+import inspect
+import json
 import os
 from pathlib import Path
 import shutil
+import time
 from typing import Any
 import warnings
 
@@ -34,8 +37,27 @@ from self_summarization_agent.value_model import (
     rollout_value_weights,
     rollout_normalized_value_loss,
     save_value_head,
-    state_hidden_states,
 )
+
+
+def _write_training_progress(path: str | None, stage: str, **payload: Any) -> None:
+    if path is None:
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    body = {
+        "stage": stage,
+        "timestamp_unix": time.time(),
+        "pid": os.getpid(),
+        **payload,
+    }
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(body, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, target)
+
+
+def _report_progress(completed: int, total: int) -> bool:
+    return completed == 1 or completed == total or completed % 10 == 0
 
 
 @dataclass(slots=True)
@@ -523,6 +545,7 @@ def _clipped_grpo_token_losses(
 class TransformersPolicyTrainer:
     model_config: ModelConfig
     training_config: TrainingConfig
+    progress_path: str | None = None
     tokenizer: Any = field(init=False)
     model: Any = field(init=False)
     optimizer: torch.optim.Optimizer = field(init=False)
@@ -530,6 +553,11 @@ class TransformersPolicyTrainer:
     value_head_loaded: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        print(
+            f"[TransformersPolicyTrainer] Loading model from {self.model_config.model_path}",
+            flush=True,
+        )
+        _write_training_progress(self.progress_path, "model_loading")
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_config.model_path,
             trust_remote_code=self.model_config.trust_remote_code,
@@ -543,6 +571,13 @@ class TransformersPolicyTrainer:
             device_map=self.model_config.device_map,
             trust_remote_code=self.model_config.trust_remote_code,
         )
+        if self.training_config.value.enabled:
+            forward_parameters = inspect.signature(self.model.forward).parameters
+            if "logits_to_keep" not in forward_parameters:
+                raise ValueError(
+                    "Compaction value training requires a model forward method that supports "
+                    "logits_to_keep; refusing the prohibitively expensive full-vocabulary path"
+                )
         if self.training_config.activation_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
             self.model._set_gradient_checkpointing(
                 enable=True,
@@ -566,6 +601,8 @@ class TransformersPolicyTrainer:
             optimizer_parameters.extend(self.value_head.parameters())
         self.optimizer = torch.optim.AdamW(optimizer_parameters, lr=self.training_config.learning_rate)
         self.model.train()
+        print("[TransformersPolicyTrainer] Model and optimizer are ready", flush=True)
+        _write_training_progress(self.progress_path, "trainer_ready")
 
     def _torch_dtype(self):
         mapping = {
@@ -688,21 +725,70 @@ class TransformersPolicyTrainer:
         if missing:
             raise ValueError(f"Samples are missing exact value-state anchors: {', '.join(missing)}")
         input_ids, labels, completion_mask = self._encode_shifted_samples(samples)
+        anchor_positions = [int(sample.state_prefix_length) - 1 for sample in samples]
+        trainable_positions = completion_mask.any(dim=0).nonzero(as_tuple=False).flatten().tolist()
+        selected_positions = sorted(set(anchor_positions) | {int(position) for position in trainable_positions})
+        if not selected_positions:
+            raise ValueError("Compaction value training found no value anchor or policy positions")
         captured, handle = capture_lm_head_input(self.model)
         try:
-            outputs = self.model(input_ids=input_ids)
+            outputs = self.model(
+                input_ids=input_ids,
+                # A Python index list is intentionally used here. Device-map
+                # hooks cannot move it onto a GPU that differs from the final
+                # hidden-state device before Qwen applies the sequence slice.
+                logits_to_keep=selected_positions,
+                use_cache=False,
+            )
         finally:
             handle.remove()
         if len(captured) != 1:
             raise RuntimeError("Expected exactly one language-model head invocation")
-        prefix_lengths = torch.tensor(
-            [int(sample.state_prefix_length) for sample in samples],
+        anchor_offsets = torch.tensor(
+            [selected_positions.index(position) for position in anchor_positions],
             dtype=torch.long,
-            device=input_ids.device,
+            device=captured[0].device,
         )
-        value_logits = self.value_head(state_hidden_states(captured[0], prefix_lengths))
-        token_logprobs = _masked_token_logprobs(outputs.logits, labels, completion_mask)
-        return token_logprobs, completion_mask, value_logits
+        rows = torch.arange(len(samples), device=captured[0].device)
+        value_hidden_states = captured[0][rows, anchor_offsets]
+        value_logits = self.value_head(value_hidden_states)
+
+        position_tensor = torch.tensor(selected_positions, dtype=torch.long, device=outputs.logits.device)
+        selected_labels = labels.to(device=outputs.logits.device).index_select(1, position_tensor)
+        selected_mask = completion_mask.to(device=outputs.logits.device).index_select(1, position_tensor)
+        selected_logprobs = _masked_token_logprobs(outputs.logits, selected_labels, selected_mask)
+        full_mask = completion_mask.to(device=outputs.logits.device)
+        scatter_indices = position_tensor.unsqueeze(0).expand(len(samples), -1)
+        token_logprobs = torch.zeros(full_mask.shape, dtype=selected_logprobs.dtype, device=outputs.logits.device)
+        token_logprobs = token_logprobs.scatter(1, scatter_indices, selected_logprobs)
+        return token_logprobs, full_mask, value_logits
+
+    def _value_logits(self, samples: list[RLSample]) -> torch.Tensor:
+        """Evaluate interval-start values without processing the interval tail."""
+
+        if self.value_head is None:
+            raise RuntimeError("Compaction value training is enabled without a value head")
+        logits: list[torch.Tensor] = []
+        for sample in samples:
+            if sample.state_prefix_length is None:
+                raise ValueError(f"Sample {sample.turn_id} is missing an exact value-state anchor")
+            input_ids, _labels, _completion_mask = self._encode_shifted_samples([sample])
+            prefix_length = int(sample.state_prefix_length)
+            if not 1 <= prefix_length <= input_ids.shape[1]:
+                raise ValueError(f"Sample {sample.turn_id} has an invalid value-state anchor")
+            captured, handle = capture_lm_head_input(self.model)
+            try:
+                self.model(
+                    input_ids=input_ids[:, :prefix_length],
+                    logits_to_keep=1,
+                    use_cache=False,
+                )
+            finally:
+                handle.remove()
+            if len(captured) != 1 or captured[0].shape[1] != 1:
+                raise RuntimeError("Expected exactly one selected value-anchor hidden state")
+            logits.append(self.value_head(captured[0][:, 0]))
+        return torch.cat(logits, dim=0)
 
     def _old_values(self, samples: list[RLSample], *, microbatch_size: int) -> list[float]:
         was_training = self.model.training
@@ -713,9 +799,28 @@ class TransformersPolicyTrainer:
         values: list[float] = []
         try:
             with torch.no_grad():
-                for start, end in _microbatch_ranges(0, len(samples), microbatch_size):
-                    _logprobs, _mask, logits = self._actor_critic_outputs(samples[start:end])
+                ranges = list(_microbatch_ranges(0, len(samples), microbatch_size))
+                started = time.monotonic()
+                for batch_index, (start, end) in enumerate(ranges, start=1):
+                    logits = self._value_logits(samples[start:end])
                     values.extend(expected_binary_value(logits).detach().cpu().tolist())
+                    if _report_progress(batch_index, len(ranges)):
+                        elapsed = time.monotonic() - started
+                        print(
+                            f"[TransformersPolicyTrainer] Frozen values: "
+                            f"microbatch={batch_index}/{len(ranges)}, "
+                            f"states={end}/{len(samples)}, elapsed_seconds={elapsed:.1f}",
+                            flush=True,
+                        )
+                        _write_training_progress(
+                            getattr(self, "progress_path", None),
+                            "frozen_values",
+                            completed_microbatches=batch_index,
+                            total_microbatches=len(ranges),
+                            completed_states=end,
+                            total_states=len(samples),
+                            elapsed_seconds=elapsed,
+                        )
         finally:
             if was_training:
                 self.model.train()
@@ -749,7 +854,29 @@ class TransformersPolicyTrainer:
             if previous_reward != sample.reward:
                 raise ValueError(f"Rollout {rollout_id} has inconsistent interval rewards")
 
+        total_tokens = sum(len(sample.input_ids or []) for sample in samples)
+        trainable_tokens = sum(sum(bool(value) for value in (sample.completion_mask or [])) for sample in samples)
+        prefix_tokens = sum(int(sample.state_prefix_length or 0) for sample in samples)
+        print(
+            "[TransformersPolicyTrainer] Starting compaction-value update: "
+            f"states={len(samples)}, rollouts={len(reward_by_rollout)}, "
+            f"total_tokens={total_tokens}, trainable_tokens={trainable_tokens}, "
+            f"prefix_tokens={prefix_tokens}, update_epochs={update_epochs}, "
+            f"minibatch_size={minibatch_size or len(samples)}, microbatch_size={microbatch_size}",
+            flush=True,
+        )
+        _write_training_progress(
+            getattr(self, "progress_path", None),
+            "frozen_values_start",
+            total_states=len(samples),
+            rollout_count=len(reward_by_rollout),
+            total_tokens=total_tokens,
+            trainable_tokens=trainable_tokens,
+            prefix_tokens=prefix_tokens,
+        )
+        old_value_started = time.monotonic()
         old_values = self._old_values(samples, microbatch_size=microbatch_size)
+        old_value_seconds = time.monotonic() - old_value_started
         advantages = [sample.reward - old_value for sample, old_value in zip(samples, old_values)]
         rollout_ids = [str(sample.rollout_id) for sample in samples]
         value_weights = rollout_value_weights(rollout_ids)
@@ -763,6 +890,20 @@ class TransformersPolicyTrainer:
         weighted_value_loss_sum = 0.0
         value_loss_count = 0
         optimizer_step_count = 0
+        microbatch_ranges = [
+            (start, end, micro_start, micro_end)
+            for start, end in _minibatch_ranges(len(samples), minibatch_size)
+            for micro_start, micro_end in _microbatch_ranges(start, end, microbatch_size)
+        ]
+        total_update_microbatches = update_epochs * len(microbatch_ranges)
+        completed_update_microbatches = 0
+        update_started = time.monotonic()
+        _write_training_progress(
+            getattr(self, "progress_path", None),
+            "policy_value_update_start",
+            total_microbatches=total_update_microbatches,
+            old_value_seconds=old_value_seconds,
+        )
         for _epoch_index in range(update_epochs):
             for start, end in _minibatch_ranges(len(samples), minibatch_size):
                 self.optimizer.zero_grad(set_to_none=True)
@@ -804,6 +945,26 @@ class TransformersPolicyTrainer:
                     detached_clipped.extend(clipped.detach()[valid].cpu().tolist())
                     weighted_value_loss_sum += float(value_loss.detach().cpu())
                     value_loss_count += 1
+                    completed_update_microbatches += 1
+                    if _report_progress(completed_update_microbatches, total_update_microbatches):
+                        elapsed = time.monotonic() - update_started
+                        print(
+                            f"[TransformersPolicyTrainer] Policy/value update: "
+                            f"microbatch={completed_update_microbatches}/{total_update_microbatches}, "
+                            f"epoch={_epoch_index + 1}/{update_epochs}, "
+                            f"states={micro_end}/{len(samples)}, elapsed_seconds={elapsed:.1f}",
+                            flush=True,
+                        )
+                        _write_training_progress(
+                            getattr(self, "progress_path", None),
+                            "policy_value_update",
+                            completed_microbatches=completed_update_microbatches,
+                            total_microbatches=total_update_microbatches,
+                            epoch=_epoch_index + 1,
+                            completed_states=micro_end,
+                            total_states=len(samples),
+                            elapsed_seconds=elapsed,
+                        )
                 parameters = list(self.model.parameters()) + list(self.value_head.parameters())
                 torch.nn.utils.clip_grad_norm_(parameters, self.training_config.max_grad_norm)
                 self.optimizer.step()
@@ -837,6 +998,11 @@ class TransformersPolicyTrainer:
                 "value/state_count": len(samples),
                 "value/rollout_count": len(set(rollout_ids)),
                 "value/head_loaded": self.value_head_loaded,
+                "value/old_value_seconds": old_value_seconds,
+                "value/update_seconds": time.monotonic() - update_started,
+                "value/total_tokens": total_tokens,
+                "value/trainable_tokens": trainable_tokens,
+                "value/prefix_tokens": prefix_tokens,
             },
         )
 

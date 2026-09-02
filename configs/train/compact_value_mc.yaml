@@ -91,6 +91,11 @@ runtime:
   tool_budget: 99999
   generated_token_budget: 36000
   phase_timeout_seconds: 9000
+  # Value training performs an additional frozen-value pass. Keep collection
+  # on the normal phase limit while allowing a fully instrumented update up to
+  # six hours; remote timings should be used to tighten this after the first
+  # successful full-size iteration.
+  train_update_timeout_seconds: 21600
 
 judge:
   enabled: true

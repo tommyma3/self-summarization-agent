@@ -366,6 +366,9 @@ def test_load_compaction_mc_value_training_preset() -> None:
     assert config.runtime.max_context_tokens == default.runtime.max_context_tokens
     assert config.runtime.max_summary_tokens == default.runtime.max_summary_tokens
     assert config.runtime.generated_token_budget == default.runtime.generated_token_budget
+    assert config.runtime.phase_timeout_seconds == default.runtime.phase_timeout_seconds
+    assert config.runtime.train_update_timeout_seconds == 21_600
+    assert default.runtime.train_update_timeout_seconds is None
     assert config.rollout.max_model_len == default.rollout.max_model_len
     assert config.rollout.max_new_tokens == default.rollout.max_new_tokens
     assert config.training.max_sequence_length == default.training.max_sequence_length
