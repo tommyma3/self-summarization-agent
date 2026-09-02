@@ -16,9 +16,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 class RetrievalWorkerServer(ThreadingHTTPServer):
+    # Allow many concurrent policy workers to connect without OS-level resets.
+    request_queue_size = 128
+
     def __init__(self, server_address, request_handler_class, backend):
         super().__init__(server_address, request_handler_class)
         self.backend = backend
+        self.backend_lock = threading.Lock()
 
 
 class RetrievalWorkerHandler(BaseHTTPRequestHandler):
@@ -80,14 +84,18 @@ class RetrievalWorkerHandler(BaseHTTPRequestHandler):
                 queries = payload.get("queries")
                 if not isinstance(queries, list) or not all(isinstance(query, str) for query in queries):
                     raise ValueError("search_many.queries must be a list of strings")
-                self._write_json({"results": self.server.backend.search_many(queries)})
+                with self.server.backend_lock:
+                    results = self.server.backend.search_many(queries)
+                self._write_json({"results": results})
                 return
             if self.path == "/get_document":
                 payload = self._read_json()
                 doc_id = payload.get("doc_id")
                 if not isinstance(doc_id, str):
                     raise ValueError("get_document.doc_id must be a string")
-                self._write_json({"document": self.server.backend.get_document(doc_id)})
+                with self.server.backend_lock:
+                    document = self.server.backend.get_document(doc_id)
+                self._write_json({"document": document})
                 return
             if self.path == "/shutdown":
                 self._write_json({"ok": True})

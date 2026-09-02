@@ -936,7 +936,16 @@ class EpisodeRuntime:
         search_actions = [action for action in actions if action.tool_name == "search"]
         if search_actions:
             queries = [str(action.arguments["query"]) for action in search_actions]
-            for action, search_results in zip(search_actions, self._search_many(queries)):
+            try:
+                search_results_by_query = self._search_many(queries)
+            except Exception:
+                LOGGER.warning(
+                    "Failed to execute batched search for %s queries; returning empty results",
+                    len(queries),
+                    exc_info=True,
+                )
+                search_results_by_query = [[] for _ in queries]
+            for action, search_results in zip(search_actions, search_results_by_query):
                 action.active.tool_call_counts["search"] += 1
                 self._record_search_result_docids(action.active.retrieved_docids, search_results)
                 self._apply_tool_result(action, json.dumps(search_results, ensure_ascii=False))

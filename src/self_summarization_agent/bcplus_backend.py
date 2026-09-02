@@ -178,20 +178,33 @@ class RetrievalWorkerClient:
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> Any:
         data = json.dumps(payload).encode("utf-8")
-        req = request.Request(
-            f"{self.base_url.rstrip('/')}{path}",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        url = f"{self.base_url.rstrip('/')}{path}"
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
+            # Build a fresh Request each attempt so no mutable state carries over.
+            req = request.Request(
+                url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             try:
                 with request.urlopen(req, timeout=self.timeout_seconds) as response:
                     response_payload = response.read().decode("utf-8")
                 return json.loads(response_payload) if response_payload else None
             except error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
+                if exc.code >= 500 and attempt < self.max_retries - 1:
+                    LOGGER.warning(
+                        "Retrieval worker request to %s%s failed (HTTP %s: %s); retrying in %.1fs...",
+                        self.base_url,
+                        path,
+                        exc.code,
+                        detail,
+                        attempt + 1,
+                    )
+                    time.sleep(attempt + 1)
+                    continue
                 raise RuntimeError(f"Retrieval worker request failed: HTTP {exc.code}: {detail}") from exc
             except (error.URLError, RemoteDisconnected, ConnectionResetError, TimeoutError) as exc:
                 last_error = exc

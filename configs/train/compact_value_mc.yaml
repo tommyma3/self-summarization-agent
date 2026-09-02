@@ -26,7 +26,7 @@ retrieval:
   worker_startup_timeout_seconds: 600
   # Chunk batched searches so the embedding model never receives all
   # max_concurrent_episodes queries in a single forward pass.
-  search_max_batch_size: 50
+  search_max_batch_size: 25
   index_path: /124090467/self-summarization-agent/bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
   model_name: /124090467/Qwen/Qwen3-Embedding-8B
   normalize: true
@@ -58,7 +58,7 @@ rollout:
   # Keep rollout limits identical to the default training experiment.
   max_model_len: 27000
   enable_prefix_caching: true
-  max_concurrent_episodes: 50
+  max_concurrent_episodes: 25
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: false
   overlap_queue_max_batches: 8
