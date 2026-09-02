@@ -793,7 +793,9 @@ class TransformersPolicyTrainer:
                         device=value_logits.device,
                     )
                     value_loss = rollout_normalized_value_loss(value_logits, rewards, weights)
-                    total_loss = policy_loss + self.training_config.value.loss_coefficient * value_loss
+                    total_loss = policy_loss + self.training_config.value.loss_coefficient * value_loss.to(
+                        device=policy_loss.device
+                    )
                     total_loss.backward()
 
                     valid = loss_mask > 0

@@ -379,3 +379,70 @@ def test_compaction_value_step_freezes_old_values_across_update_epochs() -> None
     assert metrics.extra_metrics["value/rollout_count"] == 2
     assert metrics.extra_metrics["value/state_count"] == 3
     assert any(torch.count_nonzero(parameter) for parameter in trainer.value_head.parameters())
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two CUDA devices")
+def test_compaction_value_step_handles_split_policy_value_devices() -> None:
+    feature_by_turn = {"positive": 1.0, "negative": -1.0}
+
+    class SplitDeviceActorCriticTrainer(TransformersPolicyTrainer):
+        def _model_device(self) -> torch.device:
+            return torch.device("cuda:0")
+
+        def _actor_critic_outputs(self, samples: list[RLSample]):
+            features = torch.tensor(
+                [[feature_by_turn[sample.turn_id]] for sample in samples],
+                dtype=torch.float32,
+                device="cuda:0",
+            )
+            hidden = self.model(features)
+            return (
+                hidden,
+                torch.ones_like(hidden, dtype=torch.bool, device="cuda:0"),
+                self.value_head(hidden.to("cuda:1")),
+            )
+
+    def cached(turn_id: str, reward: float, rollout_id: str) -> RLSample:
+        return RLSample(
+            query_id="q1",
+            turn_id=turn_id,
+            prompt="",
+            completion="",
+            reward=reward,
+            trainable_kind="trajectory",
+            rollout_id=rollout_id,
+            input_ids=[1],
+            labels=[2],
+            completion_mask=[True],
+            reference_logprob=0.0,
+            reference_logprobs=[0.0],
+            state_prefix_length=1,
+        )
+
+    trainer = SplitDeviceActorCriticTrainer.__new__(SplitDeviceActorCriticTrainer)
+    trainer.training_config = TrainingConfig(
+        advantage_estimator="compaction_mc_value",
+        value=CompactionValueConfig(enabled=True),
+        update_epochs=1,
+        minibatch_size=2,
+        gradient_accumulation_microbatch_size=1,
+        target_kl=None,
+    )
+    trainer.model = torch.nn.Linear(1, 1, bias=False).to("cuda:0")
+    trainer.value_head = CompactionValueHead(1, zero_initialize=True).to("cuda:1")
+    trainer.value_head_loaded = False
+    trainer.optimizer = torch.optim.SGD(
+        [*trainer.model.parameters(), *trainer.value_head.parameters()], lr=0.1
+    )
+    grouped = {
+        "q1": [
+            cached("positive", 1.0, "q1:0"),
+            cached("negative", -1.0, "q1:1"),
+        ]
+    }
+
+    metrics = trainer.step(grouped)
+
+    assert metrics.optimizer_step_count == 1
+    assert "value/loss" in metrics.extra_metrics
+    assert any(torch.count_nonzero(parameter) for parameter in trainer.value_head.parameters())
