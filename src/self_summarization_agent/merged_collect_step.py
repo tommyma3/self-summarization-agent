@@ -644,6 +644,15 @@ def _run_split_collection_process(
         )
 
 
+def _require_live_retrieval_worker(process: Any, *, after_split: str) -> None:
+    returncode = process.poll()
+    if returncode is not None:
+        raise RuntimeError(
+            "Retrieval worker exited unexpectedly during "
+            f"{after_split} policy collection with code {returncode}"
+        )
+
+
 def _selected_split_examples(config, *, split: str, examples: list[Any], sample_seed: int | None):
     task_count, task_count_key = _configured_task_count(config, split=split)
     seed = config.experiment.seed if sample_seed is None else sample_seed
@@ -896,6 +905,7 @@ def run_merged_collect(
                     python_executable=sys.executable,
                     overrides=overrides,
                     startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
+                    gpu_ids=getattr(config.retrieval, "gpu_ids", ()),
                 )
 
             if eval_raw_needed and has_eval:
@@ -911,6 +921,11 @@ def run_merged_collect(
                     retrieval_worker_url=active_retrieval_url,
                     per_split_timeout_seconds=per_split_timeout,
                 )
+                if owned_retrieval_process is not None:
+                    _require_live_retrieval_worker(
+                        owned_retrieval_process,
+                        after_split="eval",
+                    )
                 outputs["eval_raw"] = Path(eval_raw_output)
 
             if train_raw_needed:
@@ -926,6 +941,11 @@ def run_merged_collect(
                     retrieval_worker_url=active_retrieval_url,
                     per_split_timeout_seconds=per_split_timeout,
                 )
+                if owned_retrieval_process is not None:
+                    _require_live_retrieval_worker(
+                        owned_retrieval_process,
+                        after_split="train",
+                    )
                 outputs["train_raw"] = Path(train_raw_output)
         finally:
             if owned_retrieval_process is not None:

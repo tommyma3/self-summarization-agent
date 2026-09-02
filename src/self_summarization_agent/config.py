@@ -46,6 +46,7 @@ class RetrievalConfig:
     persistent_worker: bool = False
     worker_startup_timeout_seconds: int = 600
     search_max_batch_size: int | None = None
+    gpu_ids: list[int] = field(default_factory=list)
     index_path: str = ""
     model_name: str | None = None
     normalize: bool = False

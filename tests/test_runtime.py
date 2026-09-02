@@ -351,6 +351,29 @@ def test_runtime_batches_same_step_search_calls() -> None:
     assert [result.final_answer for result in results] == ["done one", "done two"]
 
 
+def test_runtime_does_not_silently_replace_failed_searches_with_empty_results() -> None:
+    class FailedSearchBackend(FakeBackend):
+        def search_many(self, queries: list[str]):
+            raise RuntimeError(f"retrieval worker unavailable for {len(queries)} queries")
+
+    model = ScriptedModel(
+        outputs=[tool_output('{"tool_name": "search", "arguments": {"query": "first"}}')]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FailedSearchBackend(search_index={}, documents={}),
+        context_threshold_tokens=1000,
+        max_context_tokens=1024,
+    )
+
+    try:
+        runtime.run(query_id="q1", user_prompt="question")
+    except RuntimeError as exc:
+        assert "retrieval worker unavailable" in str(exc)
+    else:
+        raise AssertionError("retrieval failures must abort collection")
+
+
 def test_runtime_stops_on_malformed_tool_call() -> None:
     backend = FakeBackend(search_index={}, documents={})
     model = ScriptedModel(outputs=['{"tool_name": "search"}'])

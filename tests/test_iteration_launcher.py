@@ -22,6 +22,7 @@ from self_summarization_agent.config import (
 from self_summarization_agent.iteration_launcher import (
     _expected_eval_rollout_count,
     _has_complete_cached_rollouts,
+    _start_retrieval_worker,
     run_checkpoint_evaluation,
     run_training_iteration,
 )
@@ -485,6 +486,39 @@ def test_checkpoint_evaluation_runs_final_eval_without_training(tmp_path: Path) 
 # ---------------------------------------------------------------------------
 # Retrieval worker tests
 # ---------------------------------------------------------------------------
+
+def test_start_retrieval_worker_isolates_configured_gpus(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class Process:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def popen(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return Process()
+
+    monkeypatch.setattr("self_summarization_agent.iteration_launcher.subprocess.Popen", popen)
+    monkeypatch.setattr(
+        "self_summarization_agent.iteration_launcher._wait_for_retrieval_worker",
+        lambda *_args: "http://127.0.0.1:12345",
+    )
+
+    _process, url = _start_retrieval_worker(
+        config_path="train.yaml",
+        train_dir=tmp_path,
+        python_executable="python",
+        overrides=[],
+        startup_timeout_seconds=10,
+        gpu_ids=[0, 1],
+    )
+
+    assert url == "http://127.0.0.1:12345"
+    assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
+
 
 def test_iteration_launcher_delegates_retrieval_ownership_to_merged_collect(
     tmp_path: Path,

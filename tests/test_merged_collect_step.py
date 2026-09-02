@@ -395,3 +395,15 @@ def test_merged_collect_stops_retrieval_before_starting_judge(tmp_path: Path, mo
         "metrics",
         "cache",
     ]
+
+
+def test_live_retrieval_worker_check_rejects_unexpected_exit() -> None:
+    process = SimpleNamespace(poll=lambda: -9)
+
+    try:
+        merged_collect_step._require_live_retrieval_worker(process, after_split="eval")
+    except RuntimeError as exc:
+        assert "eval policy collection" in str(exc)
+        assert "code -9" in str(exc)
+    else:
+        raise AssertionError("dead retrieval worker must fail collection")

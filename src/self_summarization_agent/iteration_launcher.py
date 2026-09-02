@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 import json
+import os
 import subprocess
 import sys
 import time
@@ -65,6 +66,7 @@ def _start_retrieval_worker(
     python_executable: str,
     overrides: Sequence[str],
     startup_timeout_seconds: int,
+    gpu_ids: Sequence[int] = (),
 ) -> tuple[subprocess.Popen, str]:
     ready_file = train_dir / "retrieval_worker.json"
     with suppress(FileNotFoundError):
@@ -79,7 +81,15 @@ def _start_retrieval_worker(
         str(ready_file),
     ]
     _append_cli_overrides(command, overrides)
-    process = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr)
+    worker_env = os.environ.copy()
+    if gpu_ids:
+        worker_env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in gpu_ids)
+    process = subprocess.Popen(
+        command,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        env=worker_env,
+    )
     try:
         url = _wait_for_retrieval_worker(process, ready_file, startup_timeout_seconds)
     except Exception:
@@ -640,6 +650,7 @@ def run_checkpoint_evaluation(
             python_executable=python_executable,
             overrides=overrides,
             startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
+            gpu_ids=config.retrieval.gpu_ids,
         )
         eval_rollout_command.extend(["--retrieval-worker-url", retrieval_worker_url])
 

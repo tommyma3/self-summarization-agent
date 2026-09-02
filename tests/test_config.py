@@ -60,6 +60,7 @@ dataset: {}
 retrieval:
   backend: faiss
   snippet_tokenizer_path: /models/qwen-tokenizer
+  gpu_ids: [6]
   index_path: indexes/corpus.pkl
 model:
   backend: transformers
@@ -92,6 +93,7 @@ runtime:
     assert config.dataset.limit == 3
     assert config.retrieval.backend == "bm25"
     assert config.retrieval.snippet_tokenizer_path == "/models/qwen-tokenizer"
+    assert config.retrieval.gpu_ids == [6]
     assert config.runtime.tool_budget == 2
     assert config.runtime.generated_token_budget == 8
     assert config.runtime.max_summary_tokens == 2048

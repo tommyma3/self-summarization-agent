@@ -24,6 +24,8 @@ retrieval:
   snippet_tokenizer_path: /124090467/Qwen/Qwen3.5-9B
   persistent_worker: true
   worker_startup_timeout_seconds: 600
+  # Keep the embedding model and sharded FAISS index off policy GPUs 2-3.
+  gpu_ids: [0, 1]
   # Chunk batched searches so the embedding model never receives all
   # max_concurrent_episodes queries in a single forward pass.
   search_max_batch_size: 25
