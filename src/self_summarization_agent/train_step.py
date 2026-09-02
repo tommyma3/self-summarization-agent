@@ -18,6 +18,7 @@ from self_summarization_agent.trajectory import (
     extract_training_samples,
     is_training_cache_current,
 )
+from self_summarization_agent.value_model import VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME
 
 
 def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -58,6 +59,7 @@ def samples_from_rollout_rows(
     *,
     expected_checkpoint_id: str,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> list[Any]:
     samples = []
     for index, row in enumerate(rows, start=1):
@@ -84,6 +86,7 @@ def samples_from_rollout_rows(
             turn_rewards,
             rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
             train_compaction_tokens=train_compaction_tokens,
+            retain_critic_only_states=retain_critic_only_states,
         )
         if not row_samples:
             # Every record is excluded under this policy; nothing to train.
@@ -125,11 +128,24 @@ def run_train_step(
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
+    if (
+        config.training.value.enabled
+        and checkpoint_id.startswith("iteration-")
+        and checkpoint_id != "iteration-00000"
+        and not all(
+            (checkpoint / filename).exists()
+            for filename in (VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME)
+        )
+    ):
+        raise ValueError(
+            f"Value-enabled resume checkpoint {checkpoint_id} is missing its value-head sidecar"
+        )
     rows = _load_rollout_rows(rollout_path)
     samples = samples_from_rollout_rows(
         rows,
         expected_checkpoint_id=checkpoint_id,
         train_compaction_tokens=config.training.train_compaction_tokens,
+        retain_critic_only_states=config.training.value.enabled,
     )
     grouped_samples = group_samples_by_query(samples)
     print(f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, {len(grouped_samples)} groups.", flush=True)
@@ -137,6 +153,12 @@ def run_train_step(
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
         if config.training.backend == "verl_ray":
+            if config.training.value.enabled and config.training.verl.worker_backend == "verl_fsdp":
+                raise NotImplementedError(
+                    "Shared-backbone compaction value training currently requires "
+                    "training.verl.worker_backend='transformers'; verl's native FSDP actor "
+                    "does not expose the actor hidden state or preserve the sidecar value head."
+                )
             from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
 
             # Shutdown any stale Ray instance from a previous failed run
@@ -166,6 +188,11 @@ def run_train_step(
                 checkpoint_id=checkpoint_id,
             )
         elif config.training.backend == "fsdp2_context_parallel":
+            if config.training.value.enabled:
+                raise NotImplementedError(
+                    "Shared-backbone compaction value training is not implemented for "
+                    "fsdp2_context_parallel; use transformers or verl_ray/transformers."
+                )
             if os.environ.get("RANK") is None:
                 warnings.warn(
                     "training.backend='fsdp2_context_parallel' requires accelerate launch. "

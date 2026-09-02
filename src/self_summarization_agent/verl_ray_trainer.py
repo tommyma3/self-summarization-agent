@@ -77,8 +77,10 @@ def _pad_cached_sequences(
             "labels": torch.empty((0, 0), dtype=torch.long),
             "completion_mask": torch.empty((0, 0), dtype=torch.bool),
             "reference_logprobs": torch.empty((0,), dtype=torch.float32),
+            "token_reference_logprobs": torch.empty((0, 0), dtype=torch.float32),
             "rewards": torch.empty((0,), dtype=torch.float32),
             "sequence_lengths": torch.empty((0,), dtype=torch.long),
+            "state_prefix_lengths": torch.empty((0,), dtype=torch.long),
         }
     # Interval prefixes always contain the invariant system instructions and
     # must never be silently removed by left truncation.
@@ -96,22 +98,40 @@ def _pad_cached_sequences(
     labels = torch.zeros((len(samples), max_length), dtype=torch.long)
     completion_mask = torch.zeros((len(samples), max_length), dtype=torch.bool)
     reference_logprobs = torch.empty((len(samples),), dtype=torch.float32)
+    token_reference_logprobs = torch.zeros((len(samples), max_length), dtype=torch.float32)
     rewards = torch.empty((len(samples),), dtype=torch.float32)
     sequence_lengths = torch.tensor(lengths, dtype=torch.long)
+    state_prefix_lengths = torch.tensor(
+        [int(sample.state_prefix_length or 0) for sample in samples], dtype=torch.long
+    )
     for index, sample in enumerate(samples):
         length = lengths[index]
         input_ids[index, :length] = torch.tensor(sample.input_ids or [], dtype=torch.long)
         labels[index, :length] = torch.tensor(sample.labels or [], dtype=torch.long)
         completion_mask[index, :length] = torch.tensor(sample.completion_mask or [], dtype=torch.bool)
         reference_logprobs[index] = float(sample.reference_logprob)
+        if sample.reference_logprobs is not None:
+            if len(sample.reference_logprobs) != length:
+                raise ValueError(f"Sample {sample.turn_id} has misaligned token reference logprobs")
+            token_reference_logprobs[index, :length] = torch.tensor(
+                sample.reference_logprobs, dtype=torch.float32
+            )
+        else:
+            token_reference_logprobs[index, :length] = torch.where(
+                completion_mask[index, :length],
+                torch.full((length,), float(sample.reference_logprob), dtype=torch.float32),
+                torch.zeros((length,), dtype=torch.float32),
+            )
         rewards[index] = float(sample.reward)
     return {
         "input_ids": input_ids,
         "labels": labels,
         "completion_mask": completion_mask,
         "reference_logprobs": reference_logprobs,
+        "token_reference_logprobs": token_reference_logprobs,
         "rewards": rewards,
         "sequence_lengths": sequence_lengths,
+        "state_prefix_lengths": state_prefix_lengths,
     }
 
 
@@ -139,6 +159,7 @@ def build_verl_dataproto(
         "query_ids": np.array([sample.query_id for sample in flat_samples], dtype=object),
         "turn_ids": np.array([sample.turn_id for sample in flat_samples], dtype=object),
         "trainable_kinds": np.array([sample.trainable_kind for sample in flat_samples], dtype=object),
+        "rollout_ids": np.array([sample.rollout_id for sample in flat_samples], dtype=object),
     }
     return DataProto.from_single_dict(
         {
@@ -311,6 +332,7 @@ def grouped_samples_from_verl_dataproto(batch: Any) -> dict[str, list[RLSample]]
     query_ids = batch.non_tensor_batch["query_ids"]
     turn_ids = batch.non_tensor_batch["turn_ids"]
     kinds = batch.non_tensor_batch["trainable_kinds"]
+    rollout_ids = batch.non_tensor_batch.get("rollout_ids", [None] * len(batch))
     for index in range(len(batch)):
         length = int(tensors["sequence_lengths"][index].item())
         sample = RLSample(
@@ -320,10 +342,16 @@ def grouped_samples_from_verl_dataproto(batch: Any) -> dict[str, list[RLSample]]
             completion="",
             reward=float(tensors["rewards"][index].item()),
             trainable_kind=str(kinds[index]),
+            rollout_id=None if rollout_ids[index] is None else str(rollout_ids[index]),
             input_ids=[int(value) for value in tensors["input_ids"][index, :length].tolist()],
             labels=[int(value) for value in tensors["labels"][index, :length].tolist()],
             completion_mask=[bool(value) for value in tensors["completion_mask"][index, :length].tolist()],
             reference_logprob=float(tensors["reference_logprobs"][index].item()),
+            reference_logprobs=[
+                float(value)
+                for value in tensors["token_reference_logprobs"][index, :length].tolist()
+            ],
+            state_prefix_length=int(tensors["state_prefix_lengths"][index].item()),
         )
         grouped.setdefault(sample.query_id, []).append(sample)
     return grouped
@@ -614,7 +642,7 @@ class VerlRayPolicyTrainer:
             # This must happen *before* building the DataProto because
             # NestedTensors do not support dim-0 slicing.
             assert self._worker_group is not None
-            align_step = self._worker_group.alignment_step
+            align_step = getattr(self._worker_group, "alignment_step", 1)
             if len(policy_batch.contributing) < align_step:
                 # Not enough contributing samples to meet the full alignment
                 # step (LCM of world_size and minibatch_size).  Fall back to

@@ -4,6 +4,7 @@ peft>=0.19.1
 pyserini>=1.4.0
 PyYAML>=6.0.2
 qwen-omni-utils>=0.0.9
+safetensors>=0.4.0
 openai>=2.32.0
 tevatron>=0.0.1
 torch

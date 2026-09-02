@@ -1,6 +1,7 @@
+import pytest
 import torch
 
-from self_summarization_agent.config import ModelConfig, TrainingConfig
+from self_summarization_agent.config import CompactionValueConfig, ModelConfig, TrainingConfig
 from self_summarization_agent.trainer import (
     FSDP2ContextParallelPolicyTrainer,
     TransformersPolicyTrainer,
@@ -9,6 +10,7 @@ from self_summarization_agent.trainer import (
     compute_group_advantages,
 )
 from self_summarization_agent.trajectory import RLSample
+from self_summarization_agent.value_model import CompactionValueHead
 
 
 class FakeAccelerator:
@@ -306,3 +308,74 @@ def test_token_grpo_loss_aligns_reference_logprobs_to_microbatch_length() -> Non
     assert long_losses.shape == logprobs.shape
     assert short_mask.shape == logprobs.shape
     assert long_mask.shape == logprobs.shape
+
+
+def test_compaction_value_step_freezes_old_values_across_update_epochs() -> None:
+    feature_by_turn = {"positive-1": 1.0, "positive-2": 2.0, "negative": 3.0}
+
+    class FakeActorCriticTrainer(TransformersPolicyTrainer):
+        old_value_calls = 0
+
+        def _model_device(self) -> torch.device:
+            return torch.device("cpu")
+
+        def _actor_critic_outputs(self, samples: list[RLSample]):
+            features = torch.tensor(
+                [[feature_by_turn[sample.turn_id]] for sample in samples], dtype=torch.float32
+            )
+            hidden = self.model(features)
+            return hidden, torch.ones_like(hidden, dtype=torch.bool), self.value_head(hidden)
+
+        def _old_values(self, samples: list[RLSample], *, microbatch_size: int):
+            self.old_value_calls += 1
+            return super()._old_values(samples, microbatch_size=microbatch_size)
+
+    def cached(turn_id: str, reward: float, rollout_id: str) -> RLSample:
+        return RLSample(
+            query_id="q1",
+            turn_id=turn_id,
+            prompt="",
+            completion="",
+            reward=reward,
+            trainable_kind="trajectory",
+            rollout_id=rollout_id,
+            input_ids=[1],
+            labels=[2],
+            completion_mask=[True],
+            reference_logprob=0.0,
+            reference_logprobs=[0.0],
+            state_prefix_length=1,
+        )
+
+    trainer = FakeActorCriticTrainer.__new__(FakeActorCriticTrainer)
+    trainer.training_config = TrainingConfig(
+        advantage_estimator="compaction_mc_value",
+        value=CompactionValueConfig(enabled=True),
+        update_epochs=2,
+        minibatch_size=2,
+        gradient_accumulation_microbatch_size=1,
+        target_kl=None,
+    )
+    trainer.model = torch.nn.Linear(1, 1, bias=False)
+    torch.nn.init.zeros_(trainer.model.weight)
+    trainer.value_head = CompactionValueHead(1, zero_initialize=True)
+    trainer.value_head_loaded = False
+    trainer.optimizer = torch.optim.SGD(
+        [*trainer.model.parameters(), *trainer.value_head.parameters()], lr=0.1
+    )
+    grouped = {
+        "q1": [
+            cached("positive-1", 1.0, "q1:0"),
+            cached("positive-2", 1.0, "q1:0"),
+            cached("negative", -1.0, "q1:1"),
+        ]
+    }
+
+    metrics = trainer.step(grouped)
+
+    assert trainer.old_value_calls == 1
+    assert metrics.optimizer_step_count == 4
+    assert metrics.mean_advantage == pytest.approx(1 / 3)
+    assert metrics.extra_metrics["value/rollout_count"] == 2
+    assert metrics.extra_metrics["value/state_count"] == 3
+    assert any(torch.count_nonzero(parameter) for parameter in trainer.value_head.parameters())

@@ -4,6 +4,7 @@ import ast
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -204,6 +205,32 @@ class VerlRayConfig:
 
 
 @dataclass(slots=True)
+class CompactionValueConfig:
+    enabled: bool = False
+    loss_coefficient: float = 0.5
+    zero_initialize_head: bool = True
+    state_anchor: str = "first_generation_prompt_end"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("training.value.enabled must be a boolean")
+        if not isinstance(self.zero_initialize_head, bool):
+            raise ValueError("training.value.zero_initialize_head must be a boolean")
+        if (
+            not isinstance(self.loss_coefficient, (int, float))
+            or isinstance(self.loss_coefficient, bool)
+            or not math.isfinite(float(self.loss_coefficient))
+            or self.loss_coefficient < 0
+        ):
+            raise ValueError("training.value.loss_coefficient must be finite and non-negative")
+        if self.state_anchor != "first_generation_prompt_end":
+            raise ValueError(
+                "training.value.state_anchor currently supports only "
+                "'first_generation_prompt_end'"
+            )
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     backend: str = "transformers"
     gpu_ids: list[int] = field(default_factory=list)
@@ -228,7 +255,22 @@ class TrainingConfig:
     eval_interval: int = 0
     max_grad_norm: float = 1.0
     train_compaction_tokens: bool = True
+    advantage_estimator: str = "group_relative"
+    value: CompactionValueConfig = field(default_factory=CompactionValueConfig)
     verl: VerlRayConfig = field(default_factory=VerlRayConfig)
+
+    def __post_init__(self) -> None:
+        supported = {"group_relative", "compaction_mc_value"}
+        if self.advantage_estimator not in supported:
+            raise ValueError(
+                f"training.advantage_estimator must be one of {sorted(supported)}, "
+                f"got {self.advantage_estimator!r}"
+            )
+        if self.value.enabled != (self.advantage_estimator == "compaction_mc_value"):
+            raise ValueError(
+                "training.value.enabled must be true exactly when "
+                "training.advantage_estimator='compaction_mc_value'"
+            )
 
 
 @dataclass(slots=True)
@@ -335,6 +377,9 @@ def _derive_rollout_config(raw: dict[str, Any], training: TrainingConfig) -> Rol
 
 def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     training_section = dict(_require_section(raw, "training"))
+    value_section = training_section.pop("value", {})
+    if not isinstance(value_section, dict):
+        raise ValueError("Config section 'training.value' must be a mapping")
     verl_section = training_section.pop("verl", {})
     if not isinstance(verl_section, dict):
         raise ValueError("Config section 'training.verl' must be a mapping")
@@ -344,6 +389,7 @@ def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
         raise ValueError("Config section 'training.verl.fsdp' must be a mapping")
     return TrainingConfig(
         **training_section,
+        value=CompactionValueConfig(**value_section),
         verl=VerlRayConfig(**verl_section, fsdp=VerlFSDPConfig(**fsdp_section)),
     )
 

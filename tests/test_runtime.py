@@ -135,6 +135,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
     assert cache["reference_logprobs"] == [0.0, -0.1, -0.2, 0.0, -0.3, -0.4]
     assert cache["reference_logprob"] == -0.25
     assert cache["reference_logprob_source"] == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+    assert cache["state_prefix_length"] == 2
     assert result.token_usage["budget_consumed_tokens"] == (
         result.token_usage["total_generated_tokens"] + result.token_usage["tool_result_tokens"]
     )
@@ -226,6 +227,8 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
     )
     assert summary_cache is not None
     assert final_cache is not None
+    assert summary_cache["state_prefix_length"] == 1
+    assert final_cache["state_prefix_length"] == 2
     assert summary_cache["reference_logprobs"] == [
         -0.1,
         0.0,

@@ -50,13 +50,14 @@ class FakeTrainer:
 
 def training_cache(reference_logprob: float = -0.5) -> dict:
     return {
-        "version": 5,
+        "version": 6,
         "input_ids": [1, 2],
         "labels": [2, 3],
         "completion_mask": [False, True],
         "reference_logprob": reference_logprob,
         "reference_logprobs": [0.0, reference_logprob],
         "reference_logprob_source": "policy_rescore",
+        "state_prefix_length": 1,
     }
 
 

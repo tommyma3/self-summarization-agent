@@ -10,6 +10,7 @@ Requires-Dist: peft>=0.19.1
 Requires-Dist: pyserini>=1.4.0
 Requires-Dist: PyYAML>=6.0.2
 Requires-Dist: qwen-omni-utils>=0.0.9
+Requires-Dist: safetensors>=0.4.0
 Requires-Dist: openai>=2.32.0
 Requires-Dist: tevatron>=0.0.1
 Requires-Dist: torch
@@ -214,7 +215,7 @@ Each training interval begins with the same system instructions and the same ori
 
 This context contract is trajectory schema version 3. Older rollout rows must be recollected under a fresh artifact root rather than resumed or mixed with schema-v3 data.
 
-Every collection request asks vLLM to return its exact server-side prompt and completion token IDs. The runtime stores every request under `collection_tokens.generations`; at an interval boundary it also stores the final inference sequence as `collection_tokens.full_token_ids` plus an assistant-token mask. Earlier sampled completions must be exact subsequences of the final server-rendered prompt. Missing IDs or a mismatch terminates collection with an error; the cache step never substitutes locally retokenized text for these API trajectories. Cache v4 and training then use the stored IDs directly.
+Every collection request asks vLLM to return its exact server-side prompt and completion token IDs. The runtime stores every request under `collection_tokens.generations`; at an interval boundary it also stores the final inference sequence as `collection_tokens.full_token_ids` plus an assistant-token mask. Earlier sampled completions must be exact subsequences of the final server-rendered prompt. Missing IDs or a mismatch terminates collection with an error; the cache step never substitutes locally retokenized text for these API trajectories. Cache v6 and training then use the stored IDs directly, including the exact first-generation prompt length used as the optional critic state anchor.
 
 ## How To Run Real Experiments
 
@@ -304,19 +305,25 @@ For the intended GPU run:
 - each iteration's eval-then-train collection uses one collection-scoped FAISS worker; it is shut down and joined together with the policy collection boundary before judging begins
 - eval and training policy engines run in isolated subprocesses with their corresponding sampling profiles; process exit is the authoritative vLLM teardown boundary
 - rollout collection keeps up to `rollout.max_concurrent_episodes` active episodes, emits completed rollouts after each runtime round, and immediately refills freed slots instead of waiting for the slowest episode in a fixed batch
-- exact `vllm_offline` training generations retain raw sampled-token logprobs and assemble v5 training caches directly from authoritative collection IDs and assistant masks before the policy process exits
+- exact `vllm_offline` training generations retain raw sampled-token logprobs and assemble v6 training caches directly from authoritative collection IDs and assistant masks before the policy process exits
 - after both raw artifacts are complete and policy/retrieval teardown is confirmed, one judge vLLM loads on GPUs 0-3 with tensor parallel size 4 and judges all pending eval rows followed by all pending training rows
 - `rollout.overlap_judge` and `rollout.overlap_queue_max_batches` remain parseable for compatibility but do not enable policy/judge overlap in `merged_collect`
 - `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; its generator is constructed from the resolved evaluation profile instead of mutating the training generator
 - raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
-- `cache_step` preserves complete rollout-native v5 caches without loading a model; when fallback rescoring is required, a GPU-0 policy scorer starts only after the judge process exits. Resume preserves completed v5 rows and regenerates older cache versions as v5
+- `cache_step` preserves complete rollout-native v6 caches without loading a model; when fallback rescoring is required, a GPU-0 policy scorer starts only after the judge process exits. Resume preserves completed v6 rows and regenerates older cache versions as v6
 - interrupted iterations can be resumed with `--resume`; the launcher skips completed collection, judge, cache, training, and eval phases based on artifact validation, and `--resume-rollouts` remains a deprecated alias
 - training loads the same checkpoint on GPUs 0-3 through the distributed long-context backend
 - training consumes cached rollout JSONL and applies `training.update_epochs` clipped GRPO passes over every assistant-token span in each interval using token-level reference logprobs
 - iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
+
+### Value for compaction experiment
+
+[`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
+
+The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved beside it as `compaction_value_head.safetensors` plus `compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: transformers`, because the native verl FSDP actor does not currently expose the required hidden state or sidecar checkpoint hooks.
 
 To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 

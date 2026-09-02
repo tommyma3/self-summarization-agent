@@ -25,6 +25,17 @@ from self_summarization_agent.trajectory import (
     TOKEN_CACHE_VERSION,
     tokenize_interval_messages,
 )
+from self_summarization_agent.value_model import (
+    CompactionValueHead,
+    capture_lm_head_input,
+    expected_binary_value,
+    load_value_head,
+    model_hidden_size,
+    rollout_value_weights,
+    rollout_normalized_value_loss,
+    save_value_head,
+    state_hidden_states,
+)
 
 
 @dataclass(slots=True)
@@ -355,7 +366,10 @@ def _training_cache_payload(
     completion_mask: torch.Tensor,
     reference_logprob: float,
     reference_logprobs: torch.Tensor,
+    state_prefix_length: int,
 ) -> dict[str, Any]:
+    if isinstance(state_prefix_length, bool) or not 1 <= state_prefix_length <= input_ids.numel():
+        raise ValueError("Training cache requires an exact value-state prefix anchor")
     return {
         "version": TOKEN_CACHE_VERSION,
         "input_ids": [int(token_id) for token_id in input_ids.detach().cpu().tolist()],
@@ -364,7 +378,63 @@ def _training_cache_payload(
         "reference_logprob": float(reference_logprob),
         "reference_logprobs": [float(value) for value in reference_logprobs.detach().cpu().tolist()],
         "reference_logprob_source": REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
+        "state_prefix_length": state_prefix_length,
     }
+
+
+def _exact_state_prefix_length(
+    sample: RLSample,
+    *,
+    tokenizer: Any,
+    input_ids: torch.Tensor,
+    enable_thinking: bool,
+) -> int:
+    value = sample.state_prefix_length
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+
+    prefix_ids: list[int] | None = None
+    if sample.messages is not None and getattr(tokenizer, "chat_template", None):
+        first_assistant = next(
+            (index for index, message in enumerate(sample.messages) if message.get("role") == "assistant"),
+            None,
+        )
+        if first_assistant is not None:
+            template_kwargs: dict[str, Any] = {"enable_thinking": enable_thinking}
+            if sample.tools is not None:
+                template_kwargs["tools"] = sample.tools
+            try:
+                rendered = tokenizer.apply_chat_template(
+                    sample.messages[:first_assistant],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    **template_kwargs,
+                )
+            except TypeError:
+                rendered = tokenizer.apply_chat_template(
+                    sample.messages[:first_assistant],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                )
+            if isinstance(rendered, dict):
+                rendered = rendered.get("input_ids")
+            if hasattr(rendered, "tolist"):
+                rendered = rendered.tolist()
+            if isinstance(rendered, list) and rendered and isinstance(rendered[0], list):
+                rendered = rendered[0]
+            if isinstance(rendered, list):
+                prefix_ids = [int(token_id) for token_id in rendered]
+    elif sample.prompt:
+        prefix_ids = [int(token_id) for token_id in tokenizer.encode(sample.prompt, add_special_tokens=False)]
+
+    encoded_ids = [int(token_id) for token_id in input_ids.detach().cpu().tolist()]
+    if (
+        not prefix_ids
+        or len(prefix_ids) > len(encoded_ids)
+        or encoded_ids[: len(prefix_ids)] != prefix_ids
+    ):
+        raise ValueError(f"Sample {sample.turn_id} is missing an exact value-state anchor")
+    return len(prefix_ids)
 
 
 _CE_SEQUENCE_CHUNK_TOKENS = 2048
@@ -456,6 +526,8 @@ class TransformersPolicyTrainer:
     tokenizer: Any = field(init=False)
     model: Any = field(init=False)
     optimizer: torch.optim.Optimizer = field(init=False)
+    value_head: CompactionValueHead | None = field(default=None, init=False)
+    value_head_loaded: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -478,7 +550,21 @@ class TransformersPolicyTrainer:
                     torch.utils.checkpoint.checkpoint, use_reentrant=False
                 ),
             )
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.training_config.learning_rate)
+        optimizer_parameters: list[torch.nn.Parameter] = list(self.model.parameters())
+        if self.training_config.value.enabled:
+            self.value_head, self.value_head_loaded = load_value_head(
+                self.model_config.model_path,
+                hidden_size=model_hidden_size(self.model),
+                zero_initialize=self.training_config.value.zero_initialize_head,
+            )
+            output_embedding = self.model.get_output_embeddings()
+            try:
+                output_parameter = next(output_embedding.parameters())
+            except (AttributeError, StopIteration):
+                output_parameter = next(self.model.parameters())
+            self.value_head.to(device=output_parameter.device, dtype=output_parameter.dtype)
+            optimizer_parameters.extend(self.value_head.parameters())
+        self.optimizer = torch.optim.AdamW(optimizer_parameters, lr=self.training_config.learning_rate)
         self.model.train()
 
     def _torch_dtype(self):
@@ -592,6 +678,162 @@ class TransformersPolicyTrainer:
         outputs = self.model(input_ids=input_ids)
         return _masked_token_logprobs(outputs.logits, labels, completion_mask), completion_mask
 
+    def _actor_critic_outputs(
+        self,
+        samples: list[RLSample],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.value_head is None:
+            raise RuntimeError("Compaction value training is enabled without a value head")
+        missing = [sample.turn_id for sample in samples if sample.state_prefix_length is None]
+        if missing:
+            raise ValueError(f"Samples are missing exact value-state anchors: {', '.join(missing)}")
+        input_ids, labels, completion_mask = self._encode_shifted_samples(samples)
+        captured, handle = capture_lm_head_input(self.model)
+        try:
+            outputs = self.model(input_ids=input_ids)
+        finally:
+            handle.remove()
+        if len(captured) != 1:
+            raise RuntimeError("Expected exactly one language-model head invocation")
+        prefix_lengths = torch.tensor(
+            [int(sample.state_prefix_length) for sample in samples],
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+        value_logits = self.value_head(state_hidden_states(captured[0], prefix_lengths))
+        token_logprobs = _masked_token_logprobs(outputs.logits, labels, completion_mask)
+        return token_logprobs, completion_mask, value_logits
+
+    def _old_values(self, samples: list[RLSample], *, microbatch_size: int) -> list[float]:
+        was_training = self.model.training
+        value_was_training = self.value_head.training if self.value_head is not None else False
+        self.model.eval()
+        if self.value_head is not None:
+            self.value_head.eval()
+        values: list[float] = []
+        try:
+            with torch.no_grad():
+                for start, end in _microbatch_ranges(0, len(samples), microbatch_size):
+                    _logprobs, _mask, logits = self._actor_critic_outputs(samples[start:end])
+                    values.extend(expected_binary_value(logits).detach().cpu().tolist())
+        finally:
+            if was_training:
+                self.model.train()
+            if self.value_head is not None and value_was_training:
+                self.value_head.train()
+        return values
+
+    def _step_compaction_value(
+        self,
+        grouped_samples: dict[str, list[RLSample]],
+        *,
+        update_epochs: int,
+        minibatch_size: int | None,
+        microbatch_size: int,
+        clip_range: float,
+    ) -> UpdateMetrics:
+        samples = [sample for group in grouped_samples.values() for sample in group]
+        if not samples:
+            return UpdateMetrics(sample_count=0, mean_reward=0.0, mean_advantage=0.0, loss=0.0)
+        if any(sample.rollout_id is None for sample in samples):
+            raise ValueError("Compaction value training requires rollout_id on every interval")
+        if any(sample.reward not in {-1.0, 1.0} for sample in samples):
+            raise ValueError("Compaction value training requires binary -1/+1 rollout rewards")
+
+        reward_by_rollout: dict[str, float] = {}
+        for sample in samples:
+            rollout_id = str(sample.rollout_id)
+            previous_reward = reward_by_rollout.setdefault(rollout_id, sample.reward)
+            if previous_reward != sample.reward:
+                raise ValueError(f"Rollout {rollout_id} has inconsistent interval rewards")
+
+        old_values = self._old_values(samples, microbatch_size=microbatch_size)
+        advantages = [sample.reward - old_value for sample, old_value in zip(samples, old_values)]
+        rollout_ids = [str(sample.rollout_id) for sample in samples]
+        value_weights = rollout_value_weights(rollout_ids)
+        reference_token_logprobs = self._cached_reference_token_logprobs(samples)
+        if reference_token_logprobs is None:
+            raise ValueError("Compaction value training requires cached behavior-policy log probabilities")
+
+        detached_policy_losses: list[float] = []
+        detached_kls: list[float] = []
+        detached_clipped: list[float] = []
+        weighted_value_loss_sum = 0.0
+        optimizer_step_count = 0
+        for _epoch_index in range(update_epochs):
+            for start, end in _minibatch_ranges(len(samples), minibatch_size):
+                self.optimizer.zero_grad(set_to_none=True)
+                for micro_start, micro_end in _microbatch_ranges(start, end, microbatch_size):
+                    micro_samples = samples[micro_start:micro_end]
+                    token_logprobs, completion_mask, value_logits = self._actor_critic_outputs(micro_samples)
+                    advantage_tensor = torch.tensor(
+                        advantages[micro_start:micro_end],
+                        dtype=torch.float32,
+                        device=self._model_device(),
+                    )
+                    policy_losses, approx_kls, clipped, loss_mask = _clipped_grpo_token_losses(
+                        token_logprobs,
+                        reference_token_logprobs[micro_start:micro_end],
+                        advantage_tensor,
+                        completion_mask,
+                        clip_range=clip_range,
+                    )
+                    policy_loss = policy_losses.sum() / loss_mask.sum().clamp_min(1.0)
+                    rewards = torch.tensor(
+                        [sample.reward for sample in micro_samples],
+                        dtype=torch.float32,
+                        device=value_logits.device,
+                    )
+                    weights = torch.tensor(
+                        value_weights[micro_start:micro_end],
+                        dtype=torch.float32,
+                        device=value_logits.device,
+                    )
+                    value_loss = rollout_normalized_value_loss(value_logits, rewards, weights)
+                    total_loss = policy_loss + self.training_config.value.loss_coefficient * value_loss
+                    total_loss.backward()
+
+                    valid = loss_mask > 0
+                    detached_policy_losses.extend(policy_losses.detach()[valid].cpu().tolist())
+                    detached_kls.extend(approx_kls.detach()[valid].cpu().tolist())
+                    detached_clipped.extend(clipped.detach()[valid].cpu().tolist())
+                    weighted_value_loss_sum += float(value_loss.detach().cpu())
+                parameters = list(self.model.parameters()) + list(self.value_head.parameters())
+                torch.nn.utils.clip_grad_norm_(parameters, self.training_config.max_grad_norm)
+                self.optimizer.step()
+                optimizer_step_count += 1
+
+        predicted_classes = [1.0 if value >= 0 else -1.0 for value in old_values]
+        accuracy = sum(
+            prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
+        ) / len(samples)
+        mean_policy_loss = (
+            sum(detached_policy_losses) / len(detached_policy_losses)
+            if detached_policy_losses
+            else 0.0
+        )
+        mean_value_loss = weighted_value_loss_sum / update_epochs
+        return UpdateMetrics(
+            sample_count=len(samples),
+            mean_reward=sum(sample.reward for sample in samples) / len(samples),
+            mean_advantage=sum(advantages) / len(advantages),
+            loss=mean_policy_loss + self.training_config.value.loss_coefficient * mean_value_loss,
+            optimizer_step_count=optimizer_step_count,
+            mean_policy_kl=sum(detached_kls) / len(detached_kls) if detached_kls else 0.0,
+            clip_fraction=(
+                sum(detached_clipped) / len(detached_clipped) if detached_clipped else 0.0
+            ),
+            extra_metrics={
+                "value/loss": mean_value_loss,
+                "value/old_mean": sum(old_values) / len(old_values),
+                "value/advantage_std": float(torch.tensor(advantages).std(unbiased=False)),
+                "value/classification_accuracy": accuracy,
+                "value/state_count": len(samples),
+                "value/rollout_count": len(set(rollout_ids)),
+                "value/head_loaded": self.value_head_loaded,
+            },
+        )
+
     def _cached_reference_token_logprobs(self, samples: list[RLSample]) -> torch.Tensor | None:
         if not _all_samples_have_training_cache(samples):
             return None
@@ -633,8 +875,15 @@ class TransformersPolicyTrainer:
                 completion_mask=completion_mask,
                 reference_logprob=float(reference_logprob),
                 reference_logprobs=token_reference_logprobs[: input_ids.numel()],
+                state_prefix_length=_exact_state_prefix_length(
+                    sample,
+                    tokenizer=self.tokenizer,
+                    input_ids=input_ids,
+                    enable_thinking=self.model_config.enable_thinking,
+                ),
             )
-            for (input_ids, labels, completion_mask), reference_logprob, token_reference_logprobs in zip(
+            for sample, (input_ids, labels, completion_mask), reference_logprob, token_reference_logprobs in zip(
+                samples,
                 encoded,
                 reference_logprobs,
                 reference_token_logprobs,
@@ -645,6 +894,14 @@ class TransformersPolicyTrainer:
         update_epochs, minibatch_size, microbatch_size, clip_range = _validate_grpo_training_config(
             self.training_config
         )
+        if self.training_config.value.enabled:
+            return self._step_compaction_value(
+                grouped_samples,
+                update_epochs=update_epochs,
+                minibatch_size=minibatch_size,
+                microbatch_size=microbatch_size,
+                clip_range=clip_range,
+            )
         batch = _prepare_policy_batch(grouped_samples)
         if not batch.flat_samples or not batch.contributing:
             return _metrics_without_update(batch)
@@ -741,6 +998,8 @@ class TransformersPolicyTrainer:
         self.model.save_pretrained(path)
         self.tokenizer.save_pretrained(path)
         _copy_processor_configs(self.model_config.model_path, path)
+        if self.value_head is not None:
+            save_value_head(self.value_head, path)
 
 
 @dataclass(slots=True)
@@ -973,8 +1232,16 @@ class FSDP2ContextParallelPolicyTrainer:
                     torch.full_like(completion_mask, float(reference_logprob), dtype=torch.float32),
                     torch.zeros_like(completion_mask, dtype=torch.float32),
                 ),
+                state_prefix_length=_exact_state_prefix_length(
+                    sample,
+                    tokenizer=self.tokenizer,
+                    input_ids=input_ids,
+                    enable_thinking=self.model_config.enable_thinking,
+                ),
             )
-            for (input_ids, labels, completion_mask), reference_logprob in zip(encoded, reference_logprobs)
+            for sample, (input_ids, labels, completion_mask), reference_logprob in zip(
+                samples, encoded, reference_logprobs
+            )
         ]
 
     def _masked_logprob_sums_and_counts(

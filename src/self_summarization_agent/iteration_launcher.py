@@ -29,6 +29,7 @@ from self_summarization_agent.trajectory import (
     record_has_training_tokens,
     validate_trajectory_schema,
 )
+from self_summarization_agent.value_model import VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -359,6 +360,7 @@ def _has_complete_cached_rollouts(
     checkpoint_id: str,
     expected_count: int | None,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> bool:
     if not path.exists():
         return False
@@ -399,6 +401,7 @@ def _has_complete_cached_rollouts(
             and record_has_training_tokens(
                 record,
                 train_compaction_tokens=train_compaction_tokens,
+                retain_critic_only_state=retain_critic_only_states,
             )
         }
         if not trainable_turn_ids:
@@ -425,6 +428,7 @@ def _has_inline_cached_rollouts(
     checkpoint_id: str,
     expected_count: int | None,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> bool:
     if not path.exists():
         return False
@@ -463,6 +467,7 @@ def _has_inline_cached_rollouts(
             and record_has_training_tokens(
                 record,
                 train_compaction_tokens=train_compaction_tokens,
+                retain_critic_only_state=retain_critic_only_states,
             )
         }
         if not trainable_turn_ids:
@@ -828,6 +833,7 @@ def run_training_iteration(
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_train_count,
         train_compaction_tokens=config.training.train_compaction_tokens,
+        retain_critic_only_states=config.training.value.enabled,
     )
     # Rollout-native caches survive the sequential judge transform, so a
     # complete judged artifact can still serve as the cached training input.
@@ -837,6 +843,7 @@ def run_training_iteration(
             checkpoint_id=current.checkpoint_id,
             expected_count=expected_train_count,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            retain_critic_only_states=config.training.value.enabled,
         )
     eval_metrics_complete = config.dataset.eval_limit <= 0 or (
         should_resume
@@ -992,6 +999,7 @@ def run_training_iteration(
             checkpoint_id=current.checkpoint_id,
             expected_count=expected_train_count,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            retain_critic_only_states=config.training.value.enabled,
         )
         train_cached_complete = should_resume and (
             _has_complete_cached_rollouts(
@@ -999,6 +1007,7 @@ def run_training_iteration(
                 checkpoint_id=current.checkpoint_id,
                 expected_count=expected_train_count,
                 train_compaction_tokens=config.training.train_compaction_tokens,
+                retain_critic_only_states=config.training.value.enabled,
             )
         )
         train_cached_complete = inline_cached_rollouts or train_cached_complete
@@ -1032,10 +1041,18 @@ def run_training_iteration(
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_train_count,
         train_compaction_tokens=config.training.train_compaction_tokens,
+        retain_critic_only_states=config.training.value.enabled,
     ):
         train_command[train_command.index("--rollouts") + 1] = str(judged_rollout_path)
     checkpoint_complete = should_resume and (
         is_vllm_loadable_checkpoint(next_checkpoint)
+        and (
+            not config.training.value.enabled
+            or all(
+                (next_checkpoint / filename).exists()
+                for filename in (VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME)
+            )
+        )
     )
     _run_or_skip_phase(
         phase="train_update",

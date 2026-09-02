@@ -71,6 +71,7 @@ def _validate_cached_row(
     index: int,
     expected_checkpoint_id: str,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> None:
     _validate_judged_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
     if row.get("trainable_sample_count") == 0:
@@ -80,6 +81,7 @@ def _validate_cached_row(
         row["turn_rewards"],
         rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
         train_compaction_tokens=train_compaction_tokens,
+        retain_critic_only_states=retain_critic_only_states,
     )
     missing_cache_turn_ids = [sample.turn_id for sample in samples if not sample.has_training_cache]
     if missing_cache_turn_ids:
@@ -93,6 +95,7 @@ def _row_has_current_training_cache(
     row: dict[str, Any],
     *,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> bool:
     if row.get("trainable_sample_count") == 0:
         return True
@@ -111,6 +114,7 @@ def _row_has_current_training_cache(
         and record_has_training_tokens(
             record,
             train_compaction_tokens=train_compaction_tokens,
+            retain_critic_only_state=retain_critic_only_states,
         )
     }
     if not trainable_turn_ids:
@@ -135,6 +139,7 @@ def _materialize_rollout_native_training_caches(
     *,
     checkpoint_id: str,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> dict[str, Any]:
     """Copy a row, build valid rollout-native caches, and bind the checkpoint."""
 
@@ -153,6 +158,7 @@ def _materialize_rollout_native_training_caches(
                     record,
                     cache,
                     train_compaction_tokens=train_compaction_tokens,
+                    retain_critic_only_state=retain_critic_only_states,
                 )
             if cache is None:
                 cached_record.pop(TOKEN_CACHE_FIELD, None)
@@ -174,6 +180,7 @@ def _completed_cached_rows(
     *,
     expected_checkpoint_id: str,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> dict[tuple[str, int], dict[str, Any]]:
     if not path.exists():
         return {}
@@ -187,12 +194,14 @@ def _completed_cached_rows(
         if _row_has_current_training_cache(
             row,
             train_compaction_tokens=train_compaction_tokens,
+            retain_critic_only_states=retain_critic_only_states,
         ):
             _validate_cached_row(
                 row,
                 index=index,
                 expected_checkpoint_id=expected_checkpoint_id,
                 train_compaction_tokens=train_compaction_tokens,
+                retain_critic_only_states=retain_critic_only_states,
             )
             completed[key] = row
     return completed
@@ -211,6 +220,7 @@ def _attach_training_caches(
     cache_payloads: list[dict[str, Any]],
     checkpoint_id: str,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> dict[str, Any]:
     row_samples = extract_trainable_samples(
         row["trajectory_records"],
@@ -232,6 +242,7 @@ def _attach_training_caches(
         if not record_has_training_tokens(
             record,
             train_compaction_tokens=train_compaction_tokens,
+            retain_critic_only_state=retain_critic_only_states,
         ):
             # Excluded under this policy: keep the record, attach no cache.
             continue
@@ -239,6 +250,7 @@ def _attach_training_caches(
             record,
             payload,
             train_compaction_tokens=train_compaction_tokens,
+            retain_critic_only_state=retain_critic_only_states,
         )
         if masked_payload is None:
             # Defensive: record_has_training_tokens already excludes these.
@@ -334,6 +346,7 @@ def run_cache_step(
             output,
             expected_checkpoint_id=checkpoint_id,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            retain_critic_only_states=config.training.value.enabled,
         )
         completed_keys = set(completed_rows)
         expected_keys = {_rollout_key(row, index=index) for index, row in enumerate(rows, start=1)}
@@ -363,10 +376,12 @@ def run_cache_step(
             row,
             checkpoint_id=checkpoint_id,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            retain_critic_only_states=config.training.value.enabled,
         )
         if _row_has_current_training_cache(
             cache_candidate,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            retain_critic_only_states=config.training.value.enabled,
         ):
             if _is_main_process(active_scorer):
                 append_jsonl(output, cache_candidate)
@@ -386,6 +401,7 @@ def run_cache_step(
             cache_payloads=cache_payloads,
             checkpoint_id=checkpoint_id,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            retain_critic_only_states=config.training.value.enabled,
         )
         if _is_main_process(active_scorer):
             append_jsonl(output, cached_row)

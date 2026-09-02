@@ -5,7 +5,7 @@ import math
 from typing import Any
 
 
-TOKEN_CACHE_VERSION = 5
+TOKEN_CACHE_VERSION = 6
 TOKEN_CACHE_FIELD = "training_cache"
 TRAJECTORY_SCHEMA_VERSION = 3
 COLLECTION_TOKEN_VERSION = 2
@@ -38,6 +38,7 @@ class RLSample:
     completion_mask: list[bool] | None = None
     reference_logprob: float | None = None
     reference_logprobs: list[float] | None = None
+    state_prefix_length: int | None = None
 
     @property
     def has_training_cache(self) -> bool:
@@ -118,6 +119,8 @@ def is_training_cache_current(
     return (
         cache.get("version") == TOKEN_CACHE_VERSION
         and "reference_logprobs" in cache
+        and isinstance(cache.get("state_prefix_length"), int)
+        and not isinstance(cache.get("state_prefix_length"), bool)
         and source in _REFERENCE_LOGPROB_SOURCES
         and (
             source != REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
@@ -143,6 +146,7 @@ def apply_training_loss_mask(
     cache: Mapping[str, object],
     *,
     train_compaction_tokens: bool,
+    retain_critic_only_state: bool = False,
 ) -> dict[str, Any] | None:
     """Apply the configured gradient mask without changing collected tokens.
 
@@ -209,7 +213,12 @@ def apply_training_loss_mask(
             )
         completion_mask[full_position - 1] = False
     if not any(completion_mask):
-        return None
+        if not retain_critic_only_state:
+            return None
+        updated["completion_mask"] = completion_mask
+        updated["reference_logprob"] = 0.0
+        updated["critic_only"] = True
+        return updated
 
     selected_logprobs = [
         float(logprob)
@@ -225,6 +234,7 @@ def record_has_training_tokens(
     record: Mapping[str, object],
     *,
     train_compaction_tokens: bool,
+    retain_critic_only_state: bool = False,
 ) -> bool:
     """Whether a record keeps trainable tokens under the loss-mask policy.
 
@@ -235,6 +245,8 @@ def record_has_training_tokens(
     path raises its own validation error instead of silently dropping data.
     """
 
+    if retain_critic_only_state:
+        return True
     if train_compaction_tokens or not _record_ends_with_summary_generation(record):
         return True
     collection_tokens = record.get("collection_tokens")
@@ -265,10 +277,17 @@ def _extract_training_cache(
     record: Mapping[str, object],
     *,
     turn_id: str,
-) -> tuple[list[int] | None, list[int] | None, list[bool] | None, float | None, list[float] | None]:
+) -> tuple[
+    list[int] | None,
+    list[int] | None,
+    list[bool] | None,
+    float | None,
+    list[float] | None,
+    int | None,
+]:
     cache = record.get(TOKEN_CACHE_FIELD)
     if cache is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     if not isinstance(cache, Mapping):
         raise ValueError(f"Trainable record {turn_id} has non-object {TOKEN_CACHE_FIELD}")
     version = cache.get("version")
@@ -299,7 +318,7 @@ def _extract_training_cache(
     )
     if len(input_ids) != len(labels) or len(labels) != len(completion_mask):
         raise ValueError(f"Trainable record {turn_id} has mismatched cached tensor lengths")
-    if not any(completion_mask):
+    if not any(completion_mask) and cache.get("critic_only") is not True:
         raise ValueError(f"Trainable record {turn_id} has no cached completion tokens")
     reference_logprob = cache.get("reference_logprob")
     if not isinstance(reference_logprob, (int, float)) or isinstance(reference_logprob, bool):
@@ -313,7 +332,22 @@ def _extract_training_cache(
     )
     if len(reference_logprobs) != len(completion_mask):
         raise ValueError(f"Trainable record {turn_id} has mismatched cached logprob length")
-    return input_ids, labels, completion_mask, float(reference_logprob), reference_logprobs
+    state_prefix_length = cache.get("state_prefix_length")
+    if (
+        not isinstance(state_prefix_length, int)
+        or isinstance(state_prefix_length, bool)
+        or state_prefix_length < 1
+        or state_prefix_length > len(input_ids)
+    ):
+        raise ValueError(f"Trainable record {turn_id} has invalid state_prefix_length")
+    return (
+        input_ids,
+        labels,
+        completion_mask,
+        float(reference_logprob),
+        reference_logprobs,
+        state_prefix_length,
+    )
 
 
 def _validate_messages(value: object, *, record_id: str) -> list[dict[str, Any]]:
@@ -366,10 +400,10 @@ def _extract_collection_tokens(
     record: Mapping[str, object],
     *,
     turn_id: str,
-) -> tuple[list[int] | None, list[bool] | None]:
+) -> tuple[list[int] | None, list[bool] | None, int | None]:
     payload = record.get("collection_tokens")
     if payload is None:
-        return None, None
+        return None, None, None
     if not isinstance(payload, Mapping):
         raise ValueError(f"Trainable record {turn_id} has non-object collection_tokens")
     if payload.get("version") not in {
@@ -426,7 +460,12 @@ def _extract_collection_tokens(
     final_generation = generations[-1]
     if list(final_generation["full_token_ids"]) != full_token_ids:
         raise ValueError(f"Trainable record {turn_id} final generation does not match full_token_ids")
-    return full_token_ids, assistant_token_mask
+    first_prompt_ids = list(generations[0]["prompt_token_ids"])
+    if not first_prompt_ids or full_token_ids[: len(first_prompt_ids)] != first_prompt_ids:
+        raise ValueError(f"Trainable record {turn_id} first state prompt is not an exact prefix")
+    if len(first_prompt_ids) > len(full_token_ids) - 1:
+        raise ValueError(f"Trainable record {turn_id} state prefix has no following sampled token")
+    return full_token_ids, assistant_token_mask, len(first_prompt_ids)
 
 
 def build_rollout_native_training_cache(
@@ -523,6 +562,15 @@ def build_rollout_native_training_cache(
 
     if covered_assistant_positions != expected_assistant_positions:
         return None
+    first_generation = generations[0]
+    first_prompt_ids = first_generation.get("prompt_token_ids")
+    if (
+        not isinstance(first_prompt_ids, list)
+        or not first_prompt_ids
+        or full_token_ids[: len(first_prompt_ids)] != first_prompt_ids
+        or len(first_prompt_ids) > len(full_token_ids) - 1
+    ):
+        return None
     completion_mask = list(assistant_token_mask[1:])
     masked_logprobs = [
         reference_logprobs[index]
@@ -538,6 +586,7 @@ def build_rollout_native_training_cache(
         "reference_logprobs": reference_logprobs,
         "reference_logprob_source": REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
         "logprobs_mode": "raw_logprobs",
+        "state_prefix_length": len(first_prompt_ids),
     }
 
 
@@ -572,14 +621,32 @@ def extract_trainable_samples(
             raise ValueError(f"Trainable record {record_id} has non-numeric reward")
         if not math.isfinite(float(reward)):
             raise ValueError(f"Trainable record {record_id} has non-finite reward")
-        input_ids, labels, completion_mask, reference_logprob, reference_logprobs = _extract_training_cache(
+        (
+            input_ids,
+            labels,
+            completion_mask,
+            reference_logprob,
+            reference_logprobs,
+            cached_state_prefix_length,
+        ) = _extract_training_cache(
             record,
             turn_id=record_id,
         )
-        collection_full_token_ids, collection_assistant_token_mask = _extract_collection_tokens(
+        (
+            collection_full_token_ids,
+            collection_assistant_token_mask,
+            collection_state_prefix_length,
+        ) = _extract_collection_tokens(
             record,
             turn_id=record_id,
         )
+        state_prefix_length = cached_state_prefix_length or collection_state_prefix_length
+        if (
+            cached_state_prefix_length is not None
+            and collection_state_prefix_length is not None
+            and cached_state_prefix_length != collection_state_prefix_length
+        ):
+            raise ValueError(f"Trainable record {record_id} has mismatched value state anchors")
         raw_tools = record.get("tools")
         if raw_tools is not None and not isinstance(raw_tools, list):
             raise ValueError(f"Trainable record {record_id} has invalid tools")
@@ -607,6 +674,7 @@ def extract_trainable_samples(
                 completion_mask=completion_mask,
                 reference_logprob=reference_logprob,
                 reference_logprobs=reference_logprobs,
+                state_prefix_length=state_prefix_length,
             )
         )
     unknown_reward_ids = sorted(set(rewards) - seen_record_ids)
@@ -621,6 +689,7 @@ def extract_training_samples(
     *,
     rollout_id: str | None = None,
     train_compaction_tokens: bool = True,
+    retain_critic_only_states: bool = False,
 ) -> list[RLSample]:
     """Extract the samples that are trainable under the loss-mask policy.
 
@@ -630,7 +699,7 @@ def extract_training_samples(
     """
 
     samples = extract_trainable_samples(records, rewards, rollout_id=rollout_id)
-    if train_compaction_tokens:
+    if train_compaction_tokens or retain_critic_only_states:
         return samples
     record_by_turn_id = {
         record.get("turn_id"): record
@@ -724,6 +793,12 @@ def tokenize_interval_messages(
     else:
         full_ids = list(tokenizer.encode(_render_fallback_messages(messages), add_special_tokens=False))
 
+    if max_sequence_length is not None and len(full_ids) - 1 > max_sequence_length:
+        raise ValueError(
+            f"Interval {sample_id} exceeds training.max_sequence_length: "
+            f"{len(full_ids) - 1} > {max_sequence_length}; interval prefixes are never left-truncated"
+        )
+
     if assistant_token_mask is None:
         assistant_token_mask = [False] * len(full_ids)
         search_start = 0
@@ -741,11 +816,6 @@ def tokenize_interval_messages(
                 assistant_token_mask[index] = True
             search_start = content_start + len(content_ids)
 
-    if max_sequence_length is not None and len(full_ids) - 1 > max_sequence_length:
-        raise ValueError(
-            f"Interval {sample_id} exceeds training.max_sequence_length: "
-            f"{len(full_ids) - 1} > {max_sequence_length}; interval prefixes are never left-truncated"
-        )
     if len(full_ids) <= 1:
         raise ValueError(f"Interval {sample_id} tokenized to fewer than two tokens")
     input_ids = full_ids[:-1]

@@ -30,13 +30,14 @@ class FakeScorer:
         self.seen_batches.append([sample.turn_id for sample in samples])
         return [
             {
-                "version": 5,
+                "version": 6,
                 "input_ids": [1, index + 2],
                 "labels": [index + 2, index + 3],
                 "completion_mask": [False, True],
                 "reference_logprob": -0.5 - index,
                 "reference_logprobs": [0.0, -0.5 - index],
                 "reference_logprob_source": "policy_rescore",
+                "state_prefix_length": 1,
             }
             for index, _sample in enumerate(samples)
         ]
@@ -172,13 +173,14 @@ def test_native_cache_masks_only_compaction_generation_for_ablation(tmp_path: Pa
 def test_fallback_cache_uses_same_compaction_mask() -> None:
     row = summary_interval_row()
     payload = {
-        "version": 5,
+        "version": 6,
         "input_ids": [10, 11, 20],
         "labels": [11, 20, 21],
         "completion_mask": [True, False, True],
         "reference_logprob": -0.2,
         "reference_logprobs": [-0.1, 0.0, -0.3],
         "reference_logprob_source": "policy_rescore",
+        "state_prefix_length": 1,
     }
 
     cached = _attach_training_caches(
@@ -221,13 +223,14 @@ def summary_only_row(query_id: str = "q1") -> dict:
 def test_attach_training_caches_skips_excluded_summary_only_record() -> None:
     row = summary_only_row()
     payload = {
-        "version": 5,
+        "version": 6,
         "input_ids": [10, 11],
         "labels": [11, 21],
         "completion_mask": [False, True],
         "reference_logprob": -0.3,
         "reference_logprobs": [0.0, -0.3],
         "reference_logprob_source": "policy_rescore",
+        "state_prefix_length": 1,
     }
 
     cached = _attach_training_caches(
@@ -238,6 +241,38 @@ def test_attach_training_caches_skips_excluded_summary_only_record() -> None:
     )
 
     assert "training_cache" not in cached["trajectory_records"][0]
+
+
+def test_value_training_retains_summary_only_record_as_critic_only_state() -> None:
+    row = summary_only_row()
+    payload = {
+        "version": 6,
+        "input_ids": [10, 11],
+        "labels": [11, 21],
+        "completion_mask": [False, True],
+        "reference_logprob": -0.3,
+        "reference_logprobs": [0.0, -0.3],
+        "reference_logprob_source": "policy_rescore",
+        "state_prefix_length": 2,
+    }
+
+    cached = _attach_training_caches(
+        row,
+        cache_payloads=[payload],
+        checkpoint_id="step-00001",
+        train_compaction_tokens=False,
+        retain_critic_only_states=True,
+    )
+
+    cache = cached["trajectory_records"][0]["training_cache"]
+    assert cache["completion_mask"] == [False, False]
+    assert cache["reference_logprob"] == 0.0
+    assert cache["critic_only"] is True
+    assert _row_has_current_training_cache(
+        cached,
+        train_compaction_tokens=False,
+        retain_critic_only_states=True,
+    )
 
 
 def test_summary_only_row_counts_as_current_cache_under_ablation() -> None:
@@ -296,7 +331,7 @@ def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> N
     assert scorer.seen_batches == [["trajectory-1"]]
     cache = rows[0]["trajectory_records"][0]["training_cache"]
     assert cache["input_ids"] == [1, 2]
-    assert cache["version"] == 5
+    assert cache["version"] == 6
     assert cache["reference_logprob"] == -0.5
     assert cache["reference_logprobs"] == [0.0, -0.5]
     assert cache["policy_checkpoint_id"] == "step-00001"
@@ -351,13 +386,14 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     first_cached = judged_row("q1", 0)
     for record in first_cached["trajectory_records"]:
         record["training_cache"] = {
-            "version": 5,
+            "version": 6,
             "input_ids": [1],
             "labels": [2],
             "completion_mask": [True],
             "reference_logprob": -0.1,
             "reference_logprobs": [-0.1],
             "reference_logprob_source": "policy_rescore",
+            "state_prefix_length": 1,
         }
     write_jsonl(output_path, [first_cached])
     scorer = FakeScorer()
@@ -374,11 +410,11 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert scorer.seen_batches == [["trajectory-1"]]
     assert [(row["query_id"], row["rollout_index"]) for row in cached_rows] == [("q1", 0), ("q2", 1)]
-    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 5
-    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == 5
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 6
+    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == 6
 
 
-def test_cache_step_resume_rewrites_old_cached_rows_to_v5(tmp_path: Path) -> None:
+def test_cache_step_resume_rewrites_old_cached_rows_to_v6(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     judged_path = tmp_path / "judged.jsonl"
@@ -409,7 +445,7 @@ def test_cache_step_resume_rewrites_old_cached_rows_to_v5(tmp_path: Path) -> Non
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert scorer.seen_batches == [["trajectory-1"]]
     assert len(cached_rows) == 1
-    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 5
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 6
     assert cached_rows[0]["trajectory_records"][0]["training_cache"]["reference_logprobs"] == [0.0, -0.5]
 
 

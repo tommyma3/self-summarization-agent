@@ -1,11 +1,50 @@
 from pathlib import Path
 
 from self_summarization_agent.config import (
+    CompactionValueConfig,
+    TrainingConfig,
     config_to_dict,
     load_run_config,
     load_train_config,
     resolved_rollout_sampling_profile,
 )
+
+
+def test_compaction_mc_value_config_is_opt_in_and_validated(tmp_path: Path) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        """
+experiment: {name: demo, seed: 0, output_root: output, bc_plus_root: bc-plus}
+dataset: {}
+retrieval: {backend: faiss, index_path: index}
+model: {backend: transformers, model_path: model}
+runtime: {context_threshold_tokens: 32, max_context_tokens: 64, tool_budget: 4}
+judge: {enabled: true}
+training:
+  advantage_estimator: compaction_mc_value
+  value:
+    enabled: true
+    loss_coefficient: 0.25
+    zero_initialize_head: true
+    state_anchor: first_generation_prompt_end
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_train_config(config_path)
+
+    assert config.training.advantage_estimator == "compaction_mc_value"
+    assert config.training.value.enabled is True
+    assert config.training.value.loss_coefficient == 0.25
+
+
+def test_compaction_mc_value_flag_and_estimator_must_agree() -> None:
+    try:
+        TrainingConfig(value=CompactionValueConfig(enabled=True))
+    except ValueError as exc:
+        assert "advantage_estimator" in str(exc)
+    else:
+        raise AssertionError("mismatched value configuration must fail")
 
 
 def test_load_run_config_applies_overrides(tmp_path: Path) -> None:
@@ -306,6 +345,19 @@ def test_load_compact_6k_training_preset() -> None:
         * config.training.verl.fsdp.ulysses_sequence_parallel_size
         >= config.training.max_sequence_length
     )
+
+
+def test_load_compaction_mc_value_training_preset() -> None:
+    config_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "compact_value_mc.yaml"
+
+    config = load_train_config(config_path)
+
+    assert config.experiment.name == "qwen-bcplus-compact-value-mc"
+    assert config.training.advantage_estimator == "compaction_mc_value"
+    assert config.training.value.enabled is True
+    assert config.training.value.zero_initialize_head is True
+    assert config.training.value.state_anchor == "first_generation_prompt_end"
+    assert config.training.verl.worker_backend == "transformers"
 
 
 def test_load_compact_24k_training_preset() -> None:

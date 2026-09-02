@@ -31,6 +31,7 @@ src/self_summarization_agent/train_launcher.py
 src/self_summarization_agent/train_step.py
 src/self_summarization_agent/trainer.py
 src/self_summarization_agent/trajectory.py
+src/self_summarization_agent/value_model.py
 src/self_summarization_agent/verl_ray_trainer.py
 src/self_summarization_agent.egg-info/PKG-INFO
 src/self_summarization_agent.egg-info/SOURCES.txt
@@ -61,4 +62,5 @@ tests/test_rollout_collection.py
 tests/test_runtime.py
 tests/test_train_step.py
 tests/test_trainer.py
+tests/test_value_model.py
 tests/test_verl_ray_trainer.py

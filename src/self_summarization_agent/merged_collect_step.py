@@ -79,6 +79,13 @@ from self_summarization_agent.trajectory import extract_trainable_samples
 _CACHE_SHUTDOWN = "__cache_shutdown__"
 
 
+def _critic_only_cache_kwargs(config: Any) -> dict[str, bool]:
+    value_config = getattr(getattr(config, "training", None), "value", None)
+    if bool(getattr(value_config, "enabled", False)):
+        return {"retain_critic_only_states": True}
+    return {}
+
+
 def _run_cache_overlap_worker(
     *,
     config_path: str,
@@ -131,6 +138,7 @@ def _run_cache_overlap_worker(
                     cache_payloads=cache_payloads,
                     checkpoint_id=expected_checkpoint_id,
                     train_compaction_tokens=config.training.train_compaction_tokens,
+                    **_critic_only_cache_kwargs(config),
                 )
                 cached_rows.append(cached_row)
             response_queue.put({"batch_id": batch_id, "rows": cached_rows})
@@ -473,6 +481,7 @@ def _collect_split(
                         row,
                         checkpoint_id=checkpoint_id,
                         train_compaction_tokens=config.training.train_compaction_tokens,
+                        **_critic_only_cache_kwargs(config),
                     )
                 append_jsonl(raw_output_path, row)
                 generated_row_count += 1
@@ -843,6 +852,8 @@ def run_merged_collect(
                 Path(train_cached_output),
                 checkpoint_id=checkpoint_id,
                 expected_count=train_expected_count,
+                train_compaction_tokens=config.training.train_compaction_tokens,
+                **_critic_only_cache_kwargs(config),
             )
         )
     )
@@ -1061,6 +1072,7 @@ def _run_cache_inline(
             cached_output_path,
             expected_checkpoint_id=checkpoint_id,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            **_critic_only_cache_kwargs(config),
         )
         completed_keys = set(completed_rows)
         # Write back completed rows to preserve resume ordering
@@ -1098,10 +1110,12 @@ def _run_cache_inline(
             row,
             checkpoint_id=checkpoint_id,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            **_critic_only_cache_kwargs(config),
         )
         if _row_has_current_training_cache(
             cache_candidate,
             train_compaction_tokens=config.training.train_compaction_tokens,
+            **_critic_only_cache_kwargs(config),
         ):
             append_jsonl(cached_output_path, cache_candidate)
             continue

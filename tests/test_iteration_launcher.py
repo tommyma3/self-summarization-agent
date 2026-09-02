@@ -81,24 +81,25 @@ def write_judged_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def training_cache(*, version: int = 5) -> dict:
+def training_cache(*, version: int = 6) -> dict:
     cache = {
-        "version": 5,
+        "version": 6,
         "input_ids": [1],
         "labels": [2],
         "completion_mask": [True],
         "reference_logprob": -0.1,
         "reference_logprobs": [-0.1],
         "reference_logprob_source": "policy_rescore",
+        "state_prefix_length": 1,
     }
-    if version != 5:
+    if version != 6:
         cache["version"] = version
         del cache["reference_logprobs"]
         del cache["reference_logprob_source"]
     return cache
 
 
-def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = 5) -> None:
+def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = 6) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
         {
@@ -138,7 +139,7 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_v
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_complete_cached_rollouts_requires_v5_training_cache(tmp_path: Path) -> None:
+def test_complete_cached_rollouts_requires_v6_training_cache(tmp_path: Path) -> None:
     cached_path = tmp_path / "cached.jsonl"
     write_cached_rollouts(cached_path, "iteration-00000", count=1, cache_version=2)
 

@@ -8,7 +8,9 @@ from self_summarization_agent import verl_ray_trainer
 from self_summarization_agent.verl_ray_trainer import (
     VerlRayPolicyTrainer,
     build_verl_actor_dataproto,
+    build_verl_dataproto,
     build_verl_fsdp_worker_config,
+    grouped_samples_from_verl_dataproto,
 )
 
 
@@ -110,6 +112,20 @@ def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> 
     assert batch.batch["response_mask"].values().tolist() == [True, False, True]
     assert batch.batch["old_log_probs"].values().tolist() == [0.0, -0.75, -0.25]
     assert batch.meta_info["train_tokens"] == 2
+
+
+def test_transformers_ray_batch_preserves_token_reference_logprobs(monkeypatch) -> None:
+    patch_fake_dataproto(monkeypatch)
+    interval = sample("trajectory-1", 1.0, -0.5)
+    interval.rollout_id = "q1:0"
+    interval.state_prefix_length = 1
+
+    batch = build_verl_dataproto({"q1": [interval]}, checkpoint_id="step-00001")
+    restored = grouped_samples_from_verl_dataproto(batch)["q1"][0]
+
+    assert restored.reference_logprobs == interval.reference_logprobs
+    assert restored.rollout_id == "q1:0"
+    assert restored.state_prefix_length == 1
 
 
 def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) -> None:
