@@ -295,6 +295,7 @@ def build_cache_scorer(config, *, checkpoint_path: str | Path):
     scoring_config = replace(
         training_config,
         value=replace(training_config.value, enabled=False),
+        advantage_estimator="group_relative",
     )
     if scoring_config.backend == "fsdp2_context_parallel":
         if os.environ.get("RANK") is None:
