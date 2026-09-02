@@ -45,6 +45,7 @@ class RetrievalConfig:
     snippet_tokenizer_path: str | None = None
     persistent_worker: bool = False
     worker_startup_timeout_seconds: int = 600
+    search_max_batch_size: int | None = None
     index_path: str = ""
     model_name: str | None = None
     normalize: bool = False

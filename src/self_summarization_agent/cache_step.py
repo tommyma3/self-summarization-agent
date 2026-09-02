@@ -290,17 +290,25 @@ def build_cache_scorer(config, *, checkpoint_path: str | Path):
     checkpoint = Path(checkpoint_path).resolve()
     model_config = replace(config.model, model_path=str(checkpoint))
     training_config = _cache_training_config(config)
-    if training_config.backend == "fsdp2_context_parallel":
+    # Cache scoring only needs reference logprobs; the value head is unused and
+    # adds an unnecessary sidecar dependency.
+    scoring_config = replace(
+        training_config,
+        value=replace(training_config.value, enabled=False),
+    )
+    if scoring_config.backend == "fsdp2_context_parallel":
         if os.environ.get("RANK") is None:
             warnings.warn(
                 "training.backend='fsdp2_context_parallel' requires accelerate launch. "
                 "Falling back to 'transformers' backend for single-process cache scoring.",
                 stacklevel=2,
             )
-            return TransformersPolicyTrainer(model_config, replace(training_config, backend="transformers"))
-        return FSDP2ContextParallelPolicyTrainer(model_config, training_config)
-    if training_config.backend == "transformers":
-        return TransformersPolicyTrainer(model_config, training_config)
+            return TransformersPolicyTrainer(
+                model_config, replace(scoring_config, backend="transformers")
+            )
+        return FSDP2ContextParallelPolicyTrainer(model_config, scoring_config)
+    if scoring_config.backend == "transformers":
+        return TransformersPolicyTrainer(model_config, scoring_config)
     raise NotImplementedError(
         "The local environment cannot execute backend="
         f"{config.training.backend!r}. Supported backends are 'transformers', "

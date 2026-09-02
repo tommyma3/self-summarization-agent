@@ -735,6 +735,8 @@ class TransformersPolicyTrainer:
         samples = [sample for group in grouped_samples.values() for sample in group]
         if not samples:
             return UpdateMetrics(sample_count=0, mean_reward=0.0, mean_advantage=0.0, loss=0.0)
+        if self.value_head is None:
+            raise RuntimeError("Compaction value training is enabled without a value head")
         if any(sample.rollout_id is None for sample in samples):
             raise ValueError("Compaction value training requires rollout_id on every interval")
         if any(sample.reward not in {-1.0, 1.0} for sample in samples):
@@ -759,6 +761,7 @@ class TransformersPolicyTrainer:
         detached_kls: list[float] = []
         detached_clipped: list[float] = []
         weighted_value_loss_sum = 0.0
+        value_loss_count = 0
         optimizer_step_count = 0
         for _epoch_index in range(update_epochs):
             for start, end in _minibatch_ranges(len(samples), minibatch_size):
@@ -798,6 +801,7 @@ class TransformersPolicyTrainer:
                     detached_kls.extend(approx_kls.detach()[valid].cpu().tolist())
                     detached_clipped.extend(clipped.detach()[valid].cpu().tolist())
                     weighted_value_loss_sum += float(value_loss.detach().cpu())
+                    value_loss_count += 1
                 parameters = list(self.model.parameters()) + list(self.value_head.parameters())
                 torch.nn.utils.clip_grad_norm_(parameters, self.training_config.max_grad_norm)
                 self.optimizer.step()
@@ -812,7 +816,7 @@ class TransformersPolicyTrainer:
             if detached_policy_losses
             else 0.0
         )
-        mean_value_loss = weighted_value_loss_sum / update_epochs
+        mean_value_loss = weighted_value_loss_sum / max(1, value_loss_count)
         return UpdateMetrics(
             sample_count=len(samples),
             mean_reward=sum(sample.reward for sample in samples) / len(samples),

@@ -3,12 +3,16 @@ from __future__ import annotations
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 from pathlib import Path
 import threading
 from typing import Any
 
 from self_summarization_agent.bcplus_backend import build_direct_backend
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RetrievalWorkerServer(ThreadingHTTPServer):
@@ -21,10 +25,18 @@ class RetrievalWorkerHandler(BaseHTTPRequestHandler):
     server: RetrievalWorkerServer
 
     def log_message(self, format: str, *args: Any) -> None:
-        return
+        LOGGER.info(format, *args)
 
     def _read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
+        content_length = self.headers.get("Content-Length")
+        if content_length is None:
+            raise ValueError("Missing Content-Length header")
+        try:
+            length = int(content_length)
+        except ValueError as exc:
+            raise ValueError(f"Invalid Content-Length header: {content_length}") from exc
+        if length < 0:
+            raise ValueError(f"Negative Content-Length: {length}")
         raw = self.rfile.read(length).decode("utf-8")
         payload = json.loads(raw) if raw else {}
         if not isinstance(payload, dict):
@@ -39,20 +51,27 @@ class RetrievalWorkerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _write_error(self, exc: Exception, status: int = 500) -> None:
-        self._write_json(
-            {
-                "error": type(exc).__name__,
-                "message": str(exc),
-            },
-            status=status,
-        )
+    def _write_error(self, exc: BaseException, status: int = 500) -> None:
+        LOGGER.exception("Retrieval worker error handling %s", self.path)
+        try:
+            self._write_json(
+                {
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                },
+                status=status,
+            )
+        except Exception:
+            LOGGER.exception("Failed to write error response for %s", self.path)
 
     def do_GET(self) -> None:
-        if self.path == "/health":
-            self._write_json({"ok": True})
-            return
-        self._write_json({"error": "not_found"}, status=404)
+        try:
+            if self.path == "/health":
+                self._write_json({"ok": True})
+                return
+            self._write_json({"error": "not_found"}, status=404)
+        except Exception as exc:
+            self._write_error(exc, status=500)
 
     def do_POST(self) -> None:
         try:
@@ -93,6 +112,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="[retrieval_worker] %(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
     config = load_train_config(args.config, parse_cli_overrides(args.overrides))
     backend = build_direct_backend(config.experiment.bc_plus_root, config.retrieval)
     server = RetrievalWorkerServer((args.host, args.port), RetrievalWorkerHandler, backend)

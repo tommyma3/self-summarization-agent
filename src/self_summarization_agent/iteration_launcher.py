@@ -29,7 +29,6 @@ from self_summarization_agent.trajectory import (
     record_has_training_tokens,
     validate_trajectory_schema,
 )
-from self_summarization_agent.value_model import VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -80,7 +79,7 @@ def _start_retrieval_worker(
         str(ready_file),
     ]
     _append_cli_overrides(command, overrides)
-    process = subprocess.Popen(command)
+    process = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr)
     try:
         url = _wait_for_retrieval_worker(process, ready_file, startup_timeout_seconds)
     except Exception:
@@ -1044,15 +1043,9 @@ def run_training_iteration(
         retain_critic_only_states=config.training.value.enabled,
     ):
         train_command[train_command.index("--rollouts") + 1] = str(judged_rollout_path)
-    checkpoint_complete = should_resume and (
-        is_vllm_loadable_checkpoint(next_checkpoint)
-        and (
-            not config.training.value.enabled
-            or all(
-                (next_checkpoint / filename).exists()
-                for filename in (VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME)
-            )
-        )
+    checkpoint_complete = should_resume and is_vllm_loadable_checkpoint(
+        next_checkpoint,
+        require_value_head=config.training.value.enabled,
     )
     _run_or_skip_phase(
         phase="train_update",

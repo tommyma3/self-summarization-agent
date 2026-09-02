@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 
+from self_summarization_agent.value_model import (
+    VALUE_HEAD_FILENAME,
+    VALUE_HEAD_MANIFEST_FILENAME,
+)
+
 
 LATEST_CHECKPOINT_FILE = "latest"
 CHECKPOINT_COMPLETE_FILE = ".complete"
@@ -27,7 +32,7 @@ def mark_checkpoint_complete(path: str | Path) -> Path:
     return marker
 
 
-def is_vllm_loadable_checkpoint(path: str | Path) -> bool:
+def is_vllm_loadable_checkpoint(path: str | Path, *, require_value_head: bool = False) -> bool:
     checkpoint_path = Path(path)
     if not checkpoint_path.is_dir():
         return False
@@ -45,7 +50,14 @@ def is_vllm_loadable_checkpoint(path: str | Path) -> bool:
         for child in checkpoint_path.iterdir()
         if child.is_file()
     )
-    return has_config and (has_model_weights or has_sharded_index)
+    if not (has_config and (has_model_weights or has_sharded_index)):
+        return False
+    if require_value_head:
+        if not (checkpoint_path / VALUE_HEAD_FILENAME).exists():
+            return False
+        if not (checkpoint_path / VALUE_HEAD_MANIFEST_FILENAME).exists():
+            return False
+    return True
 
 
 def write_latest_checkpoint(root: str | Path, checkpoint_path: str | Path) -> Path:
