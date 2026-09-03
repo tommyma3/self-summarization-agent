@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 
-from self_summarization_agent.config import ModelConfig, TrainingConfig
+from self_summarization_agent.config import CompactionValueConfig, ModelConfig, TrainingConfig
 from self_summarization_agent.trajectory import RLSample
 from self_summarization_agent import verl_ray_trainer
 from self_summarization_agent.verl_ray_trainer import (
@@ -10,6 +10,8 @@ from self_summarization_agent.verl_ray_trainer import (
     build_verl_actor_dataproto,
     build_verl_dataproto,
     build_verl_fsdp_worker_config,
+    build_verl_value_actor_dataproto,
+    build_verl_value_probe_dataproto,
     grouped_samples_from_verl_dataproto,
 )
 
@@ -93,6 +95,7 @@ def test_build_verl_fsdp_worker_config_maps_repo_training_knobs() -> None:
     assert config["actor"]["checkpoint"]["save_contents"] == ["hf_model"]
     assert config["actor"]["fsdp_config"]["strategy"] == "fsdp2"
     assert config["actor"]["fsdp_config"]["use_torch_compile"] is False
+    assert config["compaction_value"]["enabled"] is False
 
 
 def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> None:
@@ -128,6 +131,41 @@ def test_transformers_ray_batch_preserves_token_reference_logprobs(monkeypatch) 
     assert restored.state_prefix_length == 1
 
 
+def test_verl_value_batches_preserve_prefix_and_zero_weight_alignment_padding(monkeypatch) -> None:
+    patch_fake_dataproto(monkeypatch)
+    first = sample("trajectory-1", 1.0, -0.5)
+    first.rollout_id = "q1:0"
+    first.state_prefix_length = 2
+    second = sample("trajectory-2", -1.0, -0.25)
+    second.rollout_id = "q1:1"
+    second.state_prefix_length = 1
+
+    probe = build_verl_value_probe_dataproto(
+        [first, second],
+        checkpoint_id="step-00001",
+        alignment=4,
+    )
+    actor = build_verl_value_actor_dataproto(
+        [first, second],
+        advantages=[0.75, -0.5],
+        value_weights=[0.5, 0.5],
+        checkpoint_id="step-00001",
+        alignment=4,
+    )
+
+    assert probe.batch["input_ids"].unbind()[0].tolist() == [10, 11]
+    assert probe.batch["input_ids"].unbind()[1].tolist() == [10]
+    assert probe.batch["state_prefix_lengths"].tolist() == [2, 1, 1, 1]
+    assert probe.batch["value_valid_mask"].tolist() == [True, True, False, False]
+    assert actor.batch["input_ids"].unbind()[0].tolist() == [10, 11, 12, 13]
+    assert actor.batch["response_mask"].unbind()[0].tolist() == [False, True, True]
+    assert actor.batch["response_mask"].unbind()[2].tolist() == [False, False, False]
+    assert actor.batch["value_weights"].tolist() == [0.5, 0.5, 0.0, 0.0]
+    assert actor.batch["sample_indices"].tolist() == [0, 1, -1, -1]
+    assert actor.meta_info["sample_count"] == 2
+    assert actor.meta_info["padding_sample_count"] == 2
+
+
 def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) -> None:
     patch_fake_dataproto(monkeypatch)
     training_config = TrainingConfig(backend="verl_ray", group_size=2)
@@ -161,3 +199,66 @@ def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) ->
     assert metrics.clip_fraction == 0.4
     assert metrics.extra_metrics["verl_ray/worker_backend"] == "verl_fsdp"
     assert metrics.extra_metrics["verl_fsdp/contributing_sample_count"] == 2
+
+
+def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeypatch, tmp_path: Path) -> None:
+    patch_fake_dataproto(monkeypatch)
+    training_config = TrainingConfig(
+        backend="verl_ray",
+        advantage_estimator="compaction_mc_value",
+        value=CompactionValueConfig(enabled=True),
+        minibatch_size=4,
+    )
+    training_config.verl.worker_backend = "verl_fsdp"
+
+    class FakeValueWorkerGroup:
+        data_parallel_size = 1
+
+        def __init__(self):
+            self.probe_batch = None
+            self.actor_batch = None
+
+        def compute_compaction_values(self, batch):
+            self.probe_batch = batch
+            return [0.25, -0.25]
+
+        def update_actor(self, batch):
+            self.actor_batch = batch
+            return {
+                "loss": [0.4],
+                "actor/pg_loss": [0.2],
+                "actor/ppo_kl": [0.03],
+                "actor/pg_clipfrac": [0.1],
+                "value/loss": [0.4],
+            }
+
+    positive = sample("positive", 1.0, -0.5)
+    positive.rollout_id = "q1:0"
+    positive.state_prefix_length = 2
+    negative = sample("negative", -1.0, -0.25)
+    negative.rollout_id = "q1:1"
+    negative.state_prefix_length = 1
+    fake_worker = FakeValueWorkerGroup()
+    trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
+    trainer.model_config = ModelConfig(model_path=str(tmp_path))
+    trainer.training_config = training_config
+    trainer.checkpoint_id = "step-00001"
+    trainer._ray = None
+    trainer._actor = None
+    trainer._worker_group = fake_worker
+    trainer._owns_ray = False
+    trainer._last_batch_meta = {}
+
+    metrics = trainer.step({"q1": [positive, negative]})
+
+    assert fake_worker.probe_batch is not None
+    assert fake_worker.actor_batch is not None
+    advantages = fake_worker.actor_batch.batch["advantages"].unbind()
+    assert advantages[0].tolist() == [0.75, 0.75, 0.75]
+    assert advantages[1].tolist() == [-0.75, -0.75, -0.75]
+    assert fake_worker.actor_batch.batch["value_weights"].tolist() == [0.5, 0.5, 0.0, 0.0]
+    assert fake_worker.actor_batch.batch["value_valid_mask"].tolist() == [True, True, False, False]
+    assert metrics.sample_count == 2
+    assert metrics.mean_advantage == 0.0
+    assert metrics.extra_metrics["value/classification_accuracy"] == 1.0
+    assert metrics.extra_metrics["verl_ray/worker_backend"] == "verl_fsdp"

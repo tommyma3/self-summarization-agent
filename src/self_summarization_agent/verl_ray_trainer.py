@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
+import math
 import shutil
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ from self_summarization_agent.trainer import (
     _prepare_policy_batch,
 )
 from self_summarization_agent.trajectory import RLSample
+from self_summarization_agent.value_model import rollout_value_weights
 
 
 SUPPORTED_VERL_WORKER_BACKENDS = {"transformers", "verl_fsdp"}
@@ -326,6 +328,227 @@ def build_verl_actor_dataproto(
     )
 
 
+def _validate_compaction_value_samples(samples: list[RLSample]) -> None:
+    if not samples:
+        return
+    reward_by_rollout: dict[str, float] = {}
+    for sample in samples:
+        if not sample.has_training_cache:
+            raise ValueError(f"Sample {sample.turn_id} is missing training cache")
+        if sample.rollout_id is None:
+            raise ValueError("Compaction value training requires rollout_id on every interval")
+        if sample.reward not in {-1.0, 1.0}:
+            raise ValueError("Compaction value training requires binary -1/+1 rollout rewards")
+        if sample.state_prefix_length is None:
+            raise ValueError(f"Sample {sample.turn_id} is missing an exact value-state anchor")
+        input_length = len(sample.input_ids or [])
+        if not 1 <= int(sample.state_prefix_length) <= input_length:
+            raise ValueError(f"Sample {sample.turn_id} has an invalid value-state anchor")
+        rollout_id = str(sample.rollout_id)
+        previous = reward_by_rollout.setdefault(rollout_id, float(sample.reward))
+        if previous != sample.reward:
+            raise ValueError(f"Rollout {rollout_id} has inconsistent interval rewards")
+
+
+def _padding_count(size: int, alignment: int) -> int:
+    if size <= 0 or alignment <= 1:
+        return 0
+    return (-size) % alignment
+
+
+def build_verl_value_probe_dataproto(
+    samples: list[RLSample],
+    *,
+    checkpoint_id: str,
+    alignment: int = 1,
+    max_sequence_length: int | None = None,
+):
+    """Build causal-prefix-only value probes without altering cached intervals."""
+
+    np, _ray, DataProto = _require_verl_ray()
+    _validate_compaction_value_samples(samples)
+    if not samples:
+        raise ValueError("Compaction value probing requires at least one interval")
+    padding = _padding_count(len(samples), alignment)
+    padded_samples = [*samples, *([samples[-1]] * padding)]
+
+    input_tensors: list[torch.Tensor] = []
+    attention_tensors: list[torch.Tensor] = []
+    position_tensors: list[torch.Tensor] = []
+    prompt_tensors: list[torch.Tensor] = []
+    response_tensors: list[torch.Tensor] = []
+    zero_mask_tensors: list[torch.Tensor] = []
+    prefix_lengths: list[int] = []
+    for sample in padded_samples:
+        prefix_length = int(sample.state_prefix_length or 0)
+        if max_sequence_length is not None and prefix_length > max_sequence_length:
+            raise ValueError(
+                f"Value prefix for {sample.turn_id} exceeds training.max_sequence_length: "
+                f"{prefix_length} > {max_sequence_length}"
+            )
+        prefix = torch.tensor((sample.input_ids or [])[:prefix_length], dtype=torch.long)
+        input_tensors.append(prefix)
+        attention_tensors.append(torch.ones(prefix_length, dtype=torch.long))
+        position_tensors.append(torch.arange(prefix_length, dtype=torch.long))
+        prompt_tensors.append(prefix[:1])
+        response_tensors.append(prefix[1:])
+        zero_mask_tensors.append(torch.zeros(max(0, prefix_length - 1), dtype=torch.bool))
+        prefix_lengths.append(prefix_length)
+
+    valid = torch.tensor([True] * len(samples) + [False] * padding, dtype=torch.bool)
+    sample_indices = torch.tensor([*range(len(samples)), *([-1] * padding)], dtype=torch.long)
+    return DataProto.from_single_dict(
+        {
+            "input_ids": torch.nested.as_nested_tensor(input_tensors, layout=torch.jagged),
+            "attention_mask": torch.nested.as_nested_tensor(attention_tensors, layout=torch.jagged),
+            "position_ids": torch.nested.as_nested_tensor(position_tensors, layout=torch.jagged),
+            "prompts": torch.nested.as_nested_tensor(prompt_tensors, layout=torch.jagged),
+            "responses": torch.nested.as_nested_tensor(response_tensors, layout=torch.jagged),
+            "response_mask": torch.nested.as_nested_tensor(zero_mask_tensors, layout=torch.jagged),
+            "loss_mask": torch.nested.as_nested_tensor(zero_mask_tensors, layout=torch.jagged),
+            "state_prefix_lengths": torch.tensor(prefix_lengths, dtype=torch.long),
+            "value_probe_mask": torch.ones(len(padded_samples), dtype=torch.bool),
+            "value_valid_mask": valid,
+            "sample_indices": sample_indices,
+            "temperature": torch.ones(len(padded_samples), dtype=torch.float32),
+            "query_ids": np.array([sample.query_id for sample in padded_samples], dtype=object),
+            "turn_ids": np.array([sample.turn_id for sample in padded_samples], dtype=object),
+        },
+        meta_info={
+            "policy_checkpoint_id": checkpoint_id,
+            "sample_count": len(samples),
+            "padded_sample_count": len(padded_samples),
+            "padding_sample_count": padding,
+            "prefix_tokens": sum(prefix_lengths[: len(samples)]),
+            "max_sequence_length": max(prefix_lengths[: len(samples)]),
+        },
+    )
+
+
+def build_verl_value_actor_dataproto(
+    samples: list[RLSample],
+    *,
+    advantages: list[float],
+    value_weights: list[float],
+    checkpoint_id: str,
+    alignment: int,
+    max_sequence_length: int | None = None,
+):
+    """Build a lossless actor-critic batch, padding only with zero-weight duplicates."""
+
+    np, _ray, DataProto = _require_verl_ray()
+    _validate_compaction_value_samples(samples)
+    if len(samples) != len(advantages) or len(samples) != len(value_weights):
+        raise ValueError("Compaction value samples, advantages, and weights must align")
+    if not samples:
+        raise ValueError("Compaction value updates require at least one interval")
+    padding = _padding_count(len(samples), alignment)
+    padded_samples = [*samples, *([samples[-1]] * padding)]
+    padded_advantages = [*advantages, *([0.0] * padding)]
+    padded_weights = [*value_weights, *([0.0] * padding)]
+
+    full_inputs: list[torch.Tensor] = []
+    attention_masks: list[torch.Tensor] = []
+    position_ids: list[torch.Tensor] = []
+    prompts: list[torch.Tensor] = []
+    responses: list[torch.Tensor] = []
+    response_masks: list[torch.Tensor] = []
+    old_log_probs: list[torch.Tensor] = []
+    advantage_tensors: list[torch.Tensor] = []
+    prefix_lengths: list[int] = []
+    rewards: list[float] = []
+
+    for index, (sample, advantage) in enumerate(zip(padded_samples, padded_advantages)):
+        input_tokens = list(sample.input_ids or [])
+        response_tokens = list(sample.labels or [])
+        response_mask_values = list(sample.completion_mask or [])
+        if not input_tokens or len(input_tokens) != len(response_tokens):
+            raise ValueError(f"Interval {sample.turn_id} has invalid shifted token tensors")
+        if input_tokens[1:] != response_tokens[:-1]:
+            raise ValueError(f"Interval {sample.turn_id} has non-contiguous shifted token tensors")
+        if len(response_mask_values) != len(response_tokens):
+            raise ValueError(f"Interval {sample.turn_id} has a misaligned completion mask")
+        if max_sequence_length is not None and len(input_tokens) > max_sequence_length:
+            raise ValueError(
+                f"Interval {sample.turn_id} exceeds training.max_sequence_length: "
+                f"{len(input_tokens)} > {max_sequence_length}; interval prefixes are never left-truncated"
+            )
+        if index >= len(samples):
+            response_mask_values = [False] * len(response_mask_values)
+
+        full = torch.tensor([input_tokens[0], *response_tokens], dtype=torch.long)
+        full_inputs.append(full)
+        attention_masks.append(torch.ones(len(full), dtype=torch.long))
+        position_ids.append(torch.arange(len(full), dtype=torch.long))
+        prompts.append(full[:1])
+        responses.append(torch.tensor(response_tokens, dtype=torch.long))
+        response_masks.append(torch.tensor(response_mask_values, dtype=torch.bool))
+        if sample.reference_logprobs is not None:
+            references = torch.tensor(sample.reference_logprobs, dtype=torch.float32)
+            if len(references) != len(response_tokens):
+                raise ValueError(f"Interval {sample.turn_id} has misaligned reference log probabilities")
+        else:
+            references = torch.full(
+                (len(response_tokens),),
+                float(sample.reference_logprob),
+                dtype=torch.float32,
+            )
+        old_log_probs.append(references)
+        advantage_tensors.append(
+            torch.full((len(response_tokens),), float(advantage), dtype=torch.float32)
+        )
+        prefix_lengths.append(int(sample.state_prefix_length or 0))
+        rewards.append(float(sample.reward))
+
+    valid = torch.tensor([True] * len(samples) + [False] * padding, dtype=torch.bool)
+    sample_indices = torch.tensor([*range(len(samples)), *([-1] * padding)], dtype=torch.long)
+    train_tokens = int(sum(mask.sum().item() for mask in response_masks[: len(samples)]))
+    total_tokens = int(sum(len(tokens) for tokens in full_inputs[: len(samples)]))
+    return DataProto.from_single_dict(
+        {
+            "input_ids": torch.nested.as_nested_tensor(full_inputs, layout=torch.jagged),
+            "attention_mask": torch.nested.as_nested_tensor(attention_masks, layout=torch.jagged),
+            "position_ids": torch.nested.as_nested_tensor(position_ids, layout=torch.jagged),
+            "prompts": torch.nested.as_nested_tensor(prompts, layout=torch.jagged),
+            "responses": torch.nested.as_nested_tensor(responses, layout=torch.jagged),
+            "response_mask": torch.nested.as_nested_tensor(response_masks, layout=torch.jagged),
+            "loss_mask": torch.nested.as_nested_tensor(response_masks, layout=torch.jagged),
+            "old_log_probs": torch.nested.as_nested_tensor(old_log_probs, layout=torch.jagged),
+            "advantages": torch.nested.as_nested_tensor(advantage_tensors, layout=torch.jagged),
+            "rewards": torch.tensor(rewards, dtype=torch.float32),
+            "state_prefix_lengths": torch.tensor(prefix_lengths, dtype=torch.long),
+            "value_weights": torch.tensor(padded_weights, dtype=torch.float32),
+            "value_valid_mask": valid,
+            "value_probe_mask": torch.zeros(len(padded_samples), dtype=torch.bool),
+            "sample_indices": sample_indices,
+            "temperature": torch.ones(len(padded_samples), dtype=torch.float32),
+            "query_ids": np.array([sample.query_id for sample in padded_samples], dtype=object),
+            "turn_ids": np.array([sample.turn_id for sample in padded_samples], dtype=object),
+            "rollout_ids": np.array([sample.rollout_id for sample in padded_samples], dtype=object),
+        },
+        meta_info={
+            "policy_checkpoint_id": checkpoint_id,
+            "query_count": len({sample.query_id for sample in samples}),
+            "sample_count": len(samples),
+            "contributing_sample_count": len(samples),
+            "padded_sample_count": len(padded_samples),
+            "padding_sample_count": padding,
+            "total_tokens": total_tokens,
+            "train_tokens": train_tokens,
+            "prefix_tokens": sum(prefix_lengths[: len(samples)]),
+            "max_sequence_length": max(len(sample.input_ids or []) for sample in samples),
+            "old_logprob_scope": (
+                "token"
+                if all(sample.reference_logprobs is not None for sample in samples)
+                else "sequence_mean_broadcast_to_completion_tokens"
+            ),
+            "mini_batch_size": None,
+            "epochs": 1,
+            "seed": 42,
+        },
+    )
+
+
 def grouped_samples_from_verl_dataproto(batch: Any) -> dict[str, list[RLSample]]:
     grouped: dict[str, list[RLSample]] = {}
     tensors = batch.batch
@@ -399,6 +622,12 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
     micro_batch_size = fsdp_config.ppo_micro_batch_size_per_gpu or training_config.gradient_accumulation_microbatch_size
     save_contents = ["hf_model"] if fsdp_config.save_hf_model else ["model"]
     return {
+        "compaction_value": {
+            "enabled": training_config.value.enabled,
+            "loss_coefficient": training_config.value.loss_coefficient,
+            "zero_initialize_head": training_config.value.zero_initialize_head,
+            "state_anchor": training_config.value.state_anchor,
+        },
         "model": {
             "_target_": "verl.workers.config.HFModelConfig",
             "path": model_config.model_path,
@@ -494,6 +723,37 @@ def _extract_worker_metrics(worker_output: Any) -> dict[str, Any]:
     return {}
 
 
+def _extract_compaction_value_rows(worker_output: Any) -> list[tuple[int, float]]:
+    if worker_output is None:
+        return []
+    if isinstance(worker_output, list):
+        rows: list[tuple[int, float]] = []
+        for item in worker_output:
+            rows.extend(_extract_compaction_value_rows(item))
+        return rows
+    if hasattr(worker_output, "batch"):
+        return _extract_compaction_value_rows(worker_output.batch)
+    if isinstance(worker_output, dict) or hasattr(worker_output, "keys"):
+        try:
+            values = worker_output["compaction_values"]
+            indices = worker_output["sample_indices"]
+        except (KeyError, TypeError):
+            values = None
+            indices = None
+        if values is not None and indices is not None:
+            if getattr(values, "is_nested", False):
+                values = values.values()
+            flat_values = values.detach().float().cpu().reshape(-1).tolist()
+            flat_indices = indices.detach().long().cpu().reshape(-1).tolist()
+            if len(flat_values) != len(flat_indices):
+                raise RuntimeError("Distributed value outputs and sample indices are misaligned")
+            return [(int(index), float(value)) for index, value in zip(flat_indices, flat_values)]
+    raise TypeError(
+        "verl compaction-value worker returned an unsupported payload: "
+        f"{type(worker_output).__name__}"
+    )
+
+
 class VerlFSDPWorkerGroup:
     def __init__(self, model_config: ModelConfig, training_config: TrainingConfig):
         OmegaConf, RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ActorRolloutRefWorker, ray = _require_verl_worker_group()
@@ -506,7 +766,12 @@ class VerlFSDPWorkerGroup:
             use_gpu=True,
             name_prefix=f"{training_config.verl.namespace}-actor-",
         )
-        worker_cls = RayClassWithInitArgs(ray.remote(ActorRolloutRefWorker), config=self.config, role="actor")
+        worker_type = ActorRolloutRefWorker
+        if training_config.value.enabled:
+            from self_summarization_agent.verl_value_worker import CompactionValueActorRolloutRefWorker
+
+            worker_type = CompactionValueActorRolloutRefWorker
+        worker_cls = RayClassWithInitArgs(ray.remote(worker_type), config=self.config, role="actor")
         self.worker_group = RayWorkerGroup(
             resource_pool=resource_pool,
             ray_cls_with_init=worker_cls,
@@ -534,6 +799,38 @@ class VerlFSDPWorkerGroup:
             batch_td = getattr(batch, "batch", batch)
         output = self.worker_group.update_actor(batch_td)
         return _extract_worker_metrics(output)
+
+    @property
+    def data_parallel_size(self) -> int:
+        sequence_parallel_size = max(1, int(self.training_config.verl.fsdp.ulysses_sequence_parallel_size))
+        if self._world_size % sequence_parallel_size != 0:
+            raise ValueError(
+                "training.verl.num_gpus_per_worker must be divisible by "
+                "training.verl.fsdp.ulysses_sequence_parallel_size"
+            )
+        return self._world_size // sequence_parallel_size
+
+    def compute_compaction_values(self, batch: Any) -> list[float]:
+        if hasattr(batch, "to_tensordict"):
+            batch_td = batch.to_tensordict()
+        else:
+            batch_td = getattr(batch, "batch", batch)
+        output = self.worker_group.compute_compaction_values(batch_td)
+        rows = _extract_compaction_value_rows(output)
+        by_index: dict[int, float] = {}
+        for index, value in rows:
+            if index < 0:
+                continue
+            if index in by_index:
+                raise RuntimeError(f"Distributed frozen-value output duplicated sample index {index}")
+            by_index[index] = value
+        expected_indices = list(range(len(by_index)))
+        if sorted(by_index) != expected_indices:
+            raise RuntimeError(
+                "Distributed frozen-value output has missing or non-contiguous sample indices: "
+                f"{sorted(by_index)}"
+            )
+        return [by_index[index] for index in expected_indices]
 
     def save_checkpoint(self, path: str) -> None:
         self.worker_group.save_checkpoint(path, None, 0, None)
@@ -659,8 +956,123 @@ class VerlRayPolicyTrainer:
             flush=True,
         )
 
+    def _step_compaction_value_fsdp(
+        self,
+        grouped_samples: dict[str, list[RLSample]],
+    ) -> UpdateMetrics:
+        samples = _flatten_grouped_samples(grouped_samples)
+        if not samples:
+            return UpdateMetrics(sample_count=0, mean_reward=0.0, mean_advantage=0.0, loss=0.0)
+        _validate_compaction_value_samples(samples)
+        assert self._worker_group is not None
+
+        probe_batch = build_verl_value_probe_dataproto(
+            samples,
+            checkpoint_id=self.checkpoint_id,
+            alignment=self._worker_group.data_parallel_size,
+            max_sequence_length=self.training_config.max_sequence_length,
+        )
+        print(
+            "[train_step] FSDP frozen-value pass: "
+            f"states={len(samples)}, padded={probe_batch.meta_info['padded_sample_count']}, "
+            f"prefix_tokens={probe_batch.meta_info['prefix_tokens']}",
+            flush=True,
+        )
+        old_value_started = time.monotonic()
+        old_values = self._worker_group.compute_compaction_values(probe_batch)
+        old_value_seconds = time.monotonic() - old_value_started
+        if len(old_values) != len(samples):
+            raise RuntimeError(
+                "Distributed frozen-value result count does not match the dispatched batch: "
+                f"{len(old_values)} != {len(samples)}"
+            )
+        advantages = [sample.reward - old_value for sample, old_value in zip(samples, old_values)]
+        rollout_ids = [str(sample.rollout_id) for sample in samples]
+        value_weights = rollout_value_weights(rollout_ids)
+
+        mini_batch_size = self.training_config.minibatch_size or len(samples)
+        if mini_batch_size < self._worker_group.data_parallel_size:
+            mini_batch_size = self._worker_group.data_parallel_size
+        if mini_batch_size % self._worker_group.data_parallel_size != 0:
+            raise ValueError(
+                "training.minibatch_size must be divisible by the effective verl data-parallel size"
+            )
+        alignment = math.lcm(self._worker_group.data_parallel_size, mini_batch_size)
+        actor_batch = build_verl_value_actor_dataproto(
+            samples,
+            advantages=advantages,
+            value_weights=value_weights,
+            checkpoint_id=self.checkpoint_id,
+            alignment=alignment,
+            max_sequence_length=self.training_config.max_sequence_length,
+        )
+        padded_count = int(actor_batch.meta_info["padded_sample_count"])
+        actor_batch.meta_info["mini_batch_size"] = mini_batch_size
+        actor_batch.meta_info["global_batch_size"] = len(samples)
+        actor_batch.meta_info["epochs"] = self.training_config.update_epochs
+        actor_batch.meta_info["seed"] = 42
+        self._last_batch_meta = dict(actor_batch.meta_info)
+        expected_steps = self.training_config.update_epochs * max(1, padded_count // mini_batch_size)
+        print(
+            "[train_step] FSDP policy/value update: "
+            f"states={len(samples)}, padded={padded_count}, mini_batch={mini_batch_size}, "
+            f"epochs={self.training_config.update_epochs}, optimizer_steps={expected_steps}, "
+            f"train_tokens={actor_batch.meta_info['train_tokens']}",
+            flush=True,
+        )
+        update_started = time.monotonic()
+        worker_metrics = self._worker_group.update_actor(actor_batch)
+        update_seconds = time.monotonic() - update_started
+
+        predicted_classes = [1.0 if value >= 0 else -1.0 for value in old_values]
+        accuracy = sum(
+            prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
+        ) / len(samples)
+        policy_loss = _mean_metric(worker_metrics, "actor/pg_loss")
+        value_loss = _mean_metric(worker_metrics, "value/loss")
+        metrics = UpdateMetrics(
+            sample_count=len(samples),
+            mean_reward=sum(sample.reward for sample in samples) / len(samples),
+            mean_advantage=sum(advantages) / len(advantages),
+            loss=_mean_metric(worker_metrics, "loss")
+            or policy_loss + self.training_config.value.loss_coefficient * value_loss,
+            optimizer_step_count=expected_steps,
+            mean_policy_kl=_mean_metric(worker_metrics, "actor/ppo_kl"),
+            clip_fraction=_mean_metric(worker_metrics, "actor/pg_clipfrac", "actor/clipfrac"),
+        )
+        metrics.extra_metrics.update(
+            {
+                "backend": "verl_ray",
+                "verl_ray/worker_backend": "verl_fsdp",
+                "value/loss": value_loss,
+                "value/old_mean": sum(old_values) / len(old_values),
+                "value/advantage_std": float(torch.tensor(advantages).std(unbiased=False)),
+                "value/classification_accuracy": accuracy,
+                "value/state_count": len(samples),
+                "value/rollout_count": len(set(rollout_ids)),
+                "value/old_value_seconds": old_value_seconds,
+                "value/update_seconds": update_seconds,
+                "value/total_tokens": actor_batch.meta_info["total_tokens"],
+                "value/trainable_tokens": actor_batch.meta_info["train_tokens"],
+                "value/prefix_tokens": actor_batch.meta_info["prefix_tokens"],
+                "verl_fsdp/padded_sample_count": padded_count,
+                "verl_fsdp/padding_sample_count": actor_batch.meta_info["padding_sample_count"],
+                "verl_fsdp/effective_data_parallel_size": self._worker_group.data_parallel_size,
+                "verl_fsdp/sequence_parallel_size": self.training_config.verl.fsdp.ulysses_sequence_parallel_size,
+            }
+        )
+        if update_seconds > 0:
+            metrics.extra_metrics["verl_fsdp/effective_train_tokens_per_second"] = (
+                float(actor_batch.meta_info["train_tokens"]) / update_seconds
+            )
+        for key, value in worker_metrics.items():
+            metrics.extra_metrics[f"verl_fsdp/raw/{key}"] = value
+        return metrics
+
     def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
         if self.training_config.verl.worker_backend == "verl_fsdp":
+            if self.training_config.value.enabled:
+                return self._step_compaction_value_fsdp(grouped_samples)
             policy_batch = _prepare_policy_batch(grouped_samples)
             if not policy_batch.flat_samples or not policy_batch.contributing:
                 return _metrics_without_update(policy_batch)

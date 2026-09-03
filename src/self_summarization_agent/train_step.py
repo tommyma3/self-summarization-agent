@@ -202,12 +202,6 @@ def run_train_step(
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
         if config.training.backend == "verl_ray":
-            if config.training.value.enabled and config.training.verl.worker_backend == "verl_fsdp":
-                raise NotImplementedError(
-                    "Shared-backbone compaction value training currently requires "
-                    "training.verl.worker_backend='transformers'; verl's native FSDP actor "
-                    "does not expose the actor hidden state or preserve the sidecar value head."
-                )
             from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
 
             # Shutdown any stale Ray instance from a previous failed run

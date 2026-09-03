@@ -41,9 +41,9 @@ model:
   backend: transformers
   model_path: /124090467/Qwen/Qwen3.5-9B
   dtype: bfloat16
-  # Spread the trainable backbone, gradients, and optimizer state across all
-  # four reserved GPUs instead of letting auto-placement pack weights on GPU 0.
-  device_map: balanced
+  # Rollout generation still reads this field; the training worker uses native
+  # four-rank FSDP placement rather than Transformers device-map placement.
+  device_map: auto
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
@@ -134,9 +134,8 @@ training:
   epochs: 10
   steps: 10
   group_size: 4
-  # The Transformers actor-critic materializes token logits and the final
-  # hidden state together. Keep one sequence per forward/backward and only
-  # accumulate four intervals before each optimizer step to bound GPU memory.
+  # Ulysses-4 makes all GPUs collaborate on each long interval. Accumulate four
+  # intervals before each optimizer step while keeping per-rank microbatches at 1.
   update_epochs: 1
   minibatch_size: 4
   clip_range: 0.2
@@ -150,7 +149,7 @@ training:
     address:
     namespace: self-summarization-agent
     num_cpus:
-    # Reserve all four GPUs for the single model-parallel Transformers actor.
+    # Launch one distributed worker rank on each of the four A100s.
     num_gpus_per_worker: 4
     runtime_env:
       env_vars:
@@ -162,7 +161,7 @@ training:
         - "pyproject.toml"
         - ".python-version"
         - "uv.lock"
-    worker_backend: transformers
+    worker_backend: verl_fsdp
     fsdp:
       strategy: fsdp
       ppo_micro_batch_size_per_gpu: 1
@@ -171,12 +170,15 @@ training:
       log_prob_max_token_len_per_gpu: 12288
       use_dynamic_bsz: true
       use_remove_padding: true
-      use_torch_compile: true
+      # The pinned verl/Qwen3.5 FSDP path is kept eager because compile has hung.
+      use_torch_compile: false
       ulysses_sequence_parallel_size: 4
       forward_prefetch: true
-      param_offload: true
-      optimizer_offload: true
-      fsdp_size: -1
+      # Four 80 GiB A100s have enough room for the fully sharded 9B policy;
+      # avoid CPU transfers so all ranks remain compute-active.
+      param_offload: false
+      optimizer_offload: false
+      fsdp_size: 4
       save_hf_model: true
     ignore_reinit_error: true
     log_to_driver: true
