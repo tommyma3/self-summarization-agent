@@ -134,6 +134,29 @@ def test_vllm_generator_enables_prefix_caching_in_offline_engine(monkeypatch) ->
     assert engine_kwargs["logprobs_mode"] == "raw_logprobs"
 
 
+def test_build_generator_forwards_require_exact_token_ids_to_vllm(monkeypatch) -> None:
+    def fake_init(self) -> None:
+        self.tokenizer = object()
+        self.llm = object()
+        self._sampling_params_cls = object()
+
+    monkeypatch.setattr(VLLMGenerator, "__post_init__", fake_init)
+
+    default_generator = build_generator(
+        ModelConfig(backend="vllm_offline", model_path="/models/demo"),
+    )
+    relaxed_generator = build_generator(
+        ModelConfig(
+            backend="vllm_offline",
+            model_path="/models/demo",
+            require_exact_token_ids=False,
+        ),
+    )
+
+    assert default_generator.require_exact_token_ids is True
+    assert relaxed_generator.require_exact_token_ids is False
+
+
 def test_build_generator_accepts_sglang_backend(monkeypatch) -> None:
     def fake_init(self) -> None:
         self.tokenizer = object()

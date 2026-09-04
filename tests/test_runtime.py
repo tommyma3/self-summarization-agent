@@ -351,6 +351,52 @@ def test_exact_collection_terminates_when_provider_rewrites_interval_history() -
     assert any(record.get("history_rewrite") for record in result.turn_records)
 
 
+def test_exact_collection_penalizes_summary_prompt_that_rewrites_interval_history() -> None:
+    model = NativeMetadataModel(
+        [
+            GenerationResult(
+                text="search first</think>",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[10, 11],
+                message=Message(
+                    role="assistant",
+                    reasoning_content="search first",
+                    tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
+                ),
+                finish_reason="tool_calls",
+            ),
+            GenerationResult(
+                text="summary body",
+                # The provider re-rendered the history for the summary request,
+                # so this prompt does not extend the previous sampled tokens.
+                prompt_token_ids=[7, 8, 9],
+                completion_token_ids=[30, 31],
+                finish_reason="stop",
+            ),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={}),
+        context_threshold_tokens=1,
+        max_context_tokens=2048,
+        max_summary_tokens=128,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "history_rewrite_detected"
+    assert result.final_answer is None
+    assert len(result.trajectory_records) == 1
+    trajectory = result.trajectory_records[0]
+    assert trajectory["termination_kind"] == "malformed"
+    generations = trajectory["collection_tokens"]["generations"]
+    assert len(generations) == 1
+    assert generations[0]["full_token_ids"] == [1, 2, 10, 11]
+    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert any(record.get("history_rewrite") for record in result.turn_records)
+
+
 def test_runtime_completes_without_summary_below_threshold() -> None:
     backend = FakeBackend(search_index={"q": ["doc-1"]}, documents={"doc-1": "fact from doc-1"})
     model = ScriptedModel(
