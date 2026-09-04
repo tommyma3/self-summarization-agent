@@ -31,6 +31,7 @@ from self_summarization_agent.trajectory import (
     record_has_training_tokens,
     validate_trajectory_schema,
 )
+from self_summarization_agent.value_model import migrate_compaction_value_head_sidecar
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -646,6 +647,7 @@ def run_checkpoint_evaluation(
 
     train_dir = ensure_dir(latest_root or _train_dir(config))
     current = resolve_latest_checkpoint(train_dir)
+    migrate_compaction_value_head_sidecar(current.path)
     rollouts_dir = ensure_dir(train_dir / "rollouts")
     eval_metrics_path = train_dir / "eval_metrics.jsonl"
     phase_timings_path = train_dir / "phase_timings.jsonl"
@@ -810,6 +812,7 @@ def run_training_iteration(
         train_update_timeout = phase_timeout
     train_dir = ensure_dir(latest_root or _train_dir(config))
     current = resolve_latest_checkpoint(train_dir)
+    migrate_compaction_value_head_sidecar(current.path)
     should_resume = resume or resume_rollouts
     rollouts_dir = ensure_dir(train_dir / "rollouts")
     checkpoints_dir = ensure_dir(train_dir / "checkpoints")

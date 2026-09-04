@@ -8,8 +8,9 @@ import torch
 from safetensors.torch import load_file, save_file
 
 
-VALUE_HEAD_FILENAME = "compaction_value_head.safetensors"
-VALUE_HEAD_MANIFEST_FILENAME = "compaction_value_config.json"
+VALUE_HEAD_SUBDIR = "compaction_value"
+VALUE_HEAD_FILENAME = f"{VALUE_HEAD_SUBDIR}/compaction_value_head.safetensors"
+VALUE_HEAD_MANIFEST_FILENAME = f"{VALUE_HEAD_SUBDIR}/compaction_value_config.json"
 VALUE_HEAD_VERSION = 1
 
 
@@ -97,12 +98,14 @@ def state_hidden_states(hidden_states: torch.Tensor, state_prefix_lengths: torch
 
 def save_value_head(head: CompactionValueHead, checkpoint_path: str | Path) -> None:
     path = Path(checkpoint_path)
-    path.mkdir(parents=True, exist_ok=True)
+    weights_path = path / VALUE_HEAD_FILENAME
+    manifest_path = path / VALUE_HEAD_MANIFEST_FILENAME
+    weights_path.parent.mkdir(parents=True, exist_ok=True)
     save_file(
         {name: tensor.detach().cpu().contiguous() for name, tensor in head.state_dict().items()},
-        str(path / VALUE_HEAD_FILENAME),
+        str(weights_path),
     )
-    (path / VALUE_HEAD_MANIFEST_FILENAME).write_text(
+    manifest_path.write_text(
         json.dumps(
             {
                 "version": VALUE_HEAD_VERSION,
@@ -126,6 +129,16 @@ def load_value_head(
     path = Path(checkpoint_path)
     weights_path = path / VALUE_HEAD_FILENAME
     manifest_path = path / VALUE_HEAD_MANIFEST_FILENAME
+
+    # Backward compatibility: older checkpoints stored the sidecar at the top
+    # level, where vLLM's weight loader would treat it as a model shard.
+    legacy_weights_path = path / "compaction_value_head.safetensors"
+    legacy_manifest_path = path / "compaction_value_config.json"
+    if not weights_path.exists() and legacy_weights_path.exists():
+        weights_path = legacy_weights_path
+    if not manifest_path.exists() and legacy_manifest_path.exists():
+        manifest_path = legacy_manifest_path
+
     head = CompactionValueHead(hidden_size, zero_initialize=zero_initialize)
     if not weights_path.exists() and not manifest_path.exists():
         return head, False
@@ -140,3 +153,36 @@ def load_value_head(
         raise ValueError("Compaction value-head manifest does not match the policy model")
     head.load_state_dict(load_file(str(weights_path)))
     return head, True
+
+
+def migrate_compaction_value_head_sidecar(checkpoint_path: str | Path) -> bool:
+    """Move legacy top-level value-head sidecars into a vLLM-ignored subdirectory.
+
+    vLLM's checkpoint loader globs ``*.safetensors`` in the model directory.  The
+    value head is not part of the policy model, so it must live in a
+    subdirectory.  This helper is idempotent: it renames legacy sidecars when it
+    first sees them and removes any leftover top-level copies once the new
+    layout is in place.
+    """
+    path = Path(checkpoint_path)
+    old_weights = path / "compaction_value_head.safetensors"
+    old_manifest = path / "compaction_value_config.json"
+    new_weights = path / VALUE_HEAD_FILENAME
+    new_manifest = path / VALUE_HEAD_MANIFEST_FILENAME
+    migrated = False
+
+    def _relocate(old: Path, new: Path) -> bool:
+        if not old.exists():
+            return False
+        if new.exists():
+            old.unlink()
+            return True
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.rename(new)
+        return True
+
+    if _relocate(old_weights, new_weights):
+        migrated = True
+    if _relocate(old_manifest, new_manifest):
+        migrated = True
+    return migrated

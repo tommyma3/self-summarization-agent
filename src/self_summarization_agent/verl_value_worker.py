@@ -224,8 +224,11 @@ class CompactionValueTrainingWorker(TrainingWorker):
         value_probe = data["value_probe_mask"].to(device=state_logits.device, dtype=torch.bool)
         if bool(torch.all(value_probe)):
             model_output.pop("log_probs", None)
-            model_output["compaction_values"] = expected_binary_value(state_logits)
-            model_output["sample_indices"] = data["sample_indices"].to(state_logits.device)
+            # verl's postprocess builds nested tensors by unbinding along the batch
+            # dimension. Keep per-state outputs at least 1-D so they are not treated
+            # as zero-dimensional scalars.
+            model_output["compaction_values"] = expected_binary_value(state_logits).unsqueeze(-1)
+            model_output["sample_indices"] = data["sample_indices"].to(state_logits.device).unsqueeze(-1)
             return state_logits.sum() * 0.0, {}
         if bool(torch.any(value_probe)):
             raise ValueError("A distributed microbatch cannot mix value probes and trainable intervals")

@@ -22,7 +22,11 @@ from self_summarization_agent.trajectory import (
     extract_training_samples,
     is_training_cache_current,
 )
-from self_summarization_agent.value_model import VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME
+from self_summarization_agent.value_model import (
+    VALUE_HEAD_FILENAME,
+    VALUE_HEAD_MANIFEST_FILENAME,
+    migrate_compaction_value_head_sidecar,
+)
 
 
 def _load_rollout_rows(path: str | Path) -> list[dict[str, Any]]:
@@ -157,6 +161,7 @@ def run_train_step(
     trainer: Any | None = None,
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
+    migrate_compaction_value_head_sidecar(checkpoint)
     checkpoint_id = checkpoint_id_from_path(checkpoint)
     if (
         config.training.value.enabled

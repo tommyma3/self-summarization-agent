@@ -4,9 +4,12 @@ import pytest
 import torch
 
 from self_summarization_agent.value_model import (
+    VALUE_HEAD_FILENAME,
+    VALUE_HEAD_MANIFEST_FILENAME,
     CompactionValueHead,
     expected_binary_value,
     load_value_head,
+    migrate_compaction_value_head_sidecar,
     reward_class_indices,
     rollout_normalized_value_loss,
     rollout_value_weights,
@@ -63,3 +66,37 @@ def test_value_head_checkpoint_round_trip(tmp_path: Path) -> None:
     assert found is True
     for expected, actual in zip(head.parameters(), loaded.parameters()):
         assert torch.equal(expected, actual)
+
+
+def test_value_head_sidecar_lives_in_vllm_ignored_subdirectory(tmp_path: Path) -> None:
+    head = CompactionValueHead(3, zero_initialize=False)
+    save_value_head(head, tmp_path)
+
+    assert (tmp_path / VALUE_HEAD_FILENAME).exists()
+    assert (tmp_path / VALUE_HEAD_MANIFEST_FILENAME).exists()
+    # Legacy top-level files must not be created.
+    assert not (tmp_path / "compaction_value_head.safetensors").exists()
+    assert not (tmp_path / "compaction_value_config.json").exists()
+
+
+def test_legacy_top_level_sidecar_is_migrated_and_loadable(tmp_path: Path) -> None:
+    head = CompactionValueHead(3, zero_initialize=False)
+    with torch.no_grad():
+        head.projection.weight.fill_(0.75)
+        head.projection.bias.copy_(torch.tensor([0.25, -0.25]))
+    save_value_head(head, tmp_path)
+
+    # Simulate an old checkpoint by moving the sidecar back to the top level.
+    old_weights = tmp_path / "compaction_value_head.safetensors"
+    old_manifest = tmp_path / "compaction_value_config.json"
+    (tmp_path / VALUE_HEAD_FILENAME).rename(old_weights)
+    (tmp_path / VALUE_HEAD_MANIFEST_FILENAME).rename(old_manifest)
+
+    assert migrate_compaction_value_head_sidecar(tmp_path) is True
+
+    loaded, found = load_value_head(tmp_path, hidden_size=3, zero_initialize=True)
+    assert found is True
+    for expected, actual in zip(head.parameters(), loaded.parameters()):
+        assert torch.equal(expected, actual)
+    assert not old_weights.exists()
+    assert not old_manifest.exists()

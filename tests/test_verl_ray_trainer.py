@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 from self_summarization_agent.config import CompactionValueConfig, ModelConfig, TrainingConfig
@@ -7,6 +8,7 @@ from self_summarization_agent.trajectory import RLSample
 from self_summarization_agent import verl_ray_trainer
 from self_summarization_agent.verl_ray_trainer import (
     VerlRayPolicyTrainer,
+    _extract_compaction_value_rows,
     build_verl_actor_dataproto,
     build_verl_dataproto,
     build_verl_fsdp_worker_config,
@@ -262,3 +264,23 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
     assert metrics.mean_advantage == 0.0
     assert metrics.extra_metrics["value/classification_accuracy"] == 1.0
     assert metrics.extra_metrics["verl_ray/worker_backend"] == "verl_fsdp"
+
+
+def test_extract_compaction_value_rows_flattens_nested_per_state_outputs() -> None:
+    """verl postprocess returns per-state tensors as jagged nested tensors.
+
+    The value worker deliberately keeps each value/index one-dimensional so
+    verl's unbind+nested construction does not receive zero-dimensional scalars.
+    Extraction must flatten those nested buffers back to rows.
+    """
+    values = torch.nested.as_nested_tensor(
+        [torch.tensor([0.1]), torch.tensor([-0.2]), torch.tensor([0.3])],
+        layout=torch.jagged,
+    )
+    indices = torch.nested.as_nested_tensor(
+        [torch.tensor([2]), torch.tensor([0]), torch.tensor([1])],
+        layout=torch.jagged,
+    )
+    rows = _extract_compaction_value_rows({"compaction_values": values, "sample_indices": indices})
+    assert [index for index, _ in rows] == [2, 0, 1]
+    assert [value for _, value in rows] == pytest.approx([0.1, -0.2, 0.3])

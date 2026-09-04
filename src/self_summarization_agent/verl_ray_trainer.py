@@ -743,6 +743,8 @@ def _extract_compaction_value_rows(worker_output: Any) -> list[tuple[int, float]
         if values is not None and indices is not None:
             if getattr(values, "is_nested", False):
                 values = values.values()
+            if getattr(indices, "is_nested", False):
+                indices = indices.values()
             flat_values = values.detach().float().cpu().reshape(-1).tolist()
             flat_indices = indices.detach().long().cpu().reshape(-1).tolist()
             if len(flat_values) != len(flat_indices):
