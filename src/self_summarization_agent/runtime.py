@@ -408,6 +408,67 @@ class EpisodeRuntime:
     def _next_tool_turn_id(self, state: EpisodeState) -> str:
         return f"tool-{state.tool_turn_count + 1}"
 
+    def _requires_exact_token_ids(self) -> bool:
+        return bool(getattr(self.model, "require_exact_token_ids", False))
+
+    def _history_rewrite_detected(self, active: _ActiveEpisode, generated_output: "_GeneratedOutput") -> bool:
+        """Whether the server-rendered prompt rewrote instead of extended the interval.
+
+        The provider's chat template can normalize a malformed assistant turn
+        (for example an unclosed or misspelled think block), so the next
+        request's prompt no longer starts with the previously sampled tokens.
+        Training on a continuation of that prompt would condition on tokens the
+        policy never saw, so the generation must be discarded.
+        """
+        if not self._requires_exact_token_ids():
+            return False
+        if generated_output.prompt_token_ids is None or not active.interval_outputs:
+            return False
+        previous_output = active.interval_outputs[-1]
+        if previous_output.prompt_token_ids is None or previous_output.completion_token_ids is None:
+            return False
+        previous_full_ids = list(previous_output.prompt_token_ids) + list(previous_output.completion_token_ids)
+        current_prompt_ids = list(generated_output.prompt_token_ids)
+        return current_prompt_ids[: len(previous_full_ids)] != previous_full_ids
+
+    def _history_rewritten_result(
+        self,
+        active: _ActiveEpisode,
+        prompt: str,
+        generated_output: "_GeneratedOutput",
+        *,
+        prompt_tokens: int,
+        generation_kind: str,
+    ) -> RuntimeResult:
+        """Penalize an episode whose interval history was rewritten by the provider.
+
+        The discarded generation is kept only as a diagnostic turn record; the
+        interval is finalized with the generations sampled before the rewrite.
+        """
+        recorded_turns = list(active.turn_records)
+        turn_record: dict[str, Any] = {
+            "query_id": active.state.query_id,
+            "turn_id": self._next_tool_turn_id(active.state),
+            "kind": "tool",
+            "prompt": prompt,
+            "completion": generated_output.text,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": generated_output.completion_tokens,
+            "generation_kind": generation_kind,
+            "history_rewrite": True,
+        }
+        recorded_turns.append(turn_record)
+        interval_messages = (
+            list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(active.state.messages)
+        )
+        self._finalize_trajectory(
+            active,
+            interval_messages,
+            termination_kind="malformed",
+            prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
+        )
+        return self._penalized_result(active, status="history_rewrite_detected", turn_records=recorded_turns)
+
     def _collection_token_payload(self, active: _ActiveEpisode) -> dict[str, Any] | None:
         if not active.interval_outputs:
             return None
@@ -448,6 +509,13 @@ class EpisodeRuntime:
                     "finish_reason": output.finish_reason,
                 }
             )
+        for index in range(1, len(generations)):
+            previous_full_ids = generations[index - 1]["full_token_ids"]
+            if generations[index]["prompt_token_ids"][: len(previous_full_ids)] != previous_full_ids:
+                raise RuntimeError(
+                    f"Collection generation {index + 1} rewrote the interval history instead of "
+                    "extending it; the provider chat template changed the sampled tokens"
+                )
         search_start = 0
         for index, output in enumerate(active.interval_outputs[:-1]):
             token_ids = output.completion_token_ids
@@ -766,6 +834,15 @@ class EpisodeRuntime:
                 active.token_usage.max_prompt_tokens_seen,
                 prompt_tokens,
             )
+        if self._history_rewrite_detected(active, generated_output):
+            active.result = self._history_rewritten_result(
+                active,
+                prompt,
+                generated_output,
+                prompt_tokens=prompt_tokens,
+                generation_kind=generation_kind,
+            )
+            return None
         active.interval_outputs.append(generated_output)
         raw_output = generated_output.text
         if generation_kind == "forced_answer":
@@ -786,6 +863,24 @@ class EpisodeRuntime:
         payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
         tool_name = payload["tool_name"]
         arguments = payload["arguments"]
+
+        if (
+            tool_name in {"search", "get_document"}
+            and self._requires_exact_token_ids()
+            and _extract_completed_thinking(raw_output) is None
+        ):
+            # The provider cannot re-render this completion losslessly on the
+            # next request (its think block never closes), so continuing would
+            # rewrite the interval history; treat it like a malformed action.
+            active.result = self._malformed_result(
+                active,
+                prompt,
+                raw_output,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=generated_output.completion_tokens,
+                generation_kind=generation_kind,
+            )
+            return None
 
         if tool_name == "finish":
             answer = arguments.get("answer")
@@ -992,6 +1087,15 @@ class EpisodeRuntime:
                 active.token_usage.max_prompt_tokens_seen,
                 prompt_tokens,
             )
+        if self._history_rewrite_detected(active, generated_output):
+            active.result = self._history_rewritten_result(
+                active,
+                prompt,
+                generated_output,
+                prompt_tokens=prompt_tokens,
+                generation_kind="forced_answer",
+            )
+            return
         active.interval_outputs.append(generated_output)
         raw_output = generated_output.text
         active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
@@ -1102,6 +1206,15 @@ class EpisodeRuntime:
                 active.token_usage.max_prompt_tokens_seen,
                 prompt_tokens,
             )
+        if self._history_rewrite_detected(active, generated_output):
+            active.result = self._history_rewritten_result(
+                active,
+                prompt,
+                generated_output,
+                prompt_tokens=prompt_tokens,
+                generation_kind="summary",
+            )
+            return
         active.interval_outputs.append(generated_output)
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
         summary_extraction = (

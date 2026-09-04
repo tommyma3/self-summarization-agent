@@ -1,8 +1,23 @@
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+import logging
 import math
 from typing import Any
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+class ProviderHistoryRewriteError(ValueError):
+    """Exact collection tokens show the provider re-rendered interval history.
+
+    The chat template normalized an earlier assistant turn (for example an
+    unclosed or misspelled think block), so a later server-rendered prompt no
+    longer extends the previously sampled tokens. Training on such an interval
+    would condition on tokens the policy never saw; the record is excluded
+    from trainable samples instead.
+    """
 
 
 TOKEN_CACHE_VERSION = 6
@@ -457,12 +472,21 @@ def _extract_collection_tokens(
             raise ValueError(
                 f"Trainable record {turn_id} has inconsistent collection generation {generation_index}"
             )
+        if generation_index > 0:
+            previous_full_ids = generations[generation_index - 1]["full_token_ids"]
+            if generation_prompt_ids[: len(previous_full_ids)] != previous_full_ids:
+                raise ProviderHistoryRewriteError(
+                    f"Trainable record {turn_id} collection generation {generation_index} rewrote "
+                    "the interval history instead of extending it"
+                )
     final_generation = generations[-1]
     if list(final_generation["full_token_ids"]) != full_token_ids:
         raise ValueError(f"Trainable record {turn_id} final generation does not match full_token_ids")
     first_prompt_ids = list(generations[0]["prompt_token_ids"])
     if not first_prompt_ids or full_token_ids[: len(first_prompt_ids)] != first_prompt_ids:
-        raise ValueError(f"Trainable record {turn_id} first state prompt is not an exact prefix")
+        raise ProviderHistoryRewriteError(
+            f"Trainable record {turn_id} first state prompt is not an exact prefix"
+        )
     if len(first_prompt_ids) > len(full_token_ids) - 1:
         raise ValueError(f"Trainable record {turn_id} state prefix has no following sampled token")
     return full_token_ids, assistant_token_mask, len(first_prompt_ids)
@@ -599,6 +623,7 @@ def extract_trainable_samples(
     validate_trajectory_schema(records, context="Trainable records")
     samples: list[RLSample] = []
     seen_record_ids: set[str] = set()
+    skipped_history_rewrite_ids: set[str] = set()
     for record in records:
         if not isinstance(record, Mapping):
             raise ValueError(f"Trajectory record must be a mapping, got {type(record).__name__}")
@@ -632,14 +657,19 @@ def extract_trainable_samples(
             record,
             turn_id=record_id,
         )
-        (
-            collection_full_token_ids,
-            collection_assistant_token_mask,
-            collection_state_prefix_length,
-        ) = _extract_collection_tokens(
-            record,
-            turn_id=record_id,
-        )
+        try:
+            (
+                collection_full_token_ids,
+                collection_assistant_token_mask,
+                collection_state_prefix_length,
+            ) = _extract_collection_tokens(
+                record,
+                turn_id=record_id,
+            )
+        except ProviderHistoryRewriteError as exc:
+            LOGGER.warning("Skipping trainable record %s: %s", record_id, exc)
+            skipped_history_rewrite_ids.add(record_id)
+            continue
         state_prefix_length = cached_state_prefix_length or collection_state_prefix_length
         if (
             cached_state_prefix_length is not None
@@ -677,7 +707,7 @@ def extract_trainable_samples(
                 state_prefix_length=state_prefix_length,
             )
         )
-    unknown_reward_ids = sorted(set(rewards) - seen_record_ids)
+    unknown_reward_ids = sorted(set(rewards) - seen_record_ids - skipped_history_rewrite_ids)
     if unknown_reward_ids:
         raise ValueError(f"Reward ids do not match any trajectory record: {', '.join(unknown_reward_ids)}")
     return samples

@@ -64,7 +64,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
     model = NativeMetadataModel(
         [
             GenerationResult(
-                text="raw search",
+                text="search first</think>",
                 prompt_token_ids=[1, 2],
                 completion_token_ids=[10, 11],
                 cumulative_logprob=-0.3,
@@ -145,7 +145,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
     model = NativeMetadataModel(
         [
             GenerationResult(
-                text="raw search",
+                text="search first</think>",
                 prompt_token_ids=[3],
                 completion_token_ids=[10],
                 cumulative_logprob=-0.1,
@@ -262,6 +262,93 @@ def test_rollout_native_cache_rejects_completion_without_exact_conditioning_pref
     }
 
     assert build_rollout_native_training_cache(collection_tokens) is None
+
+
+def test_exact_collection_penalizes_action_without_closed_thinking() -> None:
+    model = NativeMetadataModel(
+        [
+            GenerationResult(
+                text="searching without ever closing the think block\n<search>q</search>",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[10, 11],
+                message=Message(
+                    role="assistant",
+                    tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={}),
+        context_threshold_tokens=1000,
+        max_context_tokens=2048,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "malformed_tool_call"
+    assert result.final_answer is None
+    assert result.tool_call_counts["search"] == 0
+    assert len(result.trajectory_records) == 1
+    trajectory = result.trajectory_records[0]
+    assert trajectory["termination_kind"] == "malformed"
+    assert trajectory["collection_tokens"]["full_token_ids"] == [1, 2, 10, 11]
+    assert result.turn_rewards == {"trajectory-1": -1.0}
+
+
+def test_exact_collection_terminates_when_provider_rewrites_interval_history() -> None:
+    model = NativeMetadataModel(
+        [
+            GenerationResult(
+                text="search first</think>",
+                prompt_token_ids=[1, 2],
+                completion_token_ids=[10, 11],
+                message=Message(
+                    role="assistant",
+                    reasoning_content="search first",
+                    tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
+                ),
+                finish_reason="tool_calls",
+            ),
+            GenerationResult(
+                text="raw finish",
+                # The provider re-rendered the history, so this prompt does not
+                # extend the previous generation's sampled tokens [1, 2, 10, 11].
+                prompt_token_ids=[7, 8, 9],
+                completion_token_ids=[30, 31],
+                message=Message(
+                    role="assistant",
+                    reasoning_content="answer",
+                    tool_calls=[ToolCall(id="call-finish", name="finish", arguments={"answer": "done"})],
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    runtime = EpisodeRuntime(
+        model=model,
+        backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={}),
+        context_threshold_tokens=1000,
+        max_context_tokens=2048,
+    )
+
+    result = runtime.run(query_id="q1", user_prompt="question")
+
+    assert result.status == "history_rewrite_detected"
+    assert result.final_answer is None
+    assert result.tool_call_counts["search"] == 1
+    assert len(result.trajectory_records) == 1
+    trajectory = result.trajectory_records[0]
+    assert trajectory["termination_kind"] == "malformed"
+    generations = trajectory["collection_tokens"]["generations"]
+    assert len(generations) == 1
+    assert generations[0]["full_token_ids"] == [1, 2, 10, 11]
+    assert trajectory["collection_tokens"]["full_token_ids"] == [1, 2, 10, 11]
+    assert [message["role"] for message in trajectory["messages"]] == ["system", "user", "assistant", "tool"]
+    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert any(record.get("history_rewrite") for record in result.turn_records)
 
 
 def test_runtime_completes_without_summary_below_threshold() -> None:

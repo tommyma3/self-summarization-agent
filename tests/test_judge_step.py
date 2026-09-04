@@ -32,10 +32,59 @@ class BatchJudgeGenerator:
         return len(text.split())
 
 
+def test_judge_step_excludes_history_rewritten_records_from_trainable_samples() -> None:
+    rewritten_record = {
+        "schema_version": 3,
+        "query_id": "q1",
+        "turn_id": "trajectory-1",
+        "kind": "trajectory",
+        "termination_kind": "malformed",
+        "messages": [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "reasoning and action"},
+        ],
+        "collection_tokens": {
+            "version": 2,
+            "full_token_ids": [1, 2, 99, 100, 20],
+            "assistant_token_mask": [False, False, False, False, True],
+            "generations": [
+                {
+                    "prompt_token_ids": [1, 2],
+                    "completion_token_ids": [10, 11],
+                    "full_token_ids": [1, 2, 10, 11],
+                },
+                {
+                    # The provider re-rendered the first assistant turn, so this
+                    # prompt no longer extends the first generation's tokens.
+                    "prompt_token_ids": [1, 2, 99, 100],
+                    "completion_token_ids": [20],
+                    "full_token_ids": [1, 2, 99, 100, 20],
+                },
+            ],
+        },
+    }
+    row = {
+        "status": "malformed_tool_call",
+        "rollout_index": 0,
+        "turn_records": [
+            {"query_id": "q1", "turn_id": "tool-1", "kind": "tool", "prompt": "p", "completion": "c"},
+        ],
+        "trajectory_records": [rewritten_record],
+    }
+
+    judged = apply_decision_to_rollout_row(
+        row,
+        JudgeDecision(outcome="correct_answer", judge_prompt="unused", judge_response="unused", parse_error=False),
+    )
+
+    assert judged["turn_rewards"] == {"trajectory-1": -1.0}
+    assert judged["trainable_sample_count"] == 0
+
+
 def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
     row = {
         "status": "summary_length_exceeded",
-        "rollout_index": 0,
         "turn_records": [
             {"query_id": "q1", "turn_id": "tool-1", "kind": "tool", "prompt": "p", "completion": "c"},
             {"query_id": "q1", "turn_id": "summary-1", "kind": "summary", "prompt": "p", "completion": "c"},

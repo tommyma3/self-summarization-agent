@@ -75,6 +75,15 @@ The system instructions and original user query remain byte-for-byte stable acro
 
 A malformed, empty, or over-limit summary is never installed as new state. Its raw failed output stays in the terminated interval and the rollout receives the configured penalty.
 
+## Provider history rewrites
+
+Under exact-token collection every mid-interval generation is verified: the server-rendered prompt of generation k+1 must start with the exact sampled tokens of generation k. The provider's chat template can normalize a malformed assistant turn (for example a think block closed with a misspelled tag such as `</thinking>` instead of `</think>`), which rewrites the interval history instead of appending to it. Training on a continuation of that prompt would condition on tokens the policy never saw. Two runtime consequences:
+
+- An action output (search/get_document) whose think block never closes is treated as a malformed tool call: the interval is finalized with that raw completion, the rollout is penalized, and the episode stops.
+- If a later server-rendered prompt still fails to extend the previous generation (any other template normalization), the offending generation is discarded, the interval is finalized without it, and the episode is penalized with status `history_rewrite_detected`.
+
+Already-collected records that fail this verification raise `ProviderHistoryRewriteError` at extraction time and are excluded from trainable samples, so judging never trains on rewritten history.
+
 ## RL trajectory and token contract
 
 One `trajectory_record` is one complete interval ending in compaction, final answer, forced answer, or malformed output. `turn_records` are diagnostics; training consumes `trajectory_records`.

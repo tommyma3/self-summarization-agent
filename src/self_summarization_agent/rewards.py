@@ -10,6 +10,7 @@ PENALIZED_RUNTIME_STATUSES = frozenset(
         "empty_summary",
         "summary_length_exceeded",
         "context_length_exceeded",
+        "history_rewrite_detected",
     }
 )
 
