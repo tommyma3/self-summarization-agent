@@ -219,8 +219,15 @@ def main() -> None:
     vllm_gpu_ids = [part.strip() for part in args.vllm_gpus.split(",") if part.strip()]
     if not vllm_gpu_ids:
         raise ValueError("--vllm-gpus must list at least one GPU id")
-    # Pin retrieval (FAISS embedding model) to the first vLLM GPU.
-    os.environ["CUDA_VISIBLE_DEVICES"] = vllm_gpu_ids[0]
+    # Pin retrieval (FAISS embedding model) to a GPU outside the vLLM set when
+    # one is available. Sharing a vLLM GPU leaves the embedding model's ~16 GiB
+    # held there, so the engine's gpu_memory_utilization free-memory check
+    # fails at startup. Mirrors the launcher's use of retrieval.gpu_ids.
+    retrieval_gpu = next(
+        (str(gpu_id) for gpu_id in config.retrieval.gpu_ids if str(gpu_id) not in vllm_gpu_ids),
+        next((candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids), vllm_gpu_ids[0]),
+    )
+    os.environ["CUDA_VISIBLE_DEVICES"] = retrieval_gpu
     backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
     # Pin rollout generator to the requested vLLM GPUs.
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(vllm_gpu_ids)
@@ -245,9 +252,10 @@ def main() -> None:
             judge = RewardJudge(judge_generator)
         else:
             # Pin judge to a GPU outside the rollout set when one is available
-            # (sharing the last rollout GPU otherwise).
+            # (sharing the last rollout GPU otherwise). Skip the retrieval GPU,
+            # which already holds the embedding model.
             judge_gpu = next(
-                (candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids),
+                (candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids and candidate != retrieval_gpu),
                 vllm_gpu_ids[-1],
             )
             os.environ["CUDA_VISIBLE_DEVICES"] = judge_gpu
