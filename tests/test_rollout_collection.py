@@ -19,6 +19,7 @@ from self_summarization_agent.config import (
 from self_summarization_agent.dataset import QueryExample
 from self_summarization_agent.rollout_collection import collect_rollouts
 from self_summarization_agent.rollout_collection import _SubprocessOverlapJudgeClient
+from self_summarization_agent.trajectory import TRAJECTORY_SCHEMA_VERSION
 
 
 class CyclingGenerator:
@@ -410,6 +411,7 @@ def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:
                 "query_id": "q1",
                 "query": "question one",
                 "status": "completed",
+                "trajectory_records": [{"schema_version": TRAJECTORY_SCHEMA_VERSION}],
             }
         )
         + "\n",

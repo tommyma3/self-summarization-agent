@@ -48,7 +48,9 @@ def _message(batch_id: int, query_id: str) -> dict:
 
 def test_judge_worker_microbatches_multiple_streamed_submissions(monkeypatch) -> None:
     judge = RecordingBatchJudge()
-    config = SimpleNamespace(judge=SimpleNamespace(batch_size=8, batch_wait_ms=100))
+    config = SimpleNamespace(
+        judge=SimpleNamespace(batch_size=8, batch_wait_ms=100, batch_timeout_seconds=600)
+    )
     monkeypatch.setattr(judge_worker, "load_train_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(judge_worker, "build_judge", lambda _config: judge)
     request_queue = Queue()
@@ -64,7 +66,9 @@ def test_judge_worker_microbatches_multiple_streamed_submissions(monkeypatch) ->
         response_queue=response_queue,
     )
 
-    responses = [response_queue.get_nowait(), response_queue.get_nowait()]
+    responses = [response_queue.get_nowait(), response_queue.get_nowait(), response_queue.get_nowait()]
+    assert responses[0] == judge_worker.READY
+    responses = responses[1:]
     assert judge.batch_sizes == [2]
     assert [response["batch_id"] for response in responses] == [0, 1]
     assert all(response["rows"][0]["judge"]["outcome"] == "correct_answer" for response in responses)
@@ -72,7 +76,9 @@ def test_judge_worker_microbatches_multiple_streamed_submissions(monkeypatch) ->
 
 def test_judge_worker_caps_large_submission_at_configured_batch_size(monkeypatch) -> None:
     judge = RecordingBatchJudge()
-    config = SimpleNamespace(judge=SimpleNamespace(batch_size=2, batch_wait_ms=0))
+    config = SimpleNamespace(
+        judge=SimpleNamespace(batch_size=2, batch_wait_ms=0, batch_timeout_seconds=600)
+    )
     monkeypatch.setattr(judge_worker, "load_train_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(judge_worker, "build_judge", lambda _config: judge)
     request_queue = Queue()
@@ -100,6 +106,7 @@ def test_judge_worker_caps_large_submission_at_configured_batch_size(monkeypatch
         response_queue=response_queue,
     )
 
+    assert response_queue.get_nowait() == judge_worker.READY
     response = response_queue.get_nowait()
     assert judge.batch_sizes == [2, 1]
     assert len(response["rows"]) == 3

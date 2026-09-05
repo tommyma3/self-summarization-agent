@@ -615,7 +615,11 @@ def test_iteration_launcher_delegates_retrieval_ownership_to_merged_collect(
         python_executable="python",
     )
 
-    merged_commands = [command for command in calls if "merged_collect_step" in command]
+    merged_commands = [
+        command
+        for command in calls
+        if "self_summarization_agent.merged_collect_step" in command
+    ]
     assert len(merged_commands) == 1
     assert "--retrieval-worker-url" not in merged_commands[0]
     assert worker_calls == []

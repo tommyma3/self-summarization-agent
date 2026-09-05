@@ -20,7 +20,10 @@ def test_cache_overlap_worker_microbatches_samples_across_judged_rows(monkeypatc
     scorer = RecordingCacheScorer()
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "test")
     config = SimpleNamespace(
-        training=SimpleNamespace(gradient_accumulation_microbatch_size=2)
+        training=SimpleNamespace(
+            gradient_accumulation_microbatch_size=2,
+            train_compaction_tokens=False,
+        )
     )
     monkeypatch.setattr(
         merged_collect_step,
@@ -40,7 +43,7 @@ def test_cache_overlap_worker_microbatches_samples_across_judged_rows(monkeypatc
     monkeypatch.setattr(
         merged_collect_step,
         "_attach_training_caches",
-        lambda row, *, cache_payloads, checkpoint_id: {
+        lambda row, *, cache_payloads, checkpoint_id, **_kwargs: {
             **row,
             "cache_payloads": cache_payloads,
             "cache_checkpoint_id": checkpoint_id,
@@ -74,6 +77,7 @@ def test_cache_overlap_worker_microbatches_samples_across_judged_rows(monkeypatc
         response_queue=response_queue,
     )
 
+    assert response_queue.get_nowait() == merged_collect_step.READY
     response = response_queue.get_nowait()
     assert scorer.batch_sizes == [2, 1]
     assert len(response["rows"]) == 3

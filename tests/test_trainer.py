@@ -510,6 +510,7 @@ def test_compaction_value_forward_selects_only_anchor_and_trainable_logits() -> 
     )
     trainer.model = SelectedLogitModel()
     trainer.value_head = CompactionValueHead(4, zero_initialize=False)
+    trainer.tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=0)
 
     token_logprobs, completion_mask, value_logits = trainer._actor_critic_outputs([sample])
 

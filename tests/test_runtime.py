@@ -188,6 +188,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
         backend=FakeBackend(search_index={"q": ["doc-1"]}, documents={}),
         context_threshold_tokens=1,
         max_context_tokens=2048,
+        max_summary_tokens=32,
     )
 
     result = runtime.run(query_id="q1", user_prompt="question")
@@ -774,7 +775,7 @@ def test_runtime_second_step_finish_sees_raw_history_and_succeeds() -> None:
     assert "Tool Budget Remaining" not in model.prompts[0]
     assert "Tool Budget Remaining" not in model.prompts[1]
     assert "### SYSTEM" in model.prompts[1]
-    assert "choose exactly one action" in model.prompts[1]
+    assert "output exactly one action" in model.prompts[1]
     assert "### USER\nquestion" in model.prompts[1]
     assert "### ASSISTANT\n<think>thinking</think>" in model.prompts[1]
     assert '{"tool_name": "search", "arguments": {"query": "q"}}' in model.prompts[1]
