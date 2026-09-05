@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
@@ -215,11 +216,14 @@ def main() -> None:
         seed=seed,
     )
 
-    # Pin retrieval (FAISS embedding model) to GPU 0.
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    vllm_gpu_ids = [part.strip() for part in args.vllm_gpus.split(",") if part.strip()]
+    if not vllm_gpu_ids:
+        raise ValueError("--vllm-gpus must list at least one GPU id")
+    # Pin retrieval (FAISS embedding model) to the first vLLM GPU.
+    os.environ["CUDA_VISIBLE_DEVICES"] = vllm_gpu_ids[0]
     backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
-    # Pin rollout generator to GPUs 2,3.
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+    # Pin rollout generator to the requested vLLM GPUs.
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(vllm_gpu_ids)
     rollout_model_config = build_rollout_model_config(config, args)
     generator = build_generator(rollout_model_config)
     judge = None
@@ -240,9 +244,13 @@ def main() -> None:
             judge_generator.do_sample = config.judge.do_sample
             judge = RewardJudge(judge_generator)
         else:
-            # Pin judge to GPU 1 (non-overlapping with retrieval on GPU 0
-            # and generator on GPUs 2,3).
-            os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+            # Pin judge to a GPU outside the rollout set when one is available
+            # (sharing the last rollout GPU otherwise).
+            judge_gpu = next(
+                (candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids),
+                vllm_gpu_ids[-1],
+            )
+            os.environ["CUDA_VISIBLE_DEVICES"] = judge_gpu
             judge_model_config = replace(
                 config.model,
                 backend=config.judge.backend or config.model.backend,
@@ -279,6 +287,13 @@ def main() -> None:
     tokenizer = generator.tokenizer if hasattr(generator, "tokenizer") else None
     print(format_exact_model_input_sequences(result.trajectory_records, tokenizer))
     print(output_path)
+
+    # Dump machine-readable trajectory records for independent TITO verification.
+    records_path = output_path.with_suffix(output_path.suffix + ".records.jsonl")
+    with records_path.open("w", encoding="utf-8") as handle:
+        for record in result.trajectory_records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"Trajectory records written to: {records_path}")
 
     # Decode per-generation token IDs back to strings and write to text files.
     if hasattr(generator, "tokenizer"):

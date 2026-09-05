@@ -1,0 +1,162 @@
+experiment:
+  name: validation-tito-2gpu-grpo
+  seed: 0
+  output_root: /124090467/self-summarization-agent/experiments/validation-tito-2gpu/grpo/
+  bc_plus_root: /124090467/self-summarization-agent/bc-plus
+
+dataset:
+  decrypted_path: /124090467/self-summarization-agent/bc-plus/data/browsecomp_plus_decrypted.jsonl
+  offset: 0
+  limit:
+  shuffle: false
+  train_limit: 780
+  eval_limit: 0
+
+collection:
+  train_task_count: 8
+  eval_task_count: 0
+
+retrieval:
+  backend: faiss
+  top_k: 5
+  snippet_max_tokens: 512
+  document_max_tokens: 8192
+  snippet_tokenizer_path: /124090467/Qwen/Qwen3.5-9B
+  persistent_worker: true
+  worker_startup_timeout_seconds: 600
+  gpu_ids: [0, 1]
+  index_path: /124090467/self-summarization-agent/bc-plus/indexes/qwen3-embedding-8b/corpus.shard*.pkl
+  model_name: /124090467/Qwen/Qwen3-Embedding-8B
+  normalize: true
+  pooling: eos
+  torch_dtype: bfloat16
+  dataset_name: /124090467/hf_datasets/Tevatron/browsecomp-plus-corpus
+  max_length: 16384
+
+model:
+  backend: transformers
+  model_path: /124090467/Qwen/Qwen3.5-9B
+  dtype: bfloat16
+  device_map: auto
+  gpu_memory_utilization: 0.45
+  max_new_tokens: 8192
+  temperature: 0.7
+  top_p: 0.95
+  do_sample: true
+  trust_remote_code: false
+  enable_thinking: true
+  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
+
+rollout:
+  backend: vllm_offline
+  gpu_ids: [0, 1]
+  tensor_parallel_size: 2
+  attention_backend:
+  max_model_len: 49152
+  enable_prefix_caching: true
+  max_concurrent_episodes: 10
+  overlap_judge: false
+  overlap_queue_max_batches: 20
+  max_new_tokens: 8192
+  temperature: 0.7
+  top_p: 0.95
+  do_sample: true
+  api_base_url: http://127.0.0.1:8000/v1
+  api_model:
+  api_key_env: OPENAI_API_KEY
+  api_timeout_seconds: 600
+  api_max_retries: 2
+  api_extra_body: {}
+  require_exact_token_ids: true
+  per_split_collection_timeout_seconds: 5400
+
+evaluation:
+  samples_per_task: 1
+  temperature: 0.0
+  top_p: 1.0
+  do_sample: false
+  extra_sampling_params: {}
+
+runtime:
+  # Low threshold so nearly every completed tool round requests compaction,
+  # exercising multi-segment trajectories in a short smoke run.
+  context_threshold_tokens: 2000
+  max_context_tokens: 40960
+  max_summary_tokens: 6400
+  tool_budget: 99999
+  generated_token_budget: 36000
+  phase_timeout_seconds: 9000
+  tool_execution_timeout_seconds: 600
+
+judge:
+  enabled: true
+  backend: vllm_offline
+  model_path: /124090467/Qwen/Qwen3.5-35B-A3B
+  gpu_ids: [0, 1]
+  tensor_parallel_size: 2
+  attention_backend:
+  max_model_len: 12000
+  max_new_tokens: 8192
+  temperature: 0.0
+  top_p: 1.0
+  do_sample: false
+  batch_size: 32
+  batch_wait_ms: 25
+  batch_timeout_seconds: 600
+
+training:
+  backend: verl_ray
+  gpu_ids: [0, 1]
+  fsdp_version: 2
+  context_parallel_size: 1
+  tensor_parallel_size: 1
+  data_parallel_size: 2
+  activation_checkpointing: true
+  max_sequence_length: 49152
+  epochs: 1
+  steps: 1
+  group_size: 4
+  update_epochs: 1
+  minibatch_size: 4
+  clip_range: 0.2
+  target_kl: 0.03
+  gradient_accumulation_microbatch_size: 1
+  learning_rate: 1.0e-6
+  checkpoint_interval: 1
+  eval_interval: 0
+  max_grad_norm: 1.0
+  verl:
+    address:
+    namespace: self-summarization-agent
+    num_cpus:
+    num_gpus_per_worker: 2
+    runtime_env:
+      env_vars:
+        VIRTUAL_ENV: "/124090467/self-summarization-agent/.venv"
+        PATH: "/root/.local/bin:/124090467/self-summarization-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO: "0"
+        PYTORCH_ALLOC_CONF: "expandable_segments:True"
+      excludes:
+        - "pyproject.toml"
+        - ".python-version"
+        - "uv.lock"
+    worker_backend: verl_fsdp
+    fsdp:
+      strategy: fsdp
+      ppo_micro_batch_size_per_gpu: 1
+      ppo_max_token_len_per_gpu: 12288
+      log_prob_micro_batch_size_per_gpu: 1
+      log_prob_max_token_len_per_gpu: 12288
+      use_dynamic_bsz: true
+      use_remove_padding: true
+      # Keep compile off: the pinned verl/Qwen3.5 FSDP path hung under compile.
+      use_torch_compile: false
+      ulysses_sequence_parallel_size: 2
+      forward_prefetch: true
+      param_offload: true
+      optimizer_offload: true
+      fsdp_size: -1
+      save_hf_model: true
+    ignore_reinit_error: true
+    log_to_driver: true
+    shutdown_ray: true

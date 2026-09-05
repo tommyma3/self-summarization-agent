@@ -69,3 +69,15 @@ Then use the existing `scripts/train_iterations.sh` launcher with a fresh `--lat
 Record prompt-construction time, collection throughput, peak GPU memory, token-mask coverage, integrity failures, and actual malformed-output reasons before a long run. No performance or reward recovery claim is established by the local tests.
 
 Old raw/judged/cache files must not be resumed into this collector. Keep previous experiments intact and collect fresh TITO artifacts. Existing policy/value weights can be initialization candidates after ordinary checkpoint compatibility checks; they do not make old rollout data compatible with the new collection contract.
+
+## 2026-09-05 addendum: versioned termination-semantics change (contract v2)
+
+The TITO contract was bumped from `qwen-agent-tito-v1` to `qwen-agent-tito-v2`
+(`token_stream.TITO_CONTRACT`). Under v2, any TITO completion whose think block is
+unclosed or wrongly closed — including the `</thinking>` typo and case/whitespace
+variants of `</think>` — terminates as `malformed_tool_call` (raw tokens retained and
+trainable, −1 penalty) for every generation kind (action, finish, forced answer,
+summary). v1 routed an unambiguous tagged action after a `</thinking>` typo instead.
+This is an RL reward-semantics change: collect in a fresh output lineage, and never
+resume v1 raw/judged/cache artifacts into a v2 run — lineage preflight rejects the
+contract mismatch.

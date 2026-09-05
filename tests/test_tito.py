@@ -233,17 +233,81 @@ def test_grpo_normalization_uses_rollouts_with_unequal_segment_counts():
     assert compute_group_advantages(samples) == pytest.approx([1, 1, -1], abs=2e-6)
 
 
-def test_parseable_thinking_typo_is_retained_but_unresolved_thinking_does_not_dispatch():
+def test_wrongly_closed_thinking_is_malformed_but_retained():
     model = TokenModel([SEARCH.replace("</think>", "</thinking>"), FINISH])
     result = runtime(model).run("q", "question")
-    assert result.status == "completed"
-    assert "</thinking>" in model.tokenizer.decode(model.requests[1].prompt_token_ids)
+    assert result.status == "malformed_tool_call"
+    assert result.tool_call_counts["search"] == 0
+    assert "</thinking>" in result.trajectory_records[0]["completion"]
     assert model.tokenizer.template_calls == 1
-    invalid = TokenModel([SEARCH.replace("</think>", "")])
-    rejected = runtime(invalid).run("q", "question")
+    anomalies = [t for t in result.turn_records if t.get("kind") == "format_anomaly"]
+    assert [a["anomaly"] for a in anomalies] == ["wrongly_closed_thinking"]
+    samples = extract_trainable_samples(result.trajectory_records, result.turn_rewards)
+    assert len(samples) == 1
+
+
+def test_unclosed_thinking_is_malformed_without_dispatch():
+    model = TokenModel([SEARCH.replace("</think>", ""), FINISH])
+    rejected = runtime(model).run("q", "question")
     assert rejected.status == "malformed_tool_call"
     assert rejected.tool_call_counts["search"] == 0
+    anomalies = [t for t in rejected.turn_records if t.get("kind") == "format_anomaly"]
+    assert [a["anomaly"] for a in anomalies] == ["unclosed_thinking"]
     assert len(extract_trainable_samples(rejected.trajectory_records, rejected.turn_rewards)) == 1
+
+
+@pytest.mark.parametrize("variant", ["</thinking>", "</Think>", "</think >", "</thinkx>", "</THINK>"])
+def test_wrong_thinking_closers_are_malformed(variant):
+    model = TokenModel([SEARCH.replace("</think>", variant), FINISH])
+    result = runtime(model).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert result.tool_call_counts["search"] == 0
+
+
+def test_finish_with_wrongly_closed_thinking_is_malformed():
+    model = TokenModel([FINISH.replace("</think>", "</thinking>")])
+    result = runtime(model).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert result.final_answer is None
+
+
+def test_forced_answer_with_wrongly_closed_thinking_is_malformed():
+    model = TokenModel([SEARCH, FINISH.replace("</think>", "</thinking>")])
+    result = runtime(model, generated_token_budget=1).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert result.final_answer is None
+    anomalies = [t for t in result.turn_records if t.get("kind") == "format_anomaly"]
+    assert [a["anomaly"] for a in anomalies] == ["wrongly_closed_thinking"]
+
+
+def test_summary_with_wrongly_closed_thinking_is_malformed_and_flagged():
+    model = TokenModel([SEARCH, SUMMARY.replace("</think>", "</thinking>"), FINISH])
+    result = runtime(model, context_threshold_tokens=1).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert len(result.trajectory_records) == 1
+    anomalies = [t for t in result.turn_records if t.get("kind") == "format_anomaly"]
+    assert [a["anomaly"] for a in anomalies] == ["wrongly_closed_thinking"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("reasoning</think>\n<search>q</search>", None),
+        ("reasoning</think>\n<answer>done</answer>", None),
+        ("reasoning</thinking>\n<search>q</search>", "wrongly_closed_thinking"),
+        ("reasoning</Think>\n<search>q</search>", "wrongly_closed_thinking"),
+        ("reasoning</think >\n<search>q</search>", "wrongly_closed_thinking"),
+        ("reasoning</thinkx>\n<search>q</search>", "wrongly_closed_thinking"),
+        ("reasoning<search>q</search>", "unclosed_thinking"),
+        ("reasoning that just ends", "unclosed_thinking"),
+        ("</think>ok</think >", "wrongly_closed_thinking"),
+    ],
+)
+def test_classify_thinking_closure(text, expected):
+    from self_summarization_agent.runtime import classify_thinking_closure
+
+    assert classify_thinking_closure(text, enable_thinking=True) == expected
+    assert classify_thinking_closure(text, enable_thinking=False) is None
 
 
 def test_batched_episodes_have_independent_compaction_ledgers():

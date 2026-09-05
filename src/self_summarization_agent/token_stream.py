@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 
-TITO_CONTRACT = "qwen-agent-tito-v1"
+TITO_CONTRACT = "qwen-agent-tito-v2"
 TITO_COLLECTION_VERSION = 3
 
 

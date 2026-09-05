@@ -36,6 +36,8 @@ from self_summarization_agent.token_renderer import UnsupportedTokenBoundary
 _JSON_DECODER = json.JSONDecoder()
 _THINK_END_RE = re.compile(r"</think\s*>", flags=re.IGNORECASE)
 _THINK_START_RE = re.compile(r"^\s*<think\b[^>]*>", flags=re.IGNORECASE)
+_THINK_CLOSE_LIKE_RE = re.compile(r"</\s*think[^>]*>", flags=re.IGNORECASE)
+THINK_CLOSE_TOKEN = "</think>"
 _SUMMARY_BLOCK_RE = re.compile(
     r"<\s*summary\s*>(.*?)<\s*/\s*summary\s*>",
     flags=re.IGNORECASE | re.DOTALL,
@@ -78,6 +80,21 @@ def _extract_completed_thinking(raw_output: str) -> ThinkingExtraction | None:
     thinking = _THINK_START_RE.sub("", thinking).strip()
     remainder = raw_output[think_end.end() :].strip()
     return ThinkingExtraction(thinking=thinking, remainder=remainder)
+
+
+def classify_thinking_closure(raw_output: str, *, enable_thinking: bool) -> str | None:
+    """Return a malformed reason for unclosed/wrongly-closed thinking, else None.
+
+    Only the byte-exact ``</think>`` closes the block; known typos such as
+    ``</thinking>`` and case/whitespace variants are classified, never repaired.
+    """
+    if not enable_thinking:
+        return None
+    close_like = list(_THINK_CLOSE_LIKE_RE.finditer(raw_output))
+    exact = [match for match in close_like if match.group(0) == THINK_CLOSE_TOKEN]
+    if exact and not any(match.group(0) != THINK_CLOSE_TOKEN for match in close_like):
+        return None
+    return "wrongly_closed_thinking" if close_like else "unclosed_thinking"
 
 
 def _iter_json_objects(text: str):
@@ -912,6 +929,27 @@ class EpisodeRuntime:
             active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
         else:
             active.token_usage.reasoning_generated_tokens += generated_output.completion_tokens
+        if (
+            active.token_ledger is not None
+            and self.token_renderer is not None
+            and self.token_renderer.enable_thinking
+        ):
+            closure_reason = classify_thinking_closure(raw_output, enable_thinking=True)
+            if closure_reason is not None:
+                active.turn_records.append({
+                    "kind": "format_anomaly",
+                    "query_id": state.query_id,
+                    "anomaly": closure_reason,
+                })
+                active.result = self._malformed_result(
+                    active,
+                    prompt,
+                    raw_output,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=generated_output.completion_tokens,
+                    generation_kind=generation_kind,
+                )
+                return None
         parsed_tool_call = self._parse_action_output(generated_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
@@ -948,17 +986,6 @@ class EpisodeRuntime:
 
         if tool_name in {"search", "get_document"} and active.token_ledger is not None:
             try:
-                if self.token_renderer.enable_thinking and _extract_completed_thinking(raw_output) is None:
-                    # A known closing-tag typo is a routing anomaly, not a reason
-                    # to rewrite sampled history. Unresolved reasoning is ambiguous.
-                    closing = re.search(r"</thinking\s*>", raw_output, re.IGNORECASE)
-                    if closing is None or self._uses_native_tools:
-                        raise UnsupportedTokenBoundary("Tool call is inside unresolved thinking")
-                    routed = parse_model_tool_call(raw_output[closing.end():])
-                    if routed is None or routed[0] != payload:
-                        raise UnsupportedTokenBoundary("Ambiguous tool call after thinking delimiter")
-                    active.turn_records.append({"kind": "format_anomaly", "query_id": state.query_id,
-                                                "anomaly": "thinking_close_typo"})
                 self.token_renderer.validate_completion_boundary(
                     generated_output.completion_token_ids, generated_output.finish_reason)
             except UnsupportedTokenBoundary:
@@ -1189,6 +1216,27 @@ class EpisodeRuntime:
         self._append_output(active, generated_output, "forced_answer")
         raw_output = generated_output.text
         active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
+        if (
+            active.token_ledger is not None
+            and self.token_renderer is not None
+            and self.token_renderer.enable_thinking
+        ):
+            closure_reason = classify_thinking_closure(raw_output, enable_thinking=True)
+            if closure_reason is not None:
+                active.turn_records.append({
+                    "kind": "format_anomaly",
+                    "query_id": state.query_id,
+                    "anomaly": closure_reason,
+                })
+                active.result = self._malformed_result(
+                    active,
+                    prompt,
+                    raw_output,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=generated_output.completion_tokens,
+                    generation_kind="forced_answer",
+                )
+                return
         parsed_tool_call = self._parse_action_output(generated_output)
         if parsed_tool_call is None:
             active.result = self._malformed_result(
@@ -1308,6 +1356,18 @@ class EpisodeRuntime:
             return
         self._append_output(active, generated_output, "summary")
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
+        if (
+            active.token_ledger is not None
+            and self.token_renderer is not None
+            and self.token_renderer.enable_thinking
+        ):
+            closure_reason = classify_thinking_closure(generated_summary, enable_thinking=True)
+            if closure_reason is not None:
+                active.turn_records.append({
+                    "kind": "format_anomaly",
+                    "query_id": active.state.query_id,
+                    "anomaly": closure_reason,
+                })
         summary_extraction = (
             extract_structured_summary(generated_output.message)
             if self._uses_native_tools and generated_output.message is not None

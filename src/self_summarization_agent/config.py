@@ -84,6 +84,8 @@ class ModelConfig:
     api_max_concurrency: int = 32
     api_extra_body: dict[str, Any] = field(default_factory=dict)
     require_exact_token_ids: bool = True
+    # Optional vLLM memory fraction; None keeps the engine default.
+    gpu_memory_utilization: float | None = None
 
 
 @dataclass(slots=True)
