@@ -32,6 +32,7 @@ from self_summarization_agent.trajectory import (
     validate_trajectory_schema,
 )
 from self_summarization_agent.value_model import migrate_compaction_value_head_sidecar
+from self_summarization_agent.collection_contract import validate_artifact_lineage
 
 
 CommandRunner = Callable[[Sequence[str]], int]
@@ -715,6 +716,9 @@ def run_checkpoint_evaluation(
     ]
 
     expected_count = _expected_eval_rollout_count(config)
+    if resume:
+        validate_artifact_lineage([eval_raw_rollout_path, eval_judged_rollout_path],
+                                  config=config, checkpoint=current.path)
     raw_complete = resume and _has_complete_raw_rollouts(
         eval_raw_rollout_path,
         checkpoint_id=current.checkpoint_id,
@@ -884,6 +888,12 @@ def run_training_iteration(
         merged_collect_command.append("--resume")
 
     # Completion checks for the merged phase
+    if should_resume:
+        validate_artifact_lineage([raw_rollout_path, judged_rollout_path, cached_rollout_path],
+                                  config=config, checkpoint=current.path)
+        if config.dataset.eval_limit > 0:
+            validate_artifact_lineage([eval_raw_rollout_path, eval_judged_rollout_path],
+                                      config=config, checkpoint=current.path)
     expected_eval_count = _expected_eval_rollout_count(config)
     expected_train_count = _expected_train_rollout_count(config)
     train_raw_complete = should_resume and _has_complete_raw_rollouts(

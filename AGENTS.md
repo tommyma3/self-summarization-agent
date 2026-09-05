@@ -8,7 +8,9 @@ Do not change this contract unless the user explicitly approves a redesign of th
 
 ## What "append-only" means
 
-Append-only is a logical message and trajectory invariant. A backend may retokenize the whole prompt for each request or internally reuse a KV prefix; either implementation is acceptable if the sequence observed and stored by collection is unchanged.
+Append-only is a strict token, message, and trajectory invariant. Production collection uses the project-owned Qwen renderer and an interval token ledger. After initialization, inference consumes the ledger's exact IDs; no backend may re-render or retokenize its historical prefix. KV prefix caching is allowed if it preserves those IDs.
+
+The renderer encodes only new tool results, runtime controls, separators, and assistant headers. Sampled IDs are appended verbatim, with masks recorded at append time. Parsed messages are routing and diagnostic views, never a source for reconstructing the next token prompt. Only successful compaction can replace active context: finalize the immutable old ledger first, then initialize its successor. Archived intervals are never edited and every segment remains eligible for its configured GRPO or value-MC signal.
 
 During one interval:
 
@@ -79,8 +81,8 @@ A malformed, empty, or over-limit summary is never installed as new state. Its r
 
 Under exact-token collection every mid-interval generation is verified: the server-rendered prompt of generation k+1 must start with the exact sampled tokens of generation k. The provider's chat template can normalize a malformed assistant turn (for example a think block closed with a misspelled tag such as `</thinking>` instead of `</think>`), which rewrites the interval history instead of appending to it. Training on a continuation of that prompt would condition on tokens the policy never saw. Two runtime consequences:
 
-- An action output (search/get_document) whose think block never closes is treated as a malformed tool call: the interval is finalized with that raw completion, the rollout is penalized, and the episode stops.
-- If a later server-rendered prompt still fails to extend the previous generation (any other template normalization), the offending generation is discarded, the interval is finalized without it, and the episode is penalized with status `history_rewrite_detected`.
+- An action output inside unresolved thinking, with ambiguous syntax, or without a supported sampled end-of-turn token is treated as malformed: retain the raw completion, penalize, and stop. On the TITO tagged-action path, a known `</thinking>` closing-tag typo may route an otherwise unambiguous complete action without repairing any sampled tokens. This does not permit dispatching action-looking text inside unfinished reasoning. Legacy message-based collection retains its strict unclosed-thinking guard.
+- If a later backend input differs from the committed token request, fail closed. Runtime integrity checks discard an offending generation and finalize the valid prefix with status `history_rewrite_detected`; backend protocol errors abort collection. There is no fallback to reconstructed prompts.
 
 Already-collected records that fail this verification raise `ProviderHistoryRewriteError` at extraction time and are excluded from trainable samples, so judging never trains on rewritten history.
 

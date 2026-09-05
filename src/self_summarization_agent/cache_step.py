@@ -257,6 +257,9 @@ def _attach_training_caches(
             continue
         payload_by_turn_id[sample.turn_id] = {
             **masked_payload,
+            **({"renderer_fingerprint": record["collection_tokens"]["renderer_fingerprint"],
+                "collection_contract": record["collection_tokens"]["contract"]}
+               if isinstance(record.get("collection_tokens"), dict) and "contract" in record["collection_tokens"] else {}),
             "policy_checkpoint_id": checkpoint_id,
         }
     cached_row = dict(row)

@@ -26,7 +26,7 @@ class ContextManager:
     def build_summary_context(self, state: EpisodeState, *, max_summary_tokens: int | None = None) -> ConversationPrompt:
         messages = list(state.messages)
         messages.append(Message(role="user", content=build_summary_prompt(max_summary_tokens=max_summary_tokens)))
-        return ConversationPrompt(messages)
+        return ConversationPrompt(messages, generation_kind="summary")
 
     def assert_fits(self, packed_prompt: str, *, reserved_tokens: int = 0) -> None:
         packed_tokens = self._count_prompt(packed_prompt)

@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Iterator, Protocol
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +29,8 @@ from self_summarization_agent.trajectory import (
     COLLECTION_TOKEN_VERSION,
     TRAJECTORY_SCHEMA_VERSION,
 )
+from self_summarization_agent.token_stream import IntervalTokenLedger, TokenRequest
+from self_summarization_agent.token_renderer import UnsupportedTokenBoundary
 
 
 _JSON_DECODER = json.JSONDecoder()
@@ -271,6 +273,8 @@ class _ActiveEpisode:
     interval_round_count: int = 0
     token_usage: _TokenUsage = field(default_factory=_TokenUsage)
     result: RuntimeResult | None = None
+    token_ledger: IntervalTokenLedger | None = None
+    token_request: TokenRequest | None = None
 
 
 @dataclass(slots=True)
@@ -315,10 +319,49 @@ class EpisodeRuntime:
     # within a single round.  Remaining calls are skipped with an error string
     # so the episode can still complete.  None = no limit.
     tool_execution_timeout_seconds: float | None = 600
+    token_renderer: Any = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if self.max_summary_tokens < 1:
             raise ValueError(f"max_summary_tokens must be at least 1, got {self.max_summary_tokens}")
+        create_renderer = getattr(self.model, "create_token_renderer", None)
+        if create_renderer is not None:
+            if not callable(getattr(self.model, "generate_token_batch", None)):
+                raise ValueError("This collector does not implement token-input generation")
+            self.token_renderer = create_renderer()
+
+    def _initialize_ledger(self, active: _ActiveEpisode) -> None:
+        if self.token_renderer is not None:
+            if active.token_ledger is not None and not active.token_ledger.finalized:
+                raise RuntimeError("Cannot replace an active interval before finalization")
+            active.token_ledger = IntervalTokenLedger(
+                self.token_renderer.render_initial_state(self._build_runtime_prompt(active.state)),
+                fingerprint=self.token_renderer.fingerprint)
+            active.token_request = None
+
+    def _token_input(self, active: _ActiveEpisode, prompt: ConversationPrompt) -> TokenRequest:
+        assert active.token_ledger is not None
+        request = active.token_ledger.request(self.token_renderer.header(prompt.generation_kind),
+                                              generation_kind=prompt.generation_kind)
+        limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
+        available = limit - len(request.prompt_token_ids)
+        return replace(request, max_new_tokens=max(0, min(getattr(self.model, "max_new_tokens", available), available)))
+
+    def _commit_token_input(self, active: _ActiveEpisode, prompt: ConversationPrompt):
+        if active.token_ledger is None:
+            return prompt
+        request = self._token_input(active, prompt)
+        active.token_ledger.commit(request)
+        active.token_request = request
+        return request
+
+    def _append_output(self, active: _ActiveEpisode, output: "_GeneratedOutput", kind: str) -> None:
+        if active.token_ledger is not None:
+            if output.prompt_token_ids is None or output.completion_token_ids is None:
+                raise RuntimeError("TITO requires exact prompt and completion IDs")
+            active.token_ledger.append_sampled(output.completion_token_ids,
+                                               expected_prompt=output.prompt_token_ids, kind=kind)
+        active.interval_outputs.append(output)
 
     @property
     def _uses_native_tools(self) -> bool:
@@ -340,7 +383,9 @@ class EpisodeRuntime:
 
     def _prompt_token_count(self, active: _ActiveEpisode, prompt: str) -> int:
         prompt_counter = getattr(self.model, "count_prompt_tokens", None)
-        prompt_tokens = prompt_counter(prompt) if prompt_counter is not None else self.token_counter(prompt)
+        prompt_tokens = (len(self._token_input(active, prompt).prompt_token_ids)
+                         if active.token_ledger is not None else
+                         prompt_counter(prompt) if prompt_counter is not None else self.token_counter(prompt))
         active.token_usage.max_prompt_tokens_seen = max(
             active.token_usage.max_prompt_tokens_seen,
             prompt_tokens,
@@ -392,7 +437,12 @@ class EpisodeRuntime:
         generation.
         """
         try:
-            active.context_manager.assert_fits(prompt)
+            if active.token_ledger is not None:
+                limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
+                if self._prompt_token_count(active, prompt) >= limit:
+                    raise ValueError("TITO prompt exceeds the context limit")
+            else:
+                active.context_manager.assert_fits(prompt)
         except ValueError as exc:
             LOGGER.warning("Terminating episode %s: %s", active.state.query_id, exc)
             self._finalize_trajectory(
@@ -420,6 +470,8 @@ class EpisodeRuntime:
         Training on a continuation of that prompt would condition on tokens the
         policy never saw, so the generation must be discarded.
         """
+        if active.token_ledger is not None:
+            return generated_output.prompt_token_ids is None or tuple(generated_output.prompt_token_ids) != active.token_ledger.ids
         if not self._requires_exact_token_ids():
             return False
         if generated_output.prompt_token_ids is None or not active.interval_outputs:
@@ -516,6 +568,11 @@ class EpisodeRuntime:
                     f"Collection generation {index + 1} rewrote the interval history instead of "
                     "extending it; the provider chat template changed the sampled tokens"
                 )
+        if active.token_ledger is not None:
+            payload = active.token_ledger.payload()
+            payload.update(prompt_token_ids=prompt_token_ids, completion_token_ids=completion_token_ids,
+                           generations=generations)
+            return payload
         search_start = 0
         for index, output in enumerate(active.interval_outputs[:-1]):
             token_ids = output.completion_token_ids
@@ -580,6 +637,8 @@ class EpisodeRuntime:
         if collection_tokens is not None:
             record["collection_tokens"] = collection_tokens
         active.trajectory_records.append(record)
+        if active.token_ledger is not None:
+            active.token_ledger.finalize()
         active.interval_turn_ids.clear()
         active.interval_outputs.clear()
         active.interval_round_count = 0
@@ -693,7 +752,9 @@ class EpisodeRuntime:
         self._record_retrieved_docids(retrieved_docids, doc_ids)
 
     def _generate_batch(self, prompts: list[str]) -> list[_GeneratedOutput]:
-        generate_batch_with_metadata = getattr(self.model, "generate_batch_with_metadata", None)
+        generate_batch_with_metadata = (getattr(self.model, "generate_token_batch", None)
+            if prompts and isinstance(prompts[0], TokenRequest)
+            else getattr(self.model, "generate_batch_with_metadata", None))
         if generate_batch_with_metadata is not None:
             results = generate_batch_with_metadata(prompts)
             if len(results) != len(prompts):
@@ -760,7 +821,7 @@ class EpisodeRuntime:
             context_threshold_tokens=self.context_threshold_tokens,
             messages=build_initial_messages(user_prompt, native_tools=self._uses_native_tools),
         )
-        return _ActiveEpisode(
+        active = _ActiveEpisode(
             state=state,
             context_manager=ContextManager(
                 token_counter=self.token_counter,
@@ -769,6 +830,8 @@ class EpisodeRuntime:
                 prompt_token_counter=getattr(self.model, "count_prompt_tokens", None),
             ),
         )
+        self._initialize_ledger(active)
+        return active
 
     def _completed_result(
         self,
@@ -843,7 +906,7 @@ class EpisodeRuntime:
                 generation_kind=generation_kind,
             )
             return None
-        active.interval_outputs.append(generated_output)
+        self._append_output(active, generated_output, generation_kind)
         raw_output = generated_output.text
         if generation_kind == "forced_answer":
             active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
@@ -867,6 +930,7 @@ class EpisodeRuntime:
         if (
             tool_name in {"search", "get_document"}
             and self._requires_exact_token_ids()
+            and active.token_ledger is None
             and _extract_completed_thinking(raw_output) is None
         ):
             # The provider cannot re-render this completion losslessly on the
@@ -881,6 +945,27 @@ class EpisodeRuntime:
                 generation_kind=generation_kind,
             )
             return None
+
+        if tool_name in {"search", "get_document"} and active.token_ledger is not None:
+            try:
+                if self.token_renderer.enable_thinking and _extract_completed_thinking(raw_output) is None:
+                    # A known closing-tag typo is a routing anomaly, not a reason
+                    # to rewrite sampled history. Unresolved reasoning is ambiguous.
+                    closing = re.search(r"</thinking\s*>", raw_output, re.IGNORECASE)
+                    if closing is None or self._uses_native_tools:
+                        raise UnsupportedTokenBoundary("Tool call is inside unresolved thinking")
+                    routed = parse_model_tool_call(raw_output[closing.end():])
+                    if routed is None or routed[0] != payload:
+                        raise UnsupportedTokenBoundary("Ambiguous tool call after thinking delimiter")
+                    active.turn_records.append({"kind": "format_anomaly", "query_id": state.query_id,
+                                                "anomaly": "thinking_close_typo"})
+                self.token_renderer.validate_completion_boundary(
+                    generated_output.completion_token_ids, generated_output.finish_reason)
+            except UnsupportedTokenBoundary:
+                active.result = self._malformed_result(active, prompt, raw_output,
+                    prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
+                    generation_kind=generation_kind)
+                return None
 
         if tool_name == "finish":
             answer = arguments.get("answer")
@@ -1024,6 +1109,11 @@ class EpisodeRuntime:
         else:
             state.messages.append(Message(role="assistant", content=action.raw_output))
             state.messages.append(Message(role="user", content=format_tool_response(tool_result)))
+        if active.token_ledger is not None:
+            output = active.interval_outputs[-1]
+            active.token_ledger.append_external(self.token_renderer.render_tool_result(
+                state.messages[-1], completion_ids=output.completion_token_ids,
+                finish_reason=output.finish_reason), kind="tool_result")
 
     def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
         tool_started = time.monotonic()
@@ -1096,7 +1186,7 @@ class EpisodeRuntime:
                 generation_kind="forced_answer",
             )
             return
-        active.interval_outputs.append(generated_output)
+        self._append_output(active, generated_output, "forced_answer")
         raw_output = generated_output.text
         active.token_usage.forced_answer_generated_tokens += generated_output.completion_tokens
         parsed_tool_call = self._parse_action_output(generated_output)
@@ -1169,10 +1259,7 @@ class EpisodeRuntime:
         if self._generated_token_budget_exhausted(active):
             return None
         current_prompt = self._build_runtime_prompt(active.state)
-        prompt_counter = getattr(self.model, "count_prompt_tokens", None)
-        current_prompt_tokens = (
-            prompt_counter(current_prompt) if prompt_counter is not None else self.token_counter(current_prompt)
-        )
+        current_prompt_tokens = self._prompt_token_count(active, current_prompt)
         if current_prompt_tokens < active.state.context_threshold_tokens:
             return None
         if active.interval_round_count == 0:
@@ -1189,7 +1276,11 @@ class EpisodeRuntime:
                 parallel_tool_calls=False,
                 generation_kind="summary",
             )
-        active.context_manager.assert_fits(prompt, reserved_tokens=self.max_summary_tokens)
+        if active.token_ledger is not None:
+            if self._terminate_on_context_overflow(active, prompt):
+                return None
+        else:
+            active.context_manager.assert_fits(prompt, reserved_tokens=self.max_summary_tokens)
         return prompt
 
     def _apply_summary_output(
@@ -1215,11 +1306,13 @@ class EpisodeRuntime:
                 generation_kind="summary",
             )
             return
-        active.interval_outputs.append(generated_output)
+        self._append_output(active, generated_output, "summary")
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
         summary_extraction = (
             extract_structured_summary(generated_output.message)
             if self._uses_native_tools and generated_output.message is not None
+            else extract_structured_summary(Message(role="assistant", content=generated_summary))
+            if self.token_renderer is not None and not self.token_renderer.enable_thinking
             else extract_summary_output(generated_summary)
         )
         summary_tokens = self._completion_token_count(summary_extraction.summary) if summary_extraction is not None else 0
@@ -1250,7 +1343,7 @@ class EpisodeRuntime:
         self._finalize_trajectory(
             active,
             interval_messages,
-            termination_kind="compaction" if summary_extraction is not None else "malformed",
+            termination_kind="compaction" if summary_extraction is not None and summary_extraction.summary and summary_tokens <= self.max_summary_tokens else "malformed",
             prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
         )
         if summary_extraction is None:
@@ -1270,6 +1363,7 @@ class EpisodeRuntime:
         )
         active.token_usage.retired_round_count += retired_count
         active.summary_turns.append(summary_turn_id)
+        self._initialize_ledger(active)
 
     def _advance_active_episodes(self, active_episodes: list[_ActiveEpisode]) -> None:
         """Advance every unfinished episode by one action and compaction round.
@@ -1305,7 +1399,7 @@ class EpisodeRuntime:
             action_items.append((active, acting_prompt, prompt_tokens, False))
 
         if action_items:
-            action_outputs = self._generate_batch([prompt for _, prompt, _, _ in action_items])
+            action_outputs = self._generate_batch([self._commit_token_input(active, prompt) for active, prompt, _, _ in action_items])
             pending_tool_actions: list[_PendingToolAction] = []
             for (active, prompt, prompt_tokens, forced_answer), generated_output in zip(
                 action_items,
@@ -1342,7 +1436,7 @@ class EpisodeRuntime:
             summary_items.append((active, summary_prompt, prompt_tokens))
 
         if summary_items:
-            summary_outputs = self._generate_batch([prompt for _, prompt, _ in summary_items])
+            summary_outputs = self._generate_batch([self._commit_token_input(active, prompt) for active, prompt, _ in summary_items])
             for (active, prompt, prompt_tokens), generated_output in zip(summary_items, summary_outputs):
                 self._apply_summary_output(active, prompt, prompt_tokens, generated_output)
 

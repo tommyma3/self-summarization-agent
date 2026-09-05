@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 import math
 from typing import Any
+from self_summarization_agent.token_stream import TITO_COLLECTION_VERSION, TITO_CONTRACT
 
 
 LOGGER = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class ProviderHistoryRewriteError(ValueError):
     """
 
 
-TOKEN_CACHE_VERSION = 6
+TOKEN_CACHE_VERSION = 7
 TOKEN_CACHE_FIELD = "training_cache"
 TRAJECTORY_SCHEMA_VERSION = 3
 COLLECTION_TOKEN_VERSION = 2
@@ -424,6 +425,7 @@ def _extract_collection_tokens(
     if payload.get("version") not in {
         LEGACY_COLLECTION_TOKEN_VERSION,
         COLLECTION_TOKEN_VERSION,
+        TITO_COLLECTION_VERSION,
     }:
         raise ValueError(
             f"Trainable record {turn_id} has unsupported collection token version: "
@@ -480,7 +482,35 @@ def _extract_collection_tokens(
                     "the interval history instead of extending it"
                 )
     final_generation = generations[-1]
-    if list(final_generation["full_token_ids"]) != full_token_ids:
+    if payload.get("version") == TITO_COLLECTION_VERSION:
+        fingerprint = payload.get("renderer_fingerprint")
+        if payload.get("contract") != TITO_CONTRACT or not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            raise ValueError(f"Trainable record {turn_id} has invalid TITO identity")
+        expected_mask = [False] * len(full_token_ids)
+        for generation in generations:
+            ids = generation["full_token_ids"]
+            if full_token_ids[:len(ids)] != ids:
+                raise ProviderHistoryRewriteError(f"Trainable record {turn_id} has a rewritten TITO generation")
+            start = len(generation["prompt_token_ids"])
+            expected_mask[start:len(ids)] = [True] * (len(ids) - start)
+        if assistant_token_mask != expected_mask:
+            raise ValueError(f"Trainable record {turn_id} mask does not own exactly the sampled tokens")
+        spans = payload.get("spans")
+        if not isinstance(spans, list):
+            raise ValueError(f"Trainable record {turn_id} has no append spans")
+        end = 0
+        for span in spans:
+            if (not isinstance(span, Mapping) or span.get("start") != end
+                or not isinstance(span.get("end"), int) or isinstance(span.get("end"), bool)
+                or not end < span["end"] <= len(full_token_ids)
+                or not isinstance(span.get("sampled"), bool)
+                or not isinstance(span.get("kind"), str)
+                or expected_mask[end:span["end"]] != [span["sampled"]] * (span["end"] - end)):
+                raise ValueError(f"Trainable record {turn_id} has inconsistent append spans")
+            end = span["end"]
+        if end != len(full_token_ids):
+            raise ValueError(f"Trainable record {turn_id} has incomplete append spans")
+    elif list(final_generation["full_token_ids"]) != full_token_ids:
         raise ValueError(f"Trainable record {turn_id} final generation does not match full_token_ids")
     first_prompt_ids = list(generations[0]["prompt_token_ids"])
     if not first_prompt_ids or full_token_ids[: len(first_prompt_ids)] != first_prompt_ids:
@@ -507,8 +537,13 @@ def build_rollout_native_training_cache(
 
     if not isinstance(collection_tokens, Mapping):
         return None
-    if collection_tokens.get("version") != COLLECTION_TOKEN_VERSION:
+    if collection_tokens.get("version") not in {COLLECTION_TOKEN_VERSION, TITO_COLLECTION_VERSION}:
         return None
+    if collection_tokens.get("version") == TITO_COLLECTION_VERSION:
+        try:
+            _extract_collection_tokens({"collection_tokens": collection_tokens}, turn_id="native-cache")
+        except ValueError:
+            return None
     full_token_ids = collection_tokens.get("full_token_ids")
     assistant_token_mask = collection_tokens.get("assistant_token_mask")
     generations = collection_tokens.get("generations")
@@ -603,6 +638,8 @@ def build_rollout_native_training_cache(
     ]
     return {
         "version": TOKEN_CACHE_VERSION,
+        **({"renderer_fingerprint": collection_tokens["renderer_fingerprint"], "collection_contract": TITO_CONTRACT}
+           if collection_tokens.get("version") == TITO_COLLECTION_VERSION else {}),
         "input_ids": list(full_token_ids[:-1]),
         "labels": list(full_token_ids[1:]),
         "completion_mask": completion_mask,
@@ -671,6 +708,20 @@ def extract_trainable_samples(
             skipped_history_rewrite_ids.add(record_id)
             continue
         state_prefix_length = cached_state_prefix_length or collection_state_prefix_length
+        collection = record.get("collection_tokens")
+        cache = record.get(TOKEN_CACHE_FIELD)
+        if isinstance(collection, Mapping) and collection.get("version") == TITO_COLLECTION_VERSION and isinstance(cache, Mapping):
+            if (cache.get("renderer_fingerprint") != collection.get("renderer_fingerprint")
+                or cache.get("collection_contract") != TITO_CONTRACT
+                or input_ids != collection_full_token_ids[:-1]
+                or labels != collection_full_token_ids[1:]):
+                raise ValueError(f"Trainable record {record_id} cache differs from its TITO tokens/identity")
+            expected_mask = collection_assistant_token_mask[1:]
+            if cache.get("loss_mask_policy", LOSS_MASK_POLICY_ALL_ASSISTANT) == LOSS_MASK_POLICY_ALL_ASSISTANT:
+                if completion_mask != expected_mask:
+                    raise ValueError(f"Trainable record {record_id} cache changed its assistant mask")
+            elif any(c and not s for c, s in zip(completion_mask, expected_mask)):
+                raise ValueError(f"Trainable record {record_id} cache trains conditioning tokens")
         if (
             cached_state_prefix_length is not None
             and collection_state_prefix_length is not None

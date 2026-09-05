@@ -8,7 +8,7 @@ from self_summarization_agent.cache_step import (
     build_cache_scorer,
     run_cache_step,
 )
-from self_summarization_agent.trajectory import is_training_cache_current
+from self_summarization_agent.trajectory import is_training_cache_current, TOKEN_CACHE_VERSION
 from self_summarization_agent.config import (
     DatasetConfig,
     ExperimentConfig,
@@ -30,7 +30,7 @@ class FakeScorer:
         self.seen_batches.append([sample.turn_id for sample in samples])
         return [
             {
-                "version": 6,
+                "version": TOKEN_CACHE_VERSION,
                 "input_ids": [1, index + 2],
                 "labels": [index + 2, index + 3],
                 "completion_mask": [False, True],
@@ -173,7 +173,7 @@ def test_native_cache_masks_only_compaction_generation_for_ablation(tmp_path: Pa
 def test_fallback_cache_uses_same_compaction_mask() -> None:
     row = summary_interval_row()
     payload = {
-        "version": 6,
+        "version": TOKEN_CACHE_VERSION,
         "input_ids": [10, 11, 20],
         "labels": [11, 20, 21],
         "completion_mask": [True, False, True],
@@ -223,7 +223,7 @@ def summary_only_row(query_id: str = "q1") -> dict:
 def test_attach_training_caches_skips_excluded_summary_only_record() -> None:
     row = summary_only_row()
     payload = {
-        "version": 6,
+        "version": TOKEN_CACHE_VERSION,
         "input_ids": [10, 11],
         "labels": [11, 21],
         "completion_mask": [False, True],
@@ -246,7 +246,7 @@ def test_attach_training_caches_skips_excluded_summary_only_record() -> None:
 def test_value_training_retains_summary_only_record_as_critic_only_state() -> None:
     row = summary_only_row()
     payload = {
-        "version": 6,
+        "version": TOKEN_CACHE_VERSION,
         "input_ids": [10, 11],
         "labels": [11, 21],
         "completion_mask": [False, True],
@@ -331,7 +331,7 @@ def test_cache_step_writes_training_cache_for_each_interval(tmp_path: Path) -> N
     assert scorer.seen_batches == [["trajectory-1"]]
     cache = rows[0]["trajectory_records"][0]["training_cache"]
     assert cache["input_ids"] == [1, 2]
-    assert cache["version"] == 6
+    assert cache["version"] == TOKEN_CACHE_VERSION
     assert cache["reference_logprob"] == -0.5
     assert cache["reference_logprobs"] == [0.0, -0.5]
     assert cache["policy_checkpoint_id"] == "step-00001"
@@ -386,7 +386,7 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     first_cached = judged_row("q1", 0)
     for record in first_cached["trajectory_records"]:
         record["training_cache"] = {
-            "version": 6,
+            "version": TOKEN_CACHE_VERSION,
             "input_ids": [1],
             "labels": [2],
             "completion_mask": [True],
@@ -410,11 +410,11 @@ def test_cache_step_resume_skips_completed_cached_rows(tmp_path: Path) -> None:
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert scorer.seen_batches == [["trajectory-1"]]
     assert [(row["query_id"], row["rollout_index"]) for row in cached_rows] == [("q1", 0), ("q2", 1)]
-    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 6
-    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == 6
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == TOKEN_CACHE_VERSION
+    assert cached_rows[1]["trajectory_records"][0]["training_cache"]["version"] == TOKEN_CACHE_VERSION
 
 
-def test_cache_step_resume_rewrites_old_cached_rows_to_v6(tmp_path: Path) -> None:
+def test_cache_step_resume_rewrites_old_cached_rows_to_current_version(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     judged_path = tmp_path / "judged.jsonl"
@@ -445,7 +445,7 @@ def test_cache_step_resume_rewrites_old_cached_rows_to_v6(tmp_path: Path) -> Non
     cached_rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert scorer.seen_batches == [["trajectory-1"]]
     assert len(cached_rows) == 1
-    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == 6
+    assert cached_rows[0]["trajectory_records"][0]["training_cache"]["version"] == TOKEN_CACHE_VERSION
     assert cached_rows[0]["trajectory_records"][0]["training_cache"]["reference_logprobs"] == [0.0, -0.5]
 
 

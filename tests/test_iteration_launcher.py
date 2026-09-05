@@ -1,3 +1,5 @@
+from self_summarization_agent.trajectory import TOKEN_CACHE_VERSION
+
 import json
 from pathlib import Path
 import subprocess
@@ -137,9 +139,9 @@ def write_judged_rollouts(path: Path, checkpoint_id: str, count: int) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def training_cache(*, version: int = 6) -> dict:
+def training_cache(*, version: int = TOKEN_CACHE_VERSION) -> dict:
     cache = {
-        "version": 6,
+        "version": TOKEN_CACHE_VERSION,
         "input_ids": [1],
         "labels": [2],
         "completion_mask": [True],
@@ -148,14 +150,14 @@ def training_cache(*, version: int = 6) -> dict:
         "reference_logprob_source": "policy_rescore",
         "state_prefix_length": 1,
     }
-    if version != 6:
+    if version != TOKEN_CACHE_VERSION:
         cache["version"] = version
         del cache["reference_logprobs"]
         del cache["reference_logprob_source"]
     return cache
 
 
-def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = 6) -> None:
+def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_version: int = TOKEN_CACHE_VERSION) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
         {
@@ -195,7 +197,7 @@ def write_cached_rollouts(path: Path, checkpoint_id: str, count: int, *, cache_v
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_complete_cached_rollouts_requires_v6_training_cache(tmp_path: Path) -> None:
+def test_complete_cached_rollouts_requires_current_training_cache(tmp_path: Path) -> None:
     cached_path = tmp_path / "cached.jsonl"
     write_cached_rollouts(cached_path, "iteration-00000", count=1, cache_version=2)
 

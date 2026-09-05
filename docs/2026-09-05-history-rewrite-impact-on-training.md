@@ -1,7 +1,7 @@
 # History Rewrite Detection: Impact on Training and Open Problems
 
 Date: 2026-09-05
-Status: open — no fix decided yet
+Status: historical diagnosis; the [TITO implementation](2026-09-05-tito-implementation-plan.md) now replaces mid-interval chat rendering. [Local validation and remaining server checks](2026-09-05-tito-validation.md) track verification. The observations and metrics below describe the earlier collector.
 
 ## Background
 

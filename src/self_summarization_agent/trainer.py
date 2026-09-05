@@ -676,6 +676,36 @@ class TransformersPolicyTrainer:
     def _sequence_logprob(self, sample: RLSample) -> torch.Tensor:
         return self._sequence_logprobs([sample])[0]
 
+    @property
+    def require_exact_token_ids(self) -> bool:
+        return True
+
+    @property
+    def max_new_tokens(self) -> int:
+        return self.model_config.max_new_tokens
+
+    @property
+    def max_model_len(self) -> int | None:
+        return self.model_config.max_model_len
+
+    def create_token_renderer(self):
+        from self_summarization_agent.token_renderer import QwenAgentTokenRenderer
+        return QwenAgentTokenRenderer(self.tokenizer, enable_thinking=self.model_config.enable_thinking)
+
+    def generate_token_batch(self, requests):
+        # Reuse the token adapter without loading another copy of the policy.
+        from types import SimpleNamespace
+        from self_summarization_agent.generation import TransformersGenerator
+        adapter = SimpleNamespace(model=self.model, tokenizer=self.tokenizer,
+            max_new_tokens=self.model_config.max_new_tokens, do_sample=self.model_config.do_sample,
+            temperature=self.model_config.temperature, top_p=self.model_config.top_p, sampling_extra={})
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            return TransformersGenerator.generate_token_batch(adapter, requests)
+        finally:
+            self.model.train(was_training)
+
     def _encode_shifted_samples(self, samples: list[RLSample]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = self._model_device()
         pad_token_id = _pad_token_id_from_tokenizer(self.tokenizer)

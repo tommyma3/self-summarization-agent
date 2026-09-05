@@ -1,3 +1,5 @@
+from self_summarization_agent.trajectory import TOKEN_CACHE_VERSION
+
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +52,7 @@ class FakeTrainer:
 
 def training_cache(reference_logprob: float = -0.5) -> dict:
     return {
-        "version": 6,
+        "version": TOKEN_CACHE_VERSION,
         "input_ids": [1, 2],
         "labels": [2, 3],
         "completion_mask": [False, True],

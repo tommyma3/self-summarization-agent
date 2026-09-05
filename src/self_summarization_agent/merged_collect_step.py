@@ -13,6 +13,8 @@ boundary.
 """
 
 from __future__ import annotations
+from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
+from self_summarization_agent.token_stream import TITO_CONTRACT
 
 import argparse
 import json
@@ -423,6 +425,8 @@ def _collect_split(
     ]
     expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
     completed_raw_keys: set[tuple[str, int]] = set()
+    tito = hasattr(generator, "create_token_renderer")
+    collection_identity = collection_profile_id(config, checkpoint_path) if tito else None
 
     if resume:
         completed_raw_keys = _load_completed_rollout_keys(
@@ -430,7 +434,8 @@ def _collect_split(
             checkpoint_id=checkpoint_id,
             expected_keys=expected_keys,
             expected_sampling_profile_id=profile_id if split == "eval" else None,
-            require_exact_token_ids=False,
+            require_exact_token_ids=tito,
+            expected_collection_profile_id=collection_identity,
         )
         rollout_requests = [
             (example, rollout_index)
@@ -457,6 +462,8 @@ def _collect_split(
                 example, rollout_index = rollout_requests[request_index]
                 trainable_sample_count = None
                 row = {
+                    "collection_profile_id": collection_identity,
+                    "collection_contract": TITO_CONTRACT if tito else None,
                     "policy_checkpoint_id": checkpoint_id,
                     "policy_checkpoint_path": str(checkpoint_path),
                     "rollout_split": split,
@@ -790,6 +797,10 @@ def run_merged_collect(
     # Determine what needs to be done
     # ------------------------------------------------------------------
     has_eval = config.dataset.eval_limit > 0 and eval_raw_output is not None
+    if resume:
+        validate_artifact_lineage(
+            [train_raw_output, train_judged_output, train_cached_output, eval_raw_output, eval_judged_output],
+            config=config, checkpoint=checkpoint)
     eval_sampling_profile = resolved_rollout_sampling_profile(config, split="eval") if has_eval else {}
     eval_profile_id = sampling_profile_id(eval_sampling_profile) if has_eval else ""
 

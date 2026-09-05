@@ -22,6 +22,9 @@ from self_summarization_agent.config import (
 )
 from self_summarization_agent.dataset import QueryExample, load_query_examples, split_train_eval_examples
 from self_summarization_agent.generation import build_generator
+from self_summarization_agent.collection_contract import collection_profile_id as _collection_profile_id
+from self_summarization_agent.token_stream import TITO_CONTRACT, TITO_COLLECTION_VERSION
+from self_summarization_agent.trajectory import _extract_collection_tokens
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.judge_step import judge_rollout_rows
 from self_summarization_agent.judge_worker import READY, SHUTDOWN, run_judge_worker
@@ -71,6 +74,7 @@ def _load_completed_rollout_keys(
     expected_keys: set[tuple[str, int]],
     expected_sampling_profile_id: str | None = None,
     require_exact_token_ids: bool = False,
+    expected_collection_profile_id: str | None = None,
 ) -> set[tuple[str, int]]:
     if not rollout_path.exists():
         return set()
@@ -110,6 +114,8 @@ def _load_completed_rollout_keys(
                     f"{row.get('sampling_profile_id')!r}, expected {expected_sampling_profile_id!r}"
                 )
             trajectory_records = row.get("trajectory_records")
+            if expected_collection_profile_id is not None and row.get("collection_profile_id") != expected_collection_profile_id:
+                raise ValueError(f"Cannot resume {rollout_path}: collection contract changed; use a fresh output lineage")
             validate_trajectory_schema(
                 trajectory_records,
                 context=f"Cannot resume {rollout_path}: line {line_number}",
@@ -133,7 +139,7 @@ def _load_completed_rollout_keys(
                     generations = collection_tokens.get("generations")
                     if (
                         collection_tokens.get("version")
-                        not in {LEGACY_COLLECTION_TOKEN_VERSION, COLLECTION_TOKEN_VERSION}
+                        not in {LEGACY_COLLECTION_TOKEN_VERSION, COLLECTION_TOKEN_VERSION, TITO_COLLECTION_VERSION}
                         or not isinstance(full_ids, list)
                         or not isinstance(assistant_mask, list)
                         or not isinstance(generations, list)
@@ -149,6 +155,9 @@ def _load_completed_rollout_keys(
                             f"Cannot resume {rollout_path}: line {line_number} trajectory "
                             f"{record_index + 1} has invalid exact collection_tokens"
                         )
+                    _extract_collection_tokens(record, turn_id=str(record.get("turn_id")))
+                    if expected_collection_profile_id is not None and collection_tokens.get("version") != TITO_COLLECTION_VERSION:
+                        raise ValueError("Cannot resume TITO collection from legacy token records")
             completed_keys.add(key)
     return completed_keys
 
@@ -583,6 +592,8 @@ def collect_rollouts(
         raise ValueError(f"{group_size_key} must be at least 1, got {rollout_group_size}")
     sampling_profile = resolved_rollout_sampling_profile(config, split=split)
     profile_id = sampling_profile_id(sampling_profile)
+    tito_collection = generator is None or hasattr(generator, "create_token_renderer")
+    collection_profile_id = _collection_profile_id(config, checkpoint) if tito_collection else None
     rollout_requests = [
         (example, rollout_index)
         for example in selected_examples
@@ -595,9 +606,12 @@ def collect_rollouts(
             checkpoint_id=checkpoint_id,
             expected_keys=expected_keys,
             expected_sampling_profile_id=profile_id if split == "eval" else None,
+            expected_collection_profile_id=collection_profile_id,
             require_exact_token_ids=(
-                config.rollout.backend.lower().replace("-", "_") in {"openai", "openai_compatible"}
-                and config.rollout.require_exact_token_ids
+                tito_collection or (
+                    config.rollout.backend.lower().replace("-", "_") in {"openai", "openai_compatible"}
+                    and config.rollout.require_exact_token_ids
+                )
             ),
         )
         rollout_requests = [
@@ -663,6 +677,8 @@ def collect_rollouts(
                             )
                         )
                     row = {
+                        "collection_profile_id": collection_profile_id,
+                        "collection_contract": TITO_CONTRACT if tito_collection else None,
                         "policy_checkpoint_id": checkpoint_id,
                         "policy_checkpoint_path": str(checkpoint),
                         "rollout_split": split,

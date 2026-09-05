@@ -2,3 +2,6 @@
 artifacts
 runs
 .claude
+.local-test-deps/
+.local-uv-cache/
+.local-pytest/

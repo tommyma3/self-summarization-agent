@@ -20,6 +20,8 @@ from self_summarization_agent.config import JudgeConfig, ModelConfig
 from self_summarization_agent.chat_template import configure_tokenizer_chat_template
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
+from self_summarization_agent.token_stream import TokenRequest
+from self_summarization_agent.token_renderer import QwenAgentTokenRenderer, parse_native_completion
 
 
 class TextGenerator(Protocol):
@@ -58,8 +60,14 @@ def _resolve_torch_dtype(dtype_name: str):
     return mapping[dtype_name]
 
 
+class TokenInputGenerator:
+    def create_token_renderer(self) -> QwenAgentTokenRenderer:
+        return QwenAgentTokenRenderer(self.tokenizer, enable_thinking=self.enable_thinking,
+                                     native_tools=bool(getattr(self, "supports_native_tools", False)))
+
+
 @dataclass(slots=True)
-class TransformersGenerator:
+class TransformersGenerator(TokenInputGenerator):
     model_path: str
     max_new_tokens: int
     temperature: float
@@ -71,6 +79,8 @@ class TransformersGenerator:
     trust_remote_code: bool = False
     enable_thinking: bool = False
     chat_template_path: str | None = None
+    require_exact_token_ids: bool = True
+    max_model_len: int | None = None
     tokenizer: Any = field(init=False)
     model: Any = field(init=False)
 
@@ -141,6 +151,24 @@ class TransformersGenerator:
     def generate_batch(self, prompts: list[str]) -> list[str]:
         return [self.generate(prompt) for prompt in prompts]
 
+    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
+        results = []
+        for request in requests:
+            inputs = torch.tensor([request.prompt_token_ids], dtype=torch.long, device=self.model.device)
+            cap = request.max_new_tokens or self.max_new_tokens
+            kwargs = dict(max_new_tokens=cap, do_sample=self.do_sample,
+                          pad_token_id=self.tokenizer.pad_token_id)
+            if self.do_sample:
+                kwargs.update(temperature=self.temperature, top_p=self.top_p, **self.sampling_extra)
+            with torch.inference_mode():
+                output = self.model.generate(input_ids=inputs, attention_mask=torch.ones_like(inputs), **kwargs)
+            ids = output[0, inputs.shape[1]:].tolist()
+            results.append(GenerationResult(
+                text=self.tokenizer.decode(ids, skip_special_tokens=False),
+                prompt_token_ids=list(request.prompt_token_ids), completion_token_ids=ids,
+                finish_reason="stop" if ids and ids[-1] == self.tokenizer.convert_tokens_to_ids("<|im_end|>") else "length"))
+        return results
+
 
 def _object_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -202,7 +230,7 @@ def _parse_api_message(payload: dict[str, Any]) -> Message:
 
 
 @dataclass(slots=True)
-class OpenAICompatibleGenerator:
+class OpenAICompatibleGenerator(TokenInputGenerator):
     """Chat Completions client for a Qwen-compatible vLLM server.
 
     Exact server-side prompt and completion token IDs are mandatory by default.
@@ -389,6 +417,50 @@ class OpenAICompatibleGenerator:
             return list(executor.map(self._generate_one, prompts))
 
 
+    def _generate_tokens(self, request: TokenRequest) -> GenerationResult:
+        extra = dict(self.api_extra_body)
+        for key in ("chat_template", "chat_template_kwargs", "tools", "tool_choice", "parallel_tool_calls"):
+            extra.pop(key, None)
+        for key in ("prompt", "prompt_token_ids", "truncate_prompt_tokens", "add_special_tokens"):
+            if key in extra:
+                raise ValueError(f"TITO does not allow API override {key}")
+        extra.update(return_token_ids=True, add_special_tokens=False)
+        if request.generation_kind != "action":
+            if "structured_outputs" in extra:
+                raise ValueError("TITO runtime controls cannot override custom structured_outputs")
+            thinking = r"[\s\S]*?</think>\s*" if self.enable_thinking else ""
+            body = (r"<summary>[\s\S]+?</summary>" if request.generation_kind == "summary" else
+                    r"<tool_call>\s*<function=finish>\s*<parameter=answer>[\s\S]+?</parameter>\s*</function>\s*</tool_call>")
+            extra["structured_outputs"] = {"regex": thinking + body + r"\s*"}
+        payload = dict(model=self.api_model or self.model_path, prompt=list(request.prompt_token_ids),
+                       max_tokens=request.max_new_tokens or self.max_new_tokens, temperature=self.temperature if self.do_sample else 0.0,
+                       extra_body=extra)
+        if self.do_sample:
+            payload["top_p"] = self.top_p
+        response = _object_payload(self.client.completions.create(**payload))
+        choices = response.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise RuntimeError("TITO requires exactly one completion choice")
+        choice = _object_payload(choices[0])
+        prompt_ids = _required_int_list(response.get("prompt_token_ids"), field_name="prompt_token_ids")
+        ids = _required_int_list(choice.get("token_ids"), field_name="completion token_ids")
+        if prompt_ids != list(request.prompt_token_ids):
+            raise RuntimeError("Token endpoint changed the submitted prompt IDs")
+        raw = self.tokenizer.decode(ids, skip_special_tokens=False)
+        from hashlib import sha256
+        call_id = "call_" + sha256(json.dumps([prompt_ids, ids]).encode()).hexdigest()[:24]
+        return GenerationResult(text=raw, prompt_token_ids=prompt_ids, completion_token_ids=ids,
+                                message=parse_native_completion(raw, require_thinking_close=self.enable_thinking,
+                                                                call_id=call_id),
+                                finish_reason=choice.get("finish_reason"))
+
+    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
+        if not requests:
+            return []
+        with ThreadPoolExecutor(max_workers=min(len(requests), self.api_max_concurrency)) as executor:
+            return list(executor.map(self._generate_tokens, requests))
+
+
 def _apply_vllm_subprocess_fix() -> None:
     """Work around a vLLM 0.19.1 import-order bug that causes a SIGSEGV
     during model architecture inspection in subprocesses.
@@ -420,7 +492,7 @@ def _apply_vllm_subprocess_fix() -> None:
 
 
 @dataclass(slots=True)
-class VLLMGenerator:
+class VLLMGenerator(TokenInputGenerator):
     model_path: str
     max_new_tokens: int
     temperature: float
@@ -585,9 +657,34 @@ class VLLMGenerator:
             )
         return completions
 
+    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
+        if not requests:
+            return []
+        outputs = self.llm.generate(
+            [{"prompt_token_ids": list(r.prompt_token_ids)} for r in requests],
+            [self._sampling_params_cls(**{**self._sampling_kwargs(include_logprobs=True),
+                                         "max_tokens": r.max_new_tokens or self.max_new_tokens}) for r in requests],
+        )
+        results = []
+        if len(outputs) != len(requests):
+            raise RuntimeError("vLLM returned the wrong number of token generations")
+        for request, output in zip(requests, outputs):
+            if list(output.prompt_token_ids) != list(request.prompt_token_ids) or len(output.outputs) != 1:
+                raise RuntimeError("vLLM changed the submitted token prompt or response count")
+            completion = output.outputs[0]
+            ids = _required_int_list(list(completion.token_ids), field_name="completion token_ids")
+            logprobs = _extract_completion_token_logprobs(completion)
+            results.append(GenerationResult(
+                text=self.tokenizer.decode(ids, skip_special_tokens=False),
+                prompt_token_ids=list(output.prompt_token_ids), completion_token_ids=ids,
+                token_logprobs=logprobs, token_logprobs_mode="raw_logprobs" if logprobs is not None else None,
+                cumulative_logprob=getattr(completion, "cumulative_logprob", None),
+                finish_reason=getattr(completion, "finish_reason", None)))
+        return results
+
 
 @dataclass(slots=True)
-class SGLangGenerator:
+class SGLangGenerator(TokenInputGenerator):
     model_path: str
     max_new_tokens: int
     temperature: float
@@ -601,6 +698,7 @@ class SGLangGenerator:
     trust_remote_code: bool = False
     enable_thinking: bool = False
     chat_template_path: str | None = None
+    require_exact_token_ids: bool = True
     tokenizer: Any = field(init=False)
     engine: Any = field(init=False)
 
@@ -717,6 +815,32 @@ class SGLangGenerator:
             )
         return completions
 
+    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
+        if not requests:
+            return []
+        outputs = self.engine.generate(input_ids=[list(r.prompt_token_ids) for r in requests],
+                                       sampling_params=[{**self._sampling_params(), "max_new_tokens": r.max_new_tokens or self.max_new_tokens}
+                                                        for r in requests], return_logprob=True)
+        outputs = outputs if isinstance(outputs, list) else [outputs]
+        if len(outputs) != len(requests):
+            raise RuntimeError("SGLang returned the wrong number of token generations")
+        results = []
+        for request, output in zip(requests, outputs):
+            ids, logprobs = _extract_sglang_completion_logprobs(output)
+            if ids is None:
+                raise RuntimeError("SGLang did not return exact sampled token IDs")
+            meta = output.get("meta_info") or {}
+            echoed = meta.get("input_token_ids")
+            if echoed is not None and list(echoed) != list(request.prompt_token_ids):
+                raise RuntimeError("SGLang changed the submitted token prompt")
+            reason = meta.get("finish_reason") or {}
+            results.append(GenerationResult(
+                text=self.tokenizer.decode(ids, skip_special_tokens=False),
+                prompt_token_ids=list(request.prompt_token_ids), completion_token_ids=ids,
+                token_logprobs=logprobs,  # Rescore: SGLang raw-policy provenance is not assumed.
+                finish_reason=reason.get("type") if isinstance(reason, dict) else str(reason)))
+        return results
+
 
 def _extract_sglang_completion_logprobs(output: Any) -> tuple[list[int] | None, list[float] | None]:
     if not isinstance(output, dict):
@@ -819,6 +943,8 @@ def build_generator(
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,
+            max_model_len=max_model_len,
+            require_exact_token_ids=model_config.require_exact_token_ids,
         )
     if backend_name in {"vllm", "vllm_offline"}:
         return VLLMGenerator(
@@ -853,6 +979,7 @@ def build_generator(
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,
+            require_exact_token_ids=model_config.require_exact_token_ids,
         )
     if backend_name in {"openai", "openai_compatible", "openai-compatible"}:
         if not model_config.api_base_url:
@@ -871,6 +998,7 @@ def build_generator(
             api_max_concurrency=model_config.api_max_concurrency,
             api_extra_body={**model_config.api_extra_body, **sampling_extra},
             require_exact_token_ids=model_config.require_exact_token_ids,
+            max_model_len=max_model_len,
             trust_remote_code=model_config.trust_remote_code,
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,

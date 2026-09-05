@@ -1,5 +1,15 @@
 # Append-Only Compaction and Interval Training Design
 
+## TITO amendment (2026-09-05)
+
+Production rollout input is an append-only token ledger, rendered initially with the repository's Qwen chat template. `token_renderer.py` formats only newly appended tool results, terminal controls, separators, and generation headers. It never re-renders sampled history. `token_stream.py` retains sampled IDs and their mask ownership, rejects stale appends, and freezes completed intervals.
+
+Successful compaction is the sole active-context replacement operation. Its request and full sampled summary belong to the old interval; the unchanged system/query and wrapped extracted summary initialize the next interval. Both intervals remain RL samples. GRPO normalizes rewards over distinct rollouts and shares the advantage across their segments. Value-MC retains the frozen interval-start baseline and terminal-return target for each segment.
+
+Collection token schema 3 records append spans and renderer identity. Training cache version 7 prevents implicit reuse of caches from older collection semantics. Resume preflight checks the collection profile before collection/judging/cache completion shortcuts. Failed summaries or unsupported sampled boundaries retain raw output without installing repaired context.
+
+This amendment strengthens any earlier allowance for backend retokenization: production continuations must submit the exact stored token IDs. See `docs/2026-09-05-tito-implementation-plan.md` for the implementation and verification scope.
+
 ## Goal
 
 Preserve the model's complete reasoning and action trajectory up to each compaction or final-answer boundary. Compaction must be an ordinary continuation of the active context, not a separately reconstructed request that discards chain-of-thought or divides the trajectory into per-round training samples.
