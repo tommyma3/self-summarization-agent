@@ -118,7 +118,8 @@ training:
   tensor_parallel_size: 1
   data_parallel_size: 2
   activation_checkpointing: true
-  max_sequence_length: 24000
+  # Match rollout.max_model_len so exact interval tokens are never truncated.
+  max_sequence_length: 27000
   epochs: 1
   steps: 1
   group_size: 4

@@ -401,21 +401,49 @@ def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     )
 
 
+def _validate_exact_token_sequence_ceiling(
+    training: TrainingConfig,
+    rollout: RolloutConfig,
+    runtime: RuntimeConfig,
+) -> None:
+    if not rollout.require_exact_token_ids or training.max_sequence_length is None:
+        return
+    # Exact-token (TITO) collection clamps max_new_tokens to the remaining room
+    # (runtime.py::_token_input), so finalized intervals can reach
+    # min(runtime.max_context_tokens, rollout.max_model_len). A training cap
+    # below that ceiling fails hours into training instead of at launch.
+    ceiling = runtime.max_context_tokens
+    if rollout.max_model_len is not None:
+        ceiling = min(ceiling, rollout.max_model_len)
+    if training.max_sequence_length < ceiling:
+        raise ValueError(
+            "training.max_sequence_length "
+            f"({training.max_sequence_length}) is below the exact-token rollout ceiling "
+            f"min(runtime.max_context_tokens, rollout.max_model_len) = {ceiling}; "
+            "interval prefixes are never left-truncated, so any legal interval near the "
+            "ceiling would fail closed in the trainer. Raise training.max_sequence_length "
+            "to at least the rollout ceiling."
+        )
+
+
 def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None) -> TrainConfig:
     raw = _load_yaml(path)
     if overrides:
         raw = apply_overrides(raw, overrides)
     training = _load_training_config(raw)
+    runtime = RuntimeConfig(**_require_section(raw, "runtime"))
+    rollout = _derive_rollout_config(raw, training)
+    _validate_exact_token_sequence_ceiling(training, rollout, runtime)
     return TrainConfig(
         experiment=ExperimentConfig(**_require_section(raw, "experiment")),
         dataset=DatasetConfig(**_require_section(raw, "dataset")),
         retrieval=RetrievalConfig(**_require_section(raw, "retrieval")),
         model=ModelConfig(**_require_section(raw, "model")),
-        runtime=RuntimeConfig(**_require_section(raw, "runtime")),
+        runtime=runtime,
         judge=JudgeConfig(**_require_section(raw, "judge")),
         training=training,
         collection=CollectionConfig(**_require_section(raw, "collection")),
-        rollout=_derive_rollout_config(raw, training),
+        rollout=rollout,
         evaluation=EvaluationConfig(**_require_section(raw, "evaluation")),
     )
 

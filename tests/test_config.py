@@ -47,6 +47,62 @@ def test_compaction_mc_value_flag_and_estimator_must_agree() -> None:
         raise AssertionError("mismatched value configuration must fail")
 
 
+def test_exact_token_ceiling_rejects_underpowered_training_cap(tmp_path: Path) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        """
+experiment: {name: demo, seed: 0, output_root: output, bc_plus_root: bc-plus}
+dataset: {}
+retrieval: {backend: faiss, index_path: index}
+model: {backend: transformers, model_path: model}
+runtime: {context_threshold_tokens: 12000, max_context_tokens: 28000}
+judge: {enabled: true}
+rollout:
+  backend: vllm_offline
+  max_model_len: 27000
+  require_exact_token_ids: true
+training:
+  backend: verl_ray
+  max_sequence_length: 24000
+""".strip(),
+        encoding="utf-8",
+    )
+
+    try:
+        load_train_config(config_path)
+    except ValueError as exc:
+        assert "max_sequence_length" in str(exc)
+        assert "rollout ceiling" in str(exc)
+    else:
+        raise AssertionError("a training cap below the exact-token rollout ceiling must fail")
+
+
+def test_exact_token_ceiling_accepts_aligned_training_cap(tmp_path: Path) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        """
+experiment: {name: demo, seed: 0, output_root: output, bc_plus_root: bc-plus}
+dataset: {}
+retrieval: {backend: faiss, index_path: index}
+model: {backend: transformers, model_path: model}
+runtime: {context_threshold_tokens: 12000, max_context_tokens: 28000}
+judge: {enabled: true}
+rollout:
+  backend: vllm_offline
+  max_model_len: 27000
+  require_exact_token_ids: true
+training:
+  backend: verl_ray
+  max_sequence_length: 27000
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_train_config(config_path)
+
+    assert config.training.max_sequence_length == 27_000
+
+
 def test_load_run_config_applies_overrides(tmp_path: Path) -> None:
     config_path = tmp_path / "run.yaml"
     config_path.write_text(
@@ -372,6 +428,10 @@ def test_load_compaction_mc_value_training_preset() -> None:
     assert config.rollout.max_model_len == default.rollout.max_model_len
     assert config.rollout.max_new_tokens == default.rollout.max_new_tokens
     assert config.training.max_sequence_length == default.training.max_sequence_length
+    assert config.training.max_sequence_length == 27_000
+    assert config.training.max_sequence_length >= min(
+        config.runtime.max_context_tokens, config.rollout.max_model_len
+    )
     assert config.training.gradient_accumulation_microbatch_size == 1
     assert config.training.minibatch_size == 4
     assert config.training.update_epochs == 1

@@ -128,9 +128,8 @@ training:
   tensor_parallel_size: 1
   data_parallel_size: 4
   activation_checkpointing: true
-  # Match the default training cap. Longer intervals fail closed rather than
-  # being left-truncated, preserving the append-only trajectory contract.
-  max_sequence_length: 24000
+  # Match rollout.max_model_len so exact interval tokens are never truncated.
+  max_sequence_length: 27000
   epochs: 10
   steps: 10
   group_size: 4
