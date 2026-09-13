@@ -118,7 +118,7 @@ training:
   advantage_estimator: compaction_mc_value
   value:
     enabled: true
-    loss_coefficient: 0.5
+    loss_coefficient: 0.1
     zero_initialize_head: true
     state_anchor: first_generation_prompt_end
   backend: verl_ray
