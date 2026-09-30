@@ -296,6 +296,22 @@ For the intended GPU run:
 
 ### Value for compaction experiment
 
+Compare the compact value MC run with the default GRPO run (requires `matplotlib`):
+
+```bash
+python scripts/plot_compact_value_mc_comparison.py
+```
+
+This reads `artifacts/train/{qwen-bcplus-train,qwen-bcplus-compact-value-mc}/eval_metrics.jsonl`
+and writes a PNG/SVG dashboard, standalone accuracy SVG, matched-checkpoint CSV,
+and text summary under `artifacts/train/compact_value_mc_comparison/`. The dashboard
+compares accuracy, accuracy differences, malformed-output rate, budget and generated
+tokens, correct answers per 1,000 budget tokens, summary frequency/size, and search
+usage. The summary reports latest, best, and last-five-checkpoint accuracy; these
+are descriptive comparisons of the two runs, not independent statistical trials.
+Missing optional metrics remain gaps. Use `--artifacts-dir`, `--default-run`,
+`--mc-run`, `--output-dir`, or `--last-n` to customize inputs and output.
+
 [`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
 
 Both value backends exploit causal prefix equivalence for the frozen `V_old` pass and evaluate only through the exact state anchor. The Transformers compatibility backend additionally uses Qwen's `logits_to_keep` path to materialize vocabulary logits only for the state anchor and trainable assistant-token positions. The distributed backend uses verl's packed remove-padding/Ulysses log-probability path. These changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing worker and loss path.
