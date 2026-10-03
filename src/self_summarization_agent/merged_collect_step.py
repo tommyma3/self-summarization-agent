@@ -524,6 +524,17 @@ def _run_split_collection_worker(
 
     config = load_train_config(config_path, parse_cli_overrides(overrides))
     checkpoint = Path(checkpoint_path).resolve()
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+        from self_summarization_agent.benchmarks.terminal_bench.collection import collect_terminal_rollouts
+        generator = _build_rollout_generator(config, checkpoint, split=split)
+        try:
+            collect_terminal_rollouts(config, checkpoint_path=checkpoint, output_path=raw_output_path,
+                generator=generator, split=split, sample_seed=sample_seed, resume=resume)
+        finally:
+            core = getattr(getattr(getattr(generator, "llm", None), "llm_engine", None), "engine_core", None)
+            if core is not None:
+                core.shutdown()
+        return
     checkpoint_id = checkpoint_id_from_path(checkpoint)
     examples = load_query_examples(
         config.experiment.bc_plus_root,
@@ -774,6 +785,13 @@ def run_merged_collect(
 
     Returns a dict mapping output kind to its file path.
     """
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+        from self_summarization_agent.benchmarks.terminal_bench.collection import run_terminal_merged
+        return run_terminal_merged(config, config_path=config_path, checkpoint_path=checkpoint_path,
+            train_raw_output=train_raw_output, train_judged_output=train_judged_output,
+            train_cached_output=train_cached_output, eval_raw_output=eval_raw_output,
+            eval_judged_output=eval_judged_output, eval_metrics_output=eval_metrics_output,
+            eval_iteration=eval_iteration, sample_seed=sample_seed, resume=resume, overrides=overrides)
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
     overrides = list(overrides or [])

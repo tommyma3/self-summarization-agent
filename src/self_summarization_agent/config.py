@@ -22,7 +22,35 @@ class ExperimentConfig:
     name: str
     seed: int
     output_root: str
-    bc_plus_root: str
+    bc_plus_root: str = ""
+
+
+@dataclass(slots=True)
+class BenchmarkConfig:
+    name: str = "browsecomp"
+    dataset: str = "terminal-bench@2.0"
+    task_paths: list[str] = field(default_factory=list)
+    train_task_paths: list[str] = field(default_factory=list)
+    task_names: list[str] = field(default_factory=list)
+    dataset_revision: str | None = None
+    environment: str = "docker"
+    image_profile: str = "text-only"
+    vision_model_path: str | None = None
+    vision_device: str = "cpu"
+    vision_max_tokens: int = 2048
+    max_output_chars: int = 30000
+    agent_timeout_seconds: float | None = None
+    allow_benchmark_training: bool = False
+
+    def __post_init__(self) -> None:
+        if self.name not in {"browsecomp", "terminal-bench"}:
+            raise ValueError("benchmark.name must be browsecomp or terminal-bench")
+        if self.image_profile not in {"text-only", "local-vision"}:
+            raise ValueError("benchmark.image_profile must be text-only or local-vision")
+        if self.image_profile == "local-vision" and not self.vision_model_path:
+            raise ValueError("local-vision requires benchmark.vision_model_path")
+        if self.max_output_chars < 1 or self.vision_max_tokens < 1:
+            raise ValueError("Benchmark output limits must be positive")
 
 
 @dataclass(slots=True)
@@ -288,6 +316,7 @@ class RunConfig:
     model: ModelConfig
     runtime: RuntimeConfig
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
 
 @dataclass(slots=True)
@@ -302,6 +331,7 @@ class TrainConfig:
     collection: CollectionConfig = field(default_factory=CollectionConfig)
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
+    benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
 
 def _parse_override_value(raw_value: str) -> Any:
@@ -365,6 +395,7 @@ def load_run_config(path: str | Path, overrides: dict[str, Any] | None = None) -
         model=ModelConfig(**_require_section(raw, "model")),
         runtime=RuntimeConfig(**_require_section(raw, "runtime")),
         rollout=RolloutConfig(**_require_section(raw, "rollout")),
+        benchmark=BenchmarkConfig(**_require_section(raw, "benchmark")),
     )
 
 
@@ -445,6 +476,7 @@ def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None)
         collection=CollectionConfig(**_require_section(raw, "collection")),
         rollout=rollout,
         evaluation=EvaluationConfig(**_require_section(raw, "evaluation")),
+        benchmark=BenchmarkConfig(**_require_section(raw, "benchmark")),
     )
 
 

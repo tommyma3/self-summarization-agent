@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable, Iterator, Protocol
 LOGGER = logging.getLogger(__name__)
 
 from self_summarization_agent.backend import BrowseCompBackend, SearchResult
+from self_summarization_agent.benchmarks.base import AgentScaffold
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCall
 from self_summarization_agent.prompts import (
@@ -18,6 +19,7 @@ from self_summarization_agent.prompts import (
     build_forced_answer_prompt,
     build_initial_messages,
     format_tool_response,
+    format_compacted_summary,
     serialize_messages,
 )
 from self_summarization_agent.rewards import (
@@ -336,6 +338,7 @@ class EpisodeRuntime:
     # within a single round.  Remaining calls are skipped with an error string
     # so the episode can still complete.  None = no limit.
     tool_execution_timeout_seconds: float | None = 600
+    scaffold: AgentScaffold | None = None
     token_renderer: Any = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -346,6 +349,14 @@ class EpisodeRuntime:
             if not callable(getattr(self.model, "generate_token_batch", None)):
                 raise ValueError("This collector does not implement token-input generation")
             self.token_renderer = create_renderer()
+        if self.scaffold is not None:
+            if self.token_renderer is None or not self._requires_exact_token_ids():
+                raise ValueError("Benchmark scaffolds require exact token-in/token-out generation")
+            from self_summarization_agent.token_renderer import QwenAgentTokenRenderer
+            self.token_renderer = QwenAgentTokenRenderer(
+                self.token_renderer.tokenizer, enable_thinking=self.token_renderer.enable_thinking,
+                native_tools=True, scaffold_fingerprint=self.scaffold.fingerprint,
+                forced_control=self.scaffold.forced_control, summary_control=self.scaffold.summary_control)
 
     def _initialize_ledger(self, active: _ActiveEpisode) -> None:
         if self.token_renderer is not None:
@@ -362,7 +373,13 @@ class EpisodeRuntime:
                                               generation_kind=prompt.generation_kind)
         limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
         available = limit - len(request.prompt_token_ids)
-        return replace(request, max_new_tokens=max(0, min(getattr(self.model, "max_new_tokens", available), available)))
+        return replace(request, max_new_tokens=max(0, min(getattr(self.model, "max_new_tokens", available), available)),
+                       # Prose-only reasoning in constrained control turns prevents
+                       # a wildcard from consuming a closing think tag and tools.
+                       response_regex=((r"[^<]*</think>\s*" if self.token_renderer.enable_thinking else "")
+                                       + (r"<summary>[\s\S]+?</summary>" if prompt.generation_kind == "summary"
+                                          else self.scaffold.forced_body_regex) + r"\s*")
+                       if self.scaffold is not None and prompt.generation_kind in {"summary", "forced_answer"} else None)
 
     def _commit_token_input(self, active: _ActiveEpisode, prompt: ConversationPrompt):
         if active.token_ledger is None:
@@ -382,9 +399,11 @@ class EpisodeRuntime:
 
     @property
     def _uses_native_tools(self) -> bool:
-        return bool(getattr(self.model, "supports_native_tools", False))
+        return self.scaffold is not None or bool(getattr(self.model, "supports_native_tools", False))
 
     def _tool_calls_used(self, active: _ActiveEpisode) -> int:
+        if self.scaffold is not None:
+            return sum(active.tool_call_counts.values())
         return active.tool_call_counts.get("search", 0) + active.tool_call_counts.get("get_document", 0)
 
     def _remaining_tool_calls(self, active: _ActiveEpisode) -> int | None:
@@ -422,7 +441,7 @@ class EpisodeRuntime:
         if self._uses_native_tools:
             return ConversationPrompt(
                 state.messages,
-                tools=ACTION_TOOLS,
+                tools=self.scaffold.tools if self.scaffold is not None else ACTION_TOOLS,
                 tool_choice="auto",
                 parallel_tool_calls=False,
                 generation_kind="action",
@@ -431,12 +450,12 @@ class EpisodeRuntime:
 
     def _build_forced_answer_prompt(self, active: _ActiveEpisode) -> ConversationPrompt:
         messages = list(active.state.messages)
-        messages.append(Message(role="system", content=build_forced_answer_prompt()))
+        messages.append(Message(role="system", content=self.scaffold.forced_control if self.scaffold is not None else build_forced_answer_prompt()))
         if self._uses_native_tools:
             return ConversationPrompt(
                 messages,
-                tools=ACTION_TOOLS,
-                tool_choice=FORCED_FINISH_TOOL_CHOICE,
+                tools=self.scaffold.tools if self.scaffold is not None else ACTION_TOOLS,
+                tool_choice={"type": "function", "function": {"name": self.scaffold.finish_tool}} if self.scaffold is not None else FORCED_FINISH_TOOL_CHOICE,
                 parallel_tool_calls=False,
                 generation_kind="forced_answer",
             )
@@ -831,12 +850,18 @@ class EpisodeRuntime:
             for output in outputs
         ]
 
+    def _initial_messages(self, user_prompt: str) -> list[Message]:
+        if self.scaffold is not None:
+            return [Message(role="system", content=self.scaffold.system_prompt),
+                    Message(role="user", content=user_prompt)]
+        return build_initial_messages(user_prompt, native_tools=self._uses_native_tools)
+
     def _new_active_episode(self, query_id: str, user_prompt: str) -> _ActiveEpisode:
         state = EpisodeState(
             query_id=query_id,
             user_prompt=user_prompt,
             context_threshold_tokens=self.context_threshold_tokens,
-            messages=build_initial_messages(user_prompt, native_tools=self._uses_native_tools),
+            messages=self._initial_messages(user_prompt),
         )
         active = _ActiveEpisode(
             state=state,
@@ -882,6 +907,13 @@ class EpisodeRuntime:
             payload, normalized_output = parsed
             return payload, normalized_output, None, None
         message = generated_output.message
+        if self.scaffold is not None:
+            from hashlib import sha256
+            call_id = "call_" + sha256(json.dumps([
+                generated_output.prompt_token_ids, generated_output.completion_token_ids
+            ]).encode()).hexdigest()[:24]
+            message = self.scaffold.parse(generated_output.text, call_id=call_id,
+                                          thinking=self.token_renderer.enable_thinking)
         if message is None or len(message.tool_calls) != 1:
             return None
         tool_call = message.tool_calls[0]
@@ -994,6 +1026,23 @@ class EpisodeRuntime:
                     generation_kind=generation_kind)
                 return None
 
+        if self.scaffold is not None:
+            try:
+                self.token_renderer.validate_completion_boundary(
+                    generated_output.completion_token_ids, generated_output.finish_reason)
+            except UnsupportedTokenBoundary:
+                active.result = self._malformed_result(active, prompt, raw_output,
+                    prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
+                    generation_kind=generation_kind)
+                return None
+            if self.scaffold.is_complete(tool_name, query_id=query_id, forced=False):
+                tool_name, arguments = "finish", {"answer": ""}
+            else:
+                return _PendingToolAction(active=active, prompt=prompt, raw_output=raw_output,
+                    normalized_output=normalized_output, tool_name=tool_name, arguments=arguments,
+                    prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
+                    assistant_message=assistant_message, tool_call_id=tool_call_id)
+
         if tool_name == "finish":
             answer = arguments.get("answer")
             if not isinstance(answer, str):
@@ -1098,6 +1147,29 @@ class EpisodeRuntime:
         active = action.active
         state = active.state
         query_id = state.query_id
+        if self.scaffold is not None and active.token_ledger is not None:
+            # Bound only this new observation, before its first append. Reserve
+            # the next control and completion; historical tokens are never cut.
+            renderer = self.token_renderer
+            output = active.interval_outputs[-1]
+            limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
+            reserve = max(len(renderer.header("summary")) + self.max_summary_tokens,
+                          len(renderer.header("forced_answer")) + getattr(self.model, "max_new_tokens", 1024))
+            available = max(0, limit - len(active.token_ledger) - reserve)
+            def size(text):
+                return len(renderer.render_tool_result(
+                    Message(role="tool", content=text, tool_call_id=action.tool_call_id),
+                    completion_ids=output.completion_token_ids, finish_reason=output.finish_reason))
+            if size(tool_result) > available:
+                note = "\n[Observation truncated to reserve the next interval boundary.]"
+                low, high = 0, len(tool_result)
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    if size(tool_result[:mid] + note) <= available:
+                        low = mid
+                    else:
+                        high = mid - 1
+                tool_result = tool_result[:low] + note
         tool_result_tokens = self._completion_token_count(tool_result)
         active.token_usage.tool_result_tokens += tool_result_tokens
 
@@ -1143,6 +1215,14 @@ class EpisodeRuntime:
                 finish_reason=output.finish_reason), kind="tool_result")
 
     def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
+        if self.scaffold is not None:
+            for action in actions:
+                output = self.scaffold.execute(action.tool_name, action.arguments,
+                                               query_id=action.active.state.query_id)
+                counts = action.active.tool_call_counts
+                counts[action.tool_name] = counts.get(action.tool_name, 0) + 1
+                self._apply_tool_result(action, output)
+            return
         tool_started = time.monotonic()
 
         search_actions = [action for action in actions if action.tool_name == "search"]
@@ -1252,6 +1332,17 @@ class EpisodeRuntime:
         payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
         tool_name = payload["tool_name"]
         arguments = payload["arguments"]
+        if self.scaffold is not None:
+            try:
+                self.token_renderer.validate_completion_boundary(
+                    generated_output.completion_token_ids, generated_output.finish_reason)
+            except UnsupportedTokenBoundary:
+                active.result = self._malformed_result(active, prompt, raw_output,
+                    prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
+                    generation_kind="forced_answer")
+                return
+            if self.scaffold.is_complete(tool_name, query_id=query_id, forced=True):
+                tool_name, arguments = "finish", {"answer": ""}
         if tool_name != "finish":
             active.result = self._malformed_result(
                 active,
@@ -1316,10 +1407,13 @@ class EpisodeRuntime:
             active.state,
             max_summary_tokens=self.max_summary_tokens,
         )
+        if self.scaffold is not None:
+            prompt = ConversationPrompt([*active.state.messages,
+                Message(role="user", content=self.scaffold.summary_control)], generation_kind="summary")
         if self._uses_native_tools:
             prompt = ConversationPrompt(
                 prompt.messages,
-                tools=ACTION_TOOLS,
+                tools=self.scaffold.tools if self.scaffold is not None else ACTION_TOOLS,
                 tool_choice="none",
                 parallel_tool_calls=False,
                 generation_kind="summary",
@@ -1368,7 +1462,20 @@ class EpisodeRuntime:
                     "query_id": active.state.query_id,
                     "anomaly": closure_reason,
                 })
+        invalid_boundary = False
+        if self.scaffold is not None:
+            try:
+                self.token_renderer.validate_completion_boundary(
+                    generated_output.completion_token_ids, generated_output.finish_reason)
+            except UnsupportedTokenBoundary:
+                invalid_boundary = True
+            invalid_boundary = invalid_boundary or bool(classify_thinking_closure(
+                generated_summary, enable_thinking=self.token_renderer.enable_thinking))
+            parsed_summary = self.scaffold.parse(generated_summary, call_id="summary-diagnostic",
+                                                thinking=self.token_renderer.enable_thinking)
+            invalid_boundary = invalid_boundary or parsed_summary is None or bool(parsed_summary.tool_calls)
         summary_extraction = (
+            None if invalid_boundary else
             extract_structured_summary(generated_output.message)
             if self._uses_native_tools and generated_output.message is not None
             else extract_structured_summary(Message(role="assistant", content=generated_summary))
@@ -1416,11 +1523,10 @@ class EpisodeRuntime:
             active.result = self._penalized_result(active, status="empty_summary")
             return
         state.latest_summary = summary_extraction.summary
-        state.messages = build_compacted_messages(
-            state.user_prompt,
-            summary_extraction.summary,
-            native_tools=self._uses_native_tools,
-        )
+        state.messages = (self._initial_messages(state.user_prompt) + [
+            Message(role="user", content=format_compacted_summary(summary_extraction.summary))]
+            if self.scaffold is not None else build_compacted_messages(
+                state.user_prompt, summary_extraction.summary, native_tools=self._uses_native_tools))
         active.token_usage.retired_round_count += retired_count
         active.summary_turns.append(summary_turn_id)
         self._initialize_ledger(active)

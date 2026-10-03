@@ -192,6 +192,27 @@ def judge_rollouts(
 ) -> Path:
     expected_checkpoint_id = checkpoint_id_from_path(checkpoint_path) if checkpoint_path is not None else None
     rows = _load_rollout_rows(rollout_path)
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+        from self_summarization_agent.benchmarks.terminal_bench.verification import apply_verifier_reward
+        from self_summarization_agent.collection_contract import validate_artifact_lineage
+        from self_summarization_agent.trajectory import _extract_collection_tokens
+        checkpoint = Path(checkpoint_path or config.model.model_path).resolve()
+        validate_artifact_lineage([Path(rollout_path)], config=config, checkpoint=checkpoint)
+        judged_rows = []
+        for index, row in enumerate(rows):
+            # Terminal trials already carry verifier outcomes; this phase is an
+            # idempotent conversion of recorded outcomes, with no model judge.
+            _validate_raw_row({k: v for k, v in row.items() if k != "turn_rewards"},
+                              index=index, expected_checkpoint_id=expected_checkpoint_id)
+            if row.get("benchmark") != "terminal-bench":
+                raise ValueError("Expected a Terminal-Bench verifier artifact")
+            for record in row["trajectory_records"]:
+                _extract_collection_tokens(record, turn_id=record["turn_id"])
+            judged_rows.append(apply_verifier_reward(row))
+        output = Path(output_path)
+        ensure_dir(output.parent)
+        output.write_text("".join(json.dumps(row) + "\n" for row in judged_rows))
+        return output
     examples = examples_by_query_id or _load_examples_by_query_id(config, split=split)
 
     judge = judge or build_judge(config)

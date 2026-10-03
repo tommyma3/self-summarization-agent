@@ -44,10 +44,14 @@ class UnsupportedTokenBoundary(ValueError):
 
 
 class QwenAgentTokenRenderer:
-    def __init__(self, tokenizer: Any, *, enable_thinking: bool, native_tools: bool = False) -> None:
+    def __init__(self, tokenizer: Any, *, enable_thinking: bool, native_tools: bool = False,
+                 scaffold_fingerprint: str | None = None, forced_control: str | None = None,
+                 summary_control: str | None = None) -> None:
         self.tokenizer = tokenizer
         self.enable_thinking = enable_thinking
         self.native_tools = native_tools
+        self.forced_control = forced_control or build_forced_answer_prompt()
+        self.summary_control = summary_control or build_summary_prompt()
         approved = load_chat_template(TEMPLATE_PATH)
         if tokenizer.chat_template != approved:
             raise ValueError("TITO requires the repository qwen3_5_agent.jinja template")
@@ -58,6 +62,8 @@ class QwenAgentTokenRenderer:
         tokenizer_spec = backend.to_str() if backend is not None else json.dumps(
             tokenizer.get_vocab(), sort_keys=True, ensure_ascii=False)
         identity = [TITO_CONTRACT, approved, tokenizer_spec, enable_thinking, native_tools]
+        if scaffold_fingerprint is not None:
+            identity.extend([scaffold_fingerprint, self.forced_control, self.summary_control])
         self.fingerprint = sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
 
     def _encode(self, text: str) -> tuple[int, ...]:
@@ -82,9 +88,9 @@ class QwenAgentTokenRenderer:
             raise ValueError(f"Unsupported generation kind: {generation_kind}")
         prefix = ""
         if generation_kind == "summary":
-            prefix = "<|im_start|>user\n" + build_summary_prompt().strip() + "<|im_end|>\n"
+            prefix = "<|im_start|>user\n" + self.summary_control.strip() + "<|im_end|>\n"
         elif generation_kind == "forced_answer":
-            prefix = "<|im_start|>system\n" + build_forced_answer_prompt().strip() + "<|im_end|>\n"
+            prefix = "<|im_start|>system\n" + self.forced_control.strip() + "<|im_end|>\n"
         return self._encode(prefix + "<|im_start|>assistant\n" + (
             "<think>\n" if self.enable_thinking else "<think>\n\n</think>\n\n"))
 

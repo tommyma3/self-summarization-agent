@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: self-summarization-agent
 Version: 0.1.0
-Summary: Self-summarization runtime for BrowseComp-Plus
+Summary: Token-preserving self-summarization runtime for research and terminal benchmarks
 Requires-Python: <3.13,>=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: datasets>=4.0.0
@@ -23,10 +23,14 @@ Requires-Dist: pytest>=9.0.3
 Requires-Dist: torchvision
 Requires-Dist: vllm>=0.19.1
 Requires-Dist: tensordict>=0.10
+Provides-Extra: terminal-bench
+Requires-Dist: harbor==0.1.44; extra == "terminal-bench"
 
 # Self-Summarization Agent
 
-This repo contains the first runtime slice for a self-summarization agent on `BrowseComp-Plus`.
+This repo trains a self-summarization agent on BrowseComp-Plus and supports Terminal-Bench 2.0 with a Terminus-KIRA scaffold that preserves token-in/token-out intervals.
+
+For the pinned Harbor setup, evaluation configs, local vision profile, and verifier-backed collection, see [Terminal-Bench usage](docs/terminal-bench.md). Use `uv sync --locked --extra terminal-bench` to install the optional benchmark dependencies.
 
 Current scope:
 - runtime loop with `search`, `get_document`, and `finish`
@@ -322,11 +326,27 @@ For the intended GPU run:
 
 ### Value for compaction experiment
 
+Compare the compact value MC run with the default GRPO run (requires `matplotlib`):
+
+```bash
+python scripts/plot_compact_value_mc_comparison.py
+```
+
+This reads `artifacts/train/{qwen-bcplus-train,qwen-bcplus-compact-value-mc}/eval_metrics.jsonl`
+and writes a PNG/SVG dashboard, standalone accuracy SVG, matched-checkpoint CSV,
+and text summary under `artifacts/train/compact_value_mc_comparison/`. The dashboard
+compares accuracy, accuracy differences, malformed-output rate, budget and generated
+tokens, correct answers per 1,000 budget tokens, summary frequency/size, and search
+usage. The summary reports latest, best, and last-five-checkpoint accuracy; these
+are descriptive comparisons of the two runs, not independent statistical trials.
+Missing optional metrics remain gaps. Use `--artifacts-dir`, `--default-run`,
+`--mc-run`, `--output-dir`, or `--last-n` to customize inputs and output.
+
 [`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
 
 Both value backends exploit causal prefix equivalence for the frozen `V_old` pass and evaluate only through the exact state anchor. The Transformers compatibility backend additionally uses Qwen's `logits_to_keep` path to materialize vocabulary logits only for the state anchor and trainable assistant-token positions. The distributed backend uses verl's packed remove-padding/Ulysses log-probability path. These changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing worker and loss path.
 
-The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved beside it as `compaction_value_head.safetensors` plus `compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: verl_fsdp`. A repository-owned verl actor adds the shared-backbone value loss while the four FSDP/Ulysses ranks keep the exported policy namespace unchanged. Frozen values are evaluated from exact causal prefixes, and alignment padding is explicitly zero-weighted instead of dropping intervals. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
+The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved in a `compaction_value/` sidecar subdirectory as `compaction_value/compaction_value_head.safetensors` plus `compaction_value/compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: verl_fsdp`. A repository-owned verl actor adds the shared-backbone value loss while the four FSDP/Ulysses ranks keep the exported policy namespace unchanged. Frozen values are evaluated from exact causal prefixes, and alignment padding is explicitly zero-weighted instead of dropping intervals. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
 
 To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 

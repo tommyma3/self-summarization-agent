@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -73,6 +74,9 @@ def check_interval(record: dict, interval_index: int, im_end_id: int | None) -> 
                 f"{gen_label}: prompt does not extend the previous generation's full sequence "
                 f"(append-only violation: history rewritten or re-rendered)"
             )
+        previous_full = gen_full
+        if full[:len(gen_full)] != gen_full:
+            problems.append(f"{gen_label}: generation is not an exact interval prefix")
         finish = generation.get("finish_reason")
         if completion:
             sampled_total += len(completion)
@@ -86,7 +90,7 @@ def check_interval(record: dict, interval_index: int, im_end_id: int | None) -> 
 
     if len(full) < len(generations[-1].get("full_token_ids") or []):
         problems.append(f"{label}: final full_token_ids shorter than last generation full")
-    if mask and len(mask) != len(full):
+    if len(mask) != len(full):
         problems.append(f"{label}: assistant mask length {len(mask)} != full length {len(full)}")
 
     # Span tiling: spans must cover [0, len(full)) exactly once in order.
@@ -134,25 +138,54 @@ def check_successor_prefix(records: list[dict], tokenizer) -> list[str]:
     problems: list[str] = []
     if len(records) < 2 or tokenizer is None:
         return problems
+    first = records[0].get("collection_tokens") or {}
+    spans = first.get("spans") or []
+    if not spans or spans[0].get("kind") != "initial_state":
+        return ["interval[0]: missing initial-state span"]
+    # The first interval contains the stable system/query, without a summary.
+    # Compare the entire committed initial prefix, not an arbitrary 64 tokens.
+    stable = first["full_token_ids"][:spans[0]["end"]]
+    stable_messages = records[0].get("messages", [])[:2]
     for index in range(1, len(records)):
-        prev = records[index - 1].get("collection_tokens") or {}
-        curr = records[index].get("collection_tokens") or {}
-        prev_gens = prev.get("generations") or []
-        curr_gens = curr.get("generations") or []
-        if not prev_gens or not curr_gens:
+        previous, current = records[index - 1], records[index]
+        tokens = current.get("collection_tokens") or {}
+        spans = tokens.get("spans") or []
+        if not spans or spans[0].get("kind") != "initial_state":
+            problems.append(f"interval[{index}]: missing initial-state span")
             continue
-        prev_full = prev_gens[0].get("prompt_token_ids") or []
-        curr_initial = curr_gens[0].get("prompt_token_ids") or []
-        stable = prev_full[:64]
-        if curr_initial[: len(stable)] != stable:
-            problems.append(
-                f"interval[{index}]: initial state does not share the predecessor's stable prefix"
-            )
-        decoded = tokenizer.decode(curr_initial, skip_special_tokens=False)
-        if "<summary>" not in decoded:
-            problems.append(f"interval[{index}]: successor initial state lacks <summary> wrapper")
-        if "tool_response" in decoded or "<tool_call>" in decoded:
-            problems.append(f"interval[{index}]: successor initial state retains raw tool tail")
+        initial = tokens["full_token_ids"][:spans[0]["end"]]
+        if initial[:len(stable)] != stable:
+            problems.append(f"interval[{index}]: initial state changed the stable token prefix")
+        prefix = []
+        for message in current.get("messages", []):
+            if message["role"] in {"assistant", "tool"}:
+                break
+            prefix.append(message)
+        # A forced-answer control may be appended immediately after a new
+        # interval is initialized. It is outside the initial_state token span.
+        controls = prefix[3:]
+        valid_controls = not controls or (
+            len(controls) == 1 and controls[0]["role"] == "system"
+            and controls[0]["content"].startswith("<forced_answer_request>")
+            and len(spans) > 1 and spans[1]["kind"] == "forced_answer_header")
+        if len(prefix) < 3 or prefix[:2] != stable_messages or prefix[2]["role"] != "user" or not valid_controls:
+            problems.append(f"interval[{index}]: successor must contain only stable system/query and wrapped summary")
+            continue
+        if current.get("tools") != records[0].get("tools"):
+            problems.append(f"interval[{index}]: tool definitions changed")
+        if previous.get("termination_kind") != "compaction":
+            problems.append(f"interval[{index}]: predecessor did not successfully compact")
+        generations = (previous.get("collection_tokens") or {}).get("generations") or []
+        raw = tokenizer.decode(generations[-1]["completion_token_ids"], skip_special_tokens=False) if generations else ""
+        body = raw.split("</think>", 1)[-1]
+        summary = re.search(r"<\s*summary\s*>(.*?)<\s*/\s*summary\s*>", body, re.S | re.I)
+        wrapped = "<summary>\n" + summary[1].strip() + "\n</summary>" if summary else None
+        if wrapped is None or prefix[2]["content"] != wrapped:
+            problems.append(f"interval[{index}]: successor does not contain the extracted predecessor summary")
+        expected_suffix = "<|im_start|>user\n" + prefix[2]["content"].strip() + "<|im_end|>\n"
+        suffix = tokenizer.decode(initial[len(stable):], skip_special_tokens=False)
+        if suffix != expected_suffix:
+            problems.append(f"interval[{index}]: successor initial state retains a tail or changes the summary")
     return problems
 
 

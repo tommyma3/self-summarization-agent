@@ -1,0 +1,45 @@
+experiment:
+  name: terminal-bench-kira-tito-smoke
+  seed: 0
+  output_root: outputs/terminal-bench
+benchmark:
+  name: terminal-bench
+  dataset: local-fixture
+  task_paths: [tests/fixtures/terminal_bench/write-file]
+  environment: docker
+  # Use local-vision and a separate local frozen checkpoint for image_read.
+  image_profile: text-only
+  task_names: []
+dataset: {}
+collection: {}
+retrieval: {}
+model:
+  model_path: /124090467/Qwen/Qwen3.5-9B
+  dtype: bfloat16
+  max_new_tokens: 4096
+  enable_thinking: true
+  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
+rollout:
+  backend: vllm_offline
+  gpu_ids: [0]
+  tensor_parallel_size: 1
+  max_model_len: 32768
+  max_concurrent_episodes: 1
+  require_exact_token_ids: true
+  overlap_judge: false
+evaluation:
+  samples_per_task: 1
+  temperature: 0.0
+  do_sample: false
+runtime:
+  context_threshold_tokens: 1
+  max_context_tokens: 32768
+  max_summary_tokens: 2048
+  tool_budget: 8
+  generated_token_budget: 100000
+  tool_execution_timeout_seconds: 600
+judge:
+  enabled: false
+training:
+  max_sequence_length: 32768
+  group_size: 2

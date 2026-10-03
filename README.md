@@ -1,6 +1,8 @@
 # Self-Summarization Agent
 
-This repo contains the first runtime slice for a self-summarization agent on `BrowseComp-Plus`.
+This repo trains a self-summarization agent on BrowseComp-Plus and supports Terminal-Bench 2.0 with a Terminus-KIRA scaffold that preserves token-in/token-out intervals.
+
+For the pinned Harbor setup, evaluation configs, local vision profile, and verifier-backed collection, see [Terminal-Bench usage](docs/terminal-bench.md). Use `uv sync --locked --extra terminal-bench` to install the optional benchmark dependencies.
 
 Current scope:
 - runtime loop with `search`, `get_document`, and `finish`

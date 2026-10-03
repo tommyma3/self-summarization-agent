@@ -1,0 +1,9 @@
+Terminus-KIRA is Copyright KRAFTON AI and Ludo Robotics, licensed under Apache-2.0.
+Source: https://github.com/krafton-ai/KIRA
+Revision: 652dacbf14d29ea93a83c496ee91e0e5ba286721
+
+tools.json preserves the upstream tool descriptions and schemas. system.txt
+adapts the upstream prompt, separating the stable instructions from the original
+user query and adding append-only compaction and single-tool-call instructions.
+Terminal execution and completion checks are adapted for the project runtime.
+The upstream LiteLLM history loop, truncation recovery, and summarizer are not used.

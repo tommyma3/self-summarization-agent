@@ -431,7 +431,7 @@ class OpenAICompatibleGenerator(TokenInputGenerator):
             thinking = r"[\s\S]*?</think>\s*" if self.enable_thinking else ""
             body = (r"<summary>[\s\S]+?</summary>" if request.generation_kind == "summary" else
                     r"<tool_call>\s*<function=finish>\s*<parameter=answer>[\s\S]+?</parameter>\s*</function>\s*</tool_call>")
-            extra["structured_outputs"] = {"regex": thinking + body + r"\s*"}
+            extra["structured_outputs"] = {"regex": request.response_regex or thinking + body + r"\s*"}
         payload = dict(model=self.api_model or self.model_path, prompt=list(request.prompt_token_ids),
                        max_tokens=request.max_new_tokens or self.max_new_tokens, temperature=self.temperature if self.do_sample else 0.0,
                        extra_body=extra)
@@ -662,10 +662,18 @@ class VLLMGenerator(TokenInputGenerator):
     def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
         if not requests:
             return []
+        constraints = []
+        for request in requests:
+            if request.response_regex:
+                from vllm.sampling_params import StructuredOutputsParams
+                constraints.append({"structured_outputs": StructuredOutputsParams(regex=request.response_regex)})
+            else:
+                constraints.append({})
         outputs = self.llm.generate(
             [{"prompt_token_ids": list(r.prompt_token_ids)} for r in requests],
             [self._sampling_params_cls(**{**self._sampling_kwargs(include_logprobs=True),
-                                         "max_tokens": r.max_new_tokens or self.max_new_tokens}) for r in requests],
+                                         **constraint,
+                                         "max_tokens": r.max_new_tokens or self.max_new_tokens}) for r, constraint in zip(requests, constraints)],
         )
         results = []
         if len(outputs) != len(requests):
@@ -821,7 +829,9 @@ class SGLangGenerator(TokenInputGenerator):
         if not requests:
             return []
         outputs = self.engine.generate(input_ids=[list(r.prompt_token_ids) for r in requests],
-                                       sampling_params=[{**self._sampling_params(), "max_new_tokens": r.max_new_tokens or self.max_new_tokens}
+                                       sampling_params=[{**self._sampling_params(),
+                                                         **({"regex": r.response_regex} if r.response_regex else {}),
+                                                         "max_new_tokens": r.max_new_tokens or self.max_new_tokens}
                                                         for r in requests], return_logprob=True)
         outputs = outputs if isinstance(outputs, list) else [outputs]
         if len(outputs) != len(requests):

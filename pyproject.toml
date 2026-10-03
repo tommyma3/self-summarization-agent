@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "self-summarization-agent"
 version = "0.1.0"
-description = "Self-summarization runtime for BrowseComp-Plus"
+description = "Token-preserving self-summarization runtime for research and terminal benchmarks"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -30,6 +30,9 @@ dependencies = [
   "tensordict>=0.10",
 ]
 
+[project.optional-dependencies]
+terminal-bench = ["harbor==0.1.44"]
+
 [tool.uv]
 environments = [
   "sys_platform == 'linux'",
@@ -45,7 +48,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-self_summarization_agent = ["chat_templates/*.jinja"]
+self_summarization_agent = ["chat_templates/*.jinja", "benchmarks/terminal_bench/resources/*"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

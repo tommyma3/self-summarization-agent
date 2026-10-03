@@ -538,6 +538,11 @@ def collect_rollouts(
     retrieval_worker_url: str | None = None,
     overlap_judge_client: Any | None = None,
 ) -> Path:
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+        from self_summarization_agent.benchmarks.terminal_bench.collection import collect_terminal_rollouts
+        return collect_terminal_rollouts(config, checkpoint_path=checkpoint_path,
+            output_path=output_path, generator=generator, resume=resume,
+            judged_output_path=judged_output_path, split=split, sample_seed=sample_seed)
     if judge_inline and judged_output_path is not None:
         raise ValueError("judge_inline and judged_output_path cannot be used together")
     checkpoint = Path(checkpoint_path).resolve()

@@ -12,6 +12,11 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
     identity = dict(contract=TITO_CONTRACT, template=load_chat_template(config.model.chat_template_path),
                     thinking=config.model.enable_thinking, backend=config.rollout.backend,
                     checkpoint=str(checkpoint), tokenizer_files={})
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+        from dataclasses import asdict
+        from self_summarization_agent.benchmarks.terminal_bench.dataset import benchmark_identity
+        identity["benchmark"] = benchmark_identity(config.benchmark)
+        identity["runtime"] = asdict(config.runtime)
     for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt", "added_tokens.json"):
         path = checkpoint / name
         if path.is_file():

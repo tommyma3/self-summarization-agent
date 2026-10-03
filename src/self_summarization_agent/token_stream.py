@@ -22,6 +22,7 @@ class TokenRequest:
     suffix: tuple[int, ...] = ()
     ledger_version: int = 0
     max_new_tokens: int | None = None
+    response_regex: str | None = None
 
 
 class IntervalTokenLedger:

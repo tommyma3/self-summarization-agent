@@ -346,6 +346,10 @@ def run_cache_step(
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+        from self_summarization_agent.collection_contract import validate_artifact_lineage
+        validate_artifact_lineage([Path(rollout_path), Path(output_path) if resume else None],
+                                  config=config, checkpoint=checkpoint)
     rows = _load_rollout_rows(rollout_path)
     for index, row in enumerate(rows, start=1):
         _validate_judged_row(row, index=index, expected_checkpoint_id=checkpoint_id)
