@@ -9,8 +9,8 @@ dataset:
   offset: 0
   limit:
   shuffle: true
-  train_limit: 780
-  eval_limit: 50
+  train_limit: 730
+  eval_limit: 100
 
 collection:
   train_task_count: 50
