@@ -9,6 +9,7 @@ from self_summarization_agent import verl_ray_trainer
 from self_summarization_agent.verl_ray_trainer import (
     VerlRayPolicyTrainer,
     _extract_compaction_value_rows,
+    _extract_worker_metrics,
     build_verl_actor_dataproto,
     build_verl_dataproto,
     build_verl_fsdp_worker_config,
@@ -284,3 +285,114 @@ def test_extract_compaction_value_rows_flattens_nested_per_state_outputs() -> No
     rows = _extract_compaction_value_rows({"compaction_values": values, "sample_indices": indices})
     assert [index for index, _ in rows] == [2, 0, 1]
     assert [value for _, value in rows] == pytest.approx([0.1, -0.2, 0.3])
+
+
+def test_extract_worker_metrics_reduces_verl_metric_payloads() -> None:
+    """Engine metrics arrive as all-gathered lists of Metric aggregators and scalars."""
+    verl_metric = pytest.importorskip("verl.utils.metric")
+    Metric = verl_metric.Metric
+
+    value_loss = Metric(aggregation="sum")
+    value_loss.append(0.5)
+    value_loss.append(0.7)
+    pg_loss_a = Metric(aggregation="mean", value=0.4)
+    pg_loss_b = Metric(aggregation="mean", value=0.6)
+    peak_memory = Metric(aggregation="max", value=12.0)
+
+    merged = _extract_worker_metrics(
+        [
+            {
+                "metrics": {
+                    "value/loss": [value_loss],
+                    "actor/pg_loss": [pg_loss_a],
+                    "loss": [0.3, 0.5],
+                    "perf/max_memory_allocated_gb": [peak_memory],
+                }
+            },
+            {"metrics": {"actor/pg_loss": [pg_loss_b], "loss": [0.1]}},
+            None,
+        ]
+    )
+
+    assert merged["value/loss"] == [pytest.approx(1.2)]
+    assert merged["actor/pg_loss"] == [pytest.approx(0.4), pytest.approx(0.6)]
+    assert merged["loss"] == [pytest.approx(0.4), pytest.approx(0.1)]
+    assert merged["perf/max_memory_allocated_gb"] == [pytest.approx(12.0)]
+
+
+def test_extract_worker_metrics_reads_tensordict_non_tensor_metrics() -> None:
+    """verl FSDP update_actor returns a TensorDict whose metrics entry is non-tensor data."""
+    verl_metric = pytest.importorskip("verl.utils.metric")
+    verl_td = pytest.importorskip("verl.utils.tensordict_utils")
+    Metric = verl_metric.Metric
+
+    value_loss = Metric(aggregation="sum")
+    value_loss.append(0.25)
+    value_loss.append(0.75)
+    output = verl_td.get_tensordict(
+        {},
+        non_tensor_dict={"metrics": {"value/loss": [value_loss], "actor/ppo_kl": [0.03]}},
+    )
+
+    merged = _extract_worker_metrics([output, None])
+
+    assert merged["value/loss"] == [pytest.approx(1.0)]
+    assert merged["actor/ppo_kl"] == [pytest.approx(0.03)]
+
+
+def test_verl_fsdp_value_step_reduces_worker_metric_payloads(monkeypatch, tmp_path: Path) -> None:
+    """The value step must surface reduced worker metrics instead of zeros."""
+    verl_metric = pytest.importorskip("verl.utils.metric")
+    patch_fake_dataproto(monkeypatch)
+    training_config = TrainingConfig(
+        backend="verl_ray",
+        advantage_estimator="compaction_mc_value",
+        value=CompactionValueConfig(enabled=True),
+        minibatch_size=4,
+    )
+    training_config.verl.worker_backend = "verl_fsdp"
+
+    value_loss = verl_metric.Metric(aggregation="sum")
+    value_loss.append(0.4)
+    pg_loss = verl_metric.Metric(aggregation="mean", value=0.2)
+
+    class FakeMetricWorkerGroup:
+        data_parallel_size = 1
+
+        def compute_compaction_values(self, batch):
+            return [0.25, -0.25]
+
+        def update_actor(self, batch):
+            # Mirror VerlFSDPWorkerGroup.update_actor: reduce the raw engine payload.
+            return _extract_worker_metrics(
+                {
+                    "metrics": {
+                        "loss": 0.6,
+                        "actor/pg_loss": [pg_loss],
+                        "value/loss": [value_loss],
+                    }
+                }
+            )
+
+    positive = sample("positive", 1.0, -0.5)
+    positive.rollout_id = "q1:0"
+    positive.state_prefix_length = 2
+    negative = sample("negative", -1.0, -0.25)
+    negative.rollout_id = "q1:1"
+    negative.state_prefix_length = 1
+    trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
+    trainer.model_config = ModelConfig(model_path=str(tmp_path))
+    trainer.training_config = training_config
+    trainer.checkpoint_id = "step-00001"
+    trainer._ray = None
+    trainer._actor = None
+    trainer._worker_group = FakeMetricWorkerGroup()
+    trainer._owns_ray = False
+    trainer._last_batch_meta = {}
+
+    metrics = trainer.step({"q1": [positive, negative]})
+
+    assert metrics.loss == pytest.approx(0.6)
+    assert metrics.extra_metrics["value/loss"] == pytest.approx(0.4)
+    assert metrics.extra_metrics["verl_fsdp/raw/value/loss"] == pytest.approx(0.4)
+    assert metrics.extra_metrics["verl_fsdp/raw/actor/pg_loss"] == pytest.approx(0.2)

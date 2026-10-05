@@ -701,6 +701,72 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
     }
 
 
+def _metric_reduction_types() -> tuple[Any, Any]:
+    try:
+        from verl.utils.metric import AggregationType, Metric
+    except ImportError:
+        return None, None
+    return Metric, AggregationType
+
+
+def _reduce_worker_metric(key: str, value: Any, metric_type: Any, aggregation_type: Any) -> float:
+    """Reduce one all-gathered verl engine metric entry to a scalar float.
+
+    Engine metrics arrive as lists whose entries are ``Metric`` aggregators
+    (micro-batch accumulation inside the worker) and/or plain scalars
+    (``loss``, ``grad_norm``, ``lr``, ``perf/*``). ``Metric`` entries keep
+    their aggregation: SUM/MEAN entries are averaged across the gathered
+    list (matching verl dp aggregation, where each rank reports an
+    equal-share partial), MIN/MAX entries collapse to the extreme.
+    """
+    metrics: list[Any] = []
+    scalars: list[float] = []
+    stack = list(value) if isinstance(value, (list, tuple)) else [value]
+    while stack:
+        item = stack.pop()
+        if metric_type is not None and isinstance(item, metric_type):
+            metrics.append(item)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+        else:
+            scalars.append(_coerce_scalar(item))
+    entries = [float(metric.aggregate()) for metric in metrics] + scalars
+    if not entries:
+        return 0.0
+    if metrics and aggregation_type is not None:
+        aggregation = metrics[0].aggregation
+        if aggregation == aggregation_type.MIN:
+            return float(min(entries))
+        if aggregation == aggregation_type.MAX:
+            return float(max(entries))
+    elif not metrics:
+        if "max" in key:
+            return float(max(entries))
+        if "min" in key:
+            return float(min(entries))
+    return float(sum(entries) / len(entries))
+
+
+def _raw_worker_metrics(worker_output: Any) -> Any:
+    """Return the unreduced engine metrics mapping carried by a worker payload."""
+    try:
+        from tensordict import TensorDictBase
+    except ImportError:
+        TensorDictBase = None
+    if TensorDictBase is not None and isinstance(worker_output, TensorDictBase):
+        from verl.utils import tensordict_utils as verl_tensordict_utils
+
+        return verl_tensordict_utils.get(worker_output, "metrics")
+    if isinstance(worker_output, dict):
+        return dict(worker_output.get("metrics", worker_output))
+    if hasattr(worker_output, "meta_info") and isinstance(worker_output.meta_info, dict):
+        return dict(worker_output.meta_info.get("metrics", worker_output.meta_info))
+    try:
+        return worker_output.get("metrics")
+    except Exception:
+        return None
+
+
 def _extract_worker_metrics(worker_output: Any) -> dict[str, Any]:
     if worker_output is None:
         return {}
@@ -710,17 +776,17 @@ def _extract_worker_metrics(worker_output: Any) -> dict[str, Any]:
             for key, value in _extract_worker_metrics(item).items():
                 merged.setdefault(key, []).append(value)
         return merged
-    if isinstance(worker_output, dict):
-        return dict(worker_output.get("metrics", worker_output))
-    if hasattr(worker_output, "meta_info") and isinstance(worker_output.meta_info, dict):
-        return dict(worker_output.meta_info.get("metrics", worker_output.meta_info))
-    try:
-        metrics = worker_output.get("metrics")
-    except Exception:
-        metrics = None
-    if metrics is not None:
-        return dict(metrics)
-    return {}
+    raw = _raw_worker_metrics(worker_output)
+    if raw is None:
+        return {}
+    if isinstance(raw, list):
+        # Collected dispatch may stack one metrics mapping per contributing rank.
+        return _extract_worker_metrics(raw)
+    metric_type, aggregation_type = _metric_reduction_types()
+    return {
+        key: _reduce_worker_metric(key, value, metric_type, aggregation_type)
+        for key, value in raw.items()
+    }
 
 
 def _extract_compaction_value_rows(worker_output: Any) -> list[tuple[int, float]]:
