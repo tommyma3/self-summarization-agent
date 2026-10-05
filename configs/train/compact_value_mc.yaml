@@ -25,7 +25,7 @@ retrieval:
   persistent_worker: true
   worker_startup_timeout_seconds: 600
   # Keep the embedding model and sharded FAISS index off policy GPUs 2-3.
-  gpu_ids: [0, 1]
+  gpu_ids: [0]
   # Chunk batched searches so the embedding model never receives all
   # max_concurrent_episodes queries in a single forward pass.
   search_max_batch_size: 25
@@ -62,7 +62,7 @@ rollout:
   enable_prefix_caching: true
   max_concurrent_episodes: 25
   # Deprecated compatibility fields; merged_collect is strictly sequential.
-  overlap_judge: false
+  overlap_judge: true
   overlap_queue_max_batches: 8
   max_new_tokens: 8192
   temperature: 0.7
@@ -101,8 +101,9 @@ judge:
   enabled: true
   backend: vllm_offline
   model_path: /124090467/Qwen/Qwen3.5-35B-A3B
-  gpu_ids: [0, 1, 2, 3]
-  tensor_parallel_size: 4
+  gpu_ids: [0, 1]
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.85
   attention_backend:
   max_model_len: 12000
   max_new_tokens: 8192

@@ -10,6 +10,16 @@ The retrieval worker is owned by the collection phase.  It and every policy
 worker must exit before the judge worker is allowed to start.  Process exit,
 rather than best-effort object deletion, is the authoritative vLLM teardown
 boundary.
+
+When ``rollout.overlap_judge`` is enabled (and judging is required), the judge
+worker starts *before* collection instead, and completed raw rows stream to it
+through a queue as collection proceeds.  The post-collection judge phase then
+only catches rows the stream missed (for example after a mid-stream judge
+failure, which falls back to a fresh sequential judge worker).  Overlap mode
+relaxes the "judge starts after policy teardown" boundary and therefore
+requires the judge and policy engines to fit in GPU memory simultaneously:
+disjoint ``judge.gpu_ids`` / ``rollout.gpu_ids`` or reduced
+``gpu_memory_utilization``.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from pathlib import Path
 from queue import Empty, Full
 import signal
 import sys
+import threading
 import time
 import traceback
 from typing import Any
@@ -385,6 +396,133 @@ class _CacheOverlapClient:
 
 
 # ---------------------------------------------------------------------------
+# Overlap judge feed (streamed raw rows judged during collection)
+# ---------------------------------------------------------------------------
+
+_FEED_SENTINEL = "__overlap_feed_shutdown__"
+
+
+def _take_chunk_rows(
+    rows: list[dict[str, Any]],
+    pending_chunks: list[tuple[str, int]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Route drained judge rows back to their split using submission order.
+
+    The judge worker answers every submitted message in order, and each
+    ``drain_available``/``finish`` returns whole responses in that same order,
+    so rows can be sliced deterministically by the recorded per-submit counts.
+    """
+
+    distributed: list[tuple[str, list[dict[str, Any]]]] = []
+    offset = 0
+    while offset < len(rows) and pending_chunks:
+        split, count = pending_chunks[0]
+        if offset + count > len(rows):
+            raise RuntimeError(
+                "Overlap judge returned a partial response for a submitted batch "
+                f"({len(rows) - offset} of {count} rows)"
+            )
+        distributed.append((split, rows[offset : offset + count]))
+        pending_chunks.pop(0)
+        offset += count
+    if offset != len(rows):
+        raise RuntimeError(
+            "Overlap judge returned rows without a matching submission record"
+        )
+    return distributed
+
+
+def _overlap_judge_feeder(
+    *,
+    feed_queue: Any,
+    judge_client: Any,
+    judged_output_paths: dict[str, Path],
+    examples_by_query_id: dict[str, Any],
+    batch_size: int,
+    stats: dict[str, Any],
+) -> None:
+    """Consume streamed raw rows from collection children and judge them.
+
+    Runs in a daemon thread of the merged-collect parent.  ``stats`` receives
+    ``fed_rows``/``judged_rows`` counts and, on any failure, a ``failure``
+    entry; after a failure the feeder keeps draining the queue so collection
+    children never block on a full queue, and the parent re-judges the missed
+    rows with a fresh post-collection judge worker.  The feeder never raises:
+    any unexpected error is reported through ``stats`` instead, so a stalled
+    feeder cannot deadlock the children feeding it.
+    """
+
+    stats.setdefault("fed_rows", 0)
+    stats.setdefault("judged_rows", 0)
+    stats.setdefault("failure", None)
+    saw_sentinel = False
+    batch_size = max(1, batch_size)
+    buffers: dict[str, list[tuple[dict[str, Any], Any]]] = {
+        split: [] for split in judged_output_paths
+    }
+    pending_chunks: list[tuple[str, int]] = []
+
+    def flush_split(split: str) -> None:
+        buffer = buffers[split]
+        if not buffer:
+            return
+        chunk, rest = buffer[:batch_size], buffer[batch_size:]
+        buffers[split] = rest
+        rows = [row for row, _example in chunk]
+        examples = [example for _row, example in chunk]
+        judge_client.submit(rows, examples)
+        pending_chunks.append((split, len(rows)))
+        drained = judge_client.drain_available()
+        if drained:
+            for chunk_split, chunk_rows in _take_chunk_rows(drained, pending_chunks):
+                for judged_row in chunk_rows:
+                    append_jsonl(judged_output_paths[chunk_split], judged_row)
+                stats["judged_rows"] += len(chunk_rows)
+
+    try:
+        while True:
+            item = feed_queue.get()
+            if item == _FEED_SENTINEL:
+                saw_sentinel = True
+                break
+            split, row = item
+            if split not in buffers:
+                continue
+            example = examples_by_query_id.get(str(row.get("query_id")))
+            if example is None:
+                raise ValueError(
+                    f"Overlap feed row references unknown query_id: {row.get('query_id')!r}"
+                )
+            buffers[split].append((row, example))
+            stats["fed_rows"] += 1
+            if len(buffers[split]) >= batch_size:
+                flush_split(split)
+
+        # Flush stragglers, then reap any rows still in flight.
+        for split in list(buffers):
+            while buffers[split]:
+                flush_split(split)
+        finished = judge_client.finish()
+        if finished:
+            for chunk_split, chunk_rows in _take_chunk_rows(finished, pending_chunks):
+                for judged_row in chunk_rows:
+                    append_jsonl(judged_output_paths[chunk_split], judged_row)
+                stats["judged_rows"] += len(chunk_rows)
+    except Exception as exc:  # judged rows stay unwritten; the
+        stats["failure"] = exc  # post-collection phase re-judges them
+
+    if stats["failure"] is not None and not saw_sentinel:
+        # The failure happened mid-stream: keep consuming so collection
+        # children never block on a full queue, until the parent's shutdown
+        # sentinel arrives.  After the sentinel the queue is already empty —
+        # the parent only sends it once every collection child has exited.
+        while True:
+            item = feed_queue.get()
+            if item == _FEED_SENTINEL:
+                break
+
+
+# ---------------------------------------------------------------------------
 # Per-split collection helper
 # ---------------------------------------------------------------------------
 
@@ -403,6 +541,7 @@ def _collect_split(
     group_size: int,
     sample_seed: int | None,
     resume: bool,
+    row_feed_queue: Any | None = None,
 ) -> None:
     """Collect one split without constructing or contacting a judge model."""
 
@@ -491,6 +630,8 @@ def _collect_split(
                         **_critic_only_cache_kwargs(config),
                     )
                 append_jsonl(raw_output_path, row)
+                if row_feed_queue is not None:
+                    row_feed_queue.put((split, row))
                 generated_row_count += 1
 
     print(
@@ -519,6 +660,7 @@ def _run_split_collection_worker(
     sample_seed: int | None,
     resume: bool,
     retrieval_worker_url: str | None,
+    row_feed_queue: Any | None = None,
 ) -> None:
     """Child entrypoint that owns one split's policy engine and CUDA state."""
 
@@ -576,6 +718,7 @@ def _run_split_collection_worker(
             group_size=group_size,
             sample_seed=sample_seed,
             resume=resume,
+            row_feed_queue=row_feed_queue,
         )
     except BaseException:
         # multiprocessing's _bootstrap runs util._exit_function() — which joins
@@ -610,6 +753,7 @@ def _run_split_collection_process(
     resume: bool,
     retrieval_worker_url: str | None,
     per_split_timeout_seconds: float | None = None,
+    row_feed_queue: Any | None = None,
 ) -> None:
     """Run and join a policy child; successful return is the teardown barrier."""
 
@@ -625,6 +769,7 @@ def _run_split_collection_process(
             "sample_seed": sample_seed,
             "resume": resume,
             "retrieval_worker_url": retrieval_worker_url,
+            "row_feed_queue": row_feed_queue,
         },
     )
     process.start()
@@ -758,6 +903,34 @@ def _judge_split(
         )
         append_judged(judge_client.drain_available())
     append_judged(judge_client.finish())
+
+
+def _warn_if_judge_shares_gpus(config) -> None:
+    """Warn when overlap mode co-locates the judge engine with other engines."""
+
+    judge_devices = set(getattr(config.judge, "gpu_ids", ()) or ())
+    rollout_devices = set(getattr(config.rollout, "gpu_ids", ()) or ())
+    retrieval_devices = set(getattr(config.retrieval, "gpu_ids", ()) or ())
+    shared: list[str] = []
+    # An empty gpu_ids list means "all visible devices", which always overlaps.
+    if not judge_devices or not rollout_devices:
+        shared.append("policy")
+    else:
+        shared.extend(f"policy GPU {device}" for device in sorted(judge_devices & rollout_devices))
+    if not judge_devices or not retrieval_devices:
+        shared.append("retrieval")
+    else:
+        shared.extend(
+            f"retrieval GPU {device}" for device in sorted(judge_devices & retrieval_devices)
+        )
+    if shared:
+        print(
+            "[merged_collect] WARNING: overlap judging requires the judge engine to share "
+            f"device memory with {', '.join(shared)}. Both engines must fit simultaneously; "
+            "assign disjoint judge.gpu_ids/rollout.gpu_ids or lower "
+            "gpu_memory_utilization, or an engine may fail to start.",
+            flush=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -921,61 +1094,180 @@ def run_merged_collect(
     # Phase 1: policy collection. Retrieval is scoped to this phase only.
     # ------------------------------------------------------------------
     needs_collection = eval_raw_needed or train_raw_needed
+
+    # Optional overlap: when rollout.overlap_judge is enabled and judging is
+    # required, the judge worker starts *before* collection and streamed raw
+    # rows are judged as they complete.  Rows the stream misses (feed failure,
+    # splits whose raw artifact already existed) are judged by the normal
+    # post-collection phase below, so judged output is identical either way.
+    overlap_feed_splits: set[str] = set()
+    overlap_judge_client: Any | None = None
+    overlap_feed_queue: Any | None = None
+    overlap_feed_thread: threading.Thread | None = None
+    overlap_feed_stats: dict[str, Any] = {}
+    overlap_requested = bool(getattr(config.rollout, "overlap_judge", False))
+    overlap_eligible = bool(
+        overlap_requested
+        and (eval_judge_needed or train_judge_needed)
+        and needs_collection
+    )
+    feed_paths: dict[str, Path] = {}
+    if overlap_eligible:
+        if not config.judge.enabled:
+            raise ValueError("judge.enabled must be true for merged overlap judging")
+        if (
+            eval_judge_needed
+            and has_eval
+            and eval_judged_output is not None
+            and eval_raw_needed
+        ):
+            feed_paths["eval"] = Path(eval_judged_output)
+        if train_judge_needed and train_judged_output is not None and train_raw_needed:
+            feed_paths["train"] = Path(train_judged_output)
+        overlap_eligible = bool(feed_paths)
+
+    # The retrieval worker claims its device memory first.  This matters in
+    # overlap mode, where the judge engine initializes while the retrieval
+    # worker is still resident: vLLM sizes its GPU budget from the memory
+    # actually free at init, so retrieval must be resident *before* the judge
+    # engine profiles the shared device (otherwise the judge's default
+    # utilization starves the retrieval worker at startup).
     owned_retrieval_process = None
     active_retrieval_url = retrieval_worker_url
     per_split_timeout = getattr(config.rollout, "per_split_collection_timeout_seconds", None)
+    if (
+        needs_collection
+        and config.retrieval.persistent_worker
+        and active_retrieval_url is None
+    ):
+        print("[merged_collect] Starting collection-scoped retrieval worker...", flush=True)
+        owned_retrieval_process, active_retrieval_url = _start_retrieval_worker(
+            config_path=config_path,
+            train_dir=ensure_dir(Path(train_raw_output).parent),
+            python_executable=sys.executable,
+            overrides=overrides,
+            startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
+            gpu_ids=getattr(config.retrieval, "gpu_ids", ()),
+        )
+
+    if overlap_eligible:
+        _warn_if_judge_shares_gpus(config)
+        try:
+            overlap_judge_client = _build_overlap_judge_client(
+                judge=None,
+                config_path=str(config_path),
+                overrides=overrides,
+                checkpoint_id=checkpoint_id,
+                queue_max_batches=getattr(config.rollout, "overlap_queue_max_batches", 8),
+            )
+        except Exception as exc:
+            print(
+                "[merged_collect] Overlap judge worker failed to start "
+                f"({exc!r}); falling back to post-collection judging.",
+                flush=True,
+            )
+            overlap_judge_client = None
+        if overlap_judge_client is not None:
+            overlap_feed_splits = set(feed_paths)
+            for path in feed_paths.values():
+                ensure_dir(path.parent)
+                if not resume:
+                    # The feeder owns these files during collection; the
+                    # post-collection phase resumes from whatever it wrote.
+                    path.unlink(missing_ok=True)
+            overlap_feed_queue = mp.get_context("spawn").Queue()
+            feed_examples = {
+                example.query_id: example
+                for example in (*train_examples_all, *eval_examples_all)
+            }
+            overlap_feed_thread = threading.Thread(
+                target=_overlap_judge_feeder,
+                kwargs={
+                    "feed_queue": overlap_feed_queue,
+                    "judge_client": overlap_judge_client,
+                    "judged_output_paths": feed_paths,
+                    "examples_by_query_id": feed_examples,
+                    "batch_size": getattr(config.judge, "batch_size", 32),
+                    "stats": overlap_feed_stats,
+                },
+                daemon=True,
+                name="overlap-judge-feeder",
+            )
+            overlap_feed_thread.start()
+            print(
+                "[merged_collect] Overlap judging enabled; judge worker starts before "
+                "collection and streamed raw rows are judged as they complete.",
+                flush=True,
+            )
+
     if needs_collection:
         try:
-            if config.retrieval.persistent_worker and active_retrieval_url is None:
-                print("[merged_collect] Starting collection-scoped retrieval worker...", flush=True)
-                owned_retrieval_process, active_retrieval_url = _start_retrieval_worker(
-                    config_path=config_path,
-                    train_dir=ensure_dir(Path(train_raw_output).parent),
-                    python_executable=sys.executable,
-                    overrides=overrides,
-                    startup_timeout_seconds=config.retrieval.worker_startup_timeout_seconds,
-                    gpu_ids=getattr(config.retrieval, "gpu_ids", ()),
-                )
-
-            if eval_raw_needed and has_eval:
-                print("[merged_collect] Starting isolated eval policy collection...", flush=True)
-                _run_split_collection_process(
-                    config_path=config_path,
-                    overrides=overrides,
-                    checkpoint_path=checkpoint,
-                    split="eval",
-                    raw_output_path=Path(eval_raw_output),
-                    sample_seed=None,
-                    resume=resume,
-                    retrieval_worker_url=active_retrieval_url,
-                    per_split_timeout_seconds=per_split_timeout,
-                )
-                if owned_retrieval_process is not None:
-                    _require_live_retrieval_worker(
-                        owned_retrieval_process,
-                        after_split="eval",
+            try:
+                if eval_raw_needed and has_eval:
+                    print("[merged_collect] Starting isolated eval policy collection...", flush=True)
+                    _run_split_collection_process(
+                        config_path=config_path,
+                        overrides=overrides,
+                        checkpoint_path=checkpoint,
+                        split="eval",
+                        raw_output_path=Path(eval_raw_output),
+                        sample_seed=None,
+                        resume=resume,
+                        retrieval_worker_url=active_retrieval_url,
+                        per_split_timeout_seconds=per_split_timeout,
+                        row_feed_queue=(
+                            overlap_feed_queue if "eval" in overlap_feed_splits else None
+                        ),
                     )
-                outputs["eval_raw"] = Path(eval_raw_output)
+                    if owned_retrieval_process is not None:
+                        _require_live_retrieval_worker(
+                            owned_retrieval_process,
+                            after_split="eval",
+                        )
+                    outputs["eval_raw"] = Path(eval_raw_output)
 
-            if train_raw_needed:
-                print("[merged_collect] Starting isolated train policy collection...", flush=True)
-                _run_split_collection_process(
-                    config_path=config_path,
-                    overrides=overrides,
-                    checkpoint_path=checkpoint,
-                    split="train",
-                    raw_output_path=Path(train_raw_output),
-                    sample_seed=sample_seed,
-                    resume=resume,
-                    retrieval_worker_url=active_retrieval_url,
-                    per_split_timeout_seconds=per_split_timeout,
-                )
-                if owned_retrieval_process is not None:
-                    _require_live_retrieval_worker(
-                        owned_retrieval_process,
-                        after_split="train",
+                if train_raw_needed:
+                    print("[merged_collect] Starting isolated train policy collection...", flush=True)
+                    _run_split_collection_process(
+                        config_path=config_path,
+                        overrides=overrides,
+                        checkpoint_path=checkpoint,
+                        split="train",
+                        raw_output_path=Path(train_raw_output),
+                        sample_seed=sample_seed,
+                        resume=resume,
+                        retrieval_worker_url=active_retrieval_url,
+                        per_split_timeout_seconds=per_split_timeout,
+                        row_feed_queue=(
+                            overlap_feed_queue if "train" in overlap_feed_splits else None
+                        ),
                     )
-                outputs["train_raw"] = Path(train_raw_output)
+                    if owned_retrieval_process is not None:
+                        _require_live_retrieval_worker(
+                            owned_retrieval_process,
+                            after_split="train",
+                        )
+                    outputs["train_raw"] = Path(train_raw_output)
+            finally:
+                # Stop the feed before the GPU teardown checks so the judge
+                # client is only kept alive when collection completed cleanly.
+                if overlap_feed_queue is not None:
+                    overlap_feed_queue.put(_FEED_SENTINEL)
+                if overlap_feed_thread is not None:
+                    overlap_feed_thread.join()
+                feed_failure = overlap_feed_stats.get("failure")
+                if feed_failure is not None or sys.exc_info()[0] is not None:
+                    if overlap_judge_client is not None:
+                        if feed_failure is not None:
+                            print(
+                                "[merged_collect] Overlap judge feed failed "
+                                f"({feed_failure!r}); a fresh post-collection judge will "
+                                "re-judge the missed rows.",
+                                flush=True,
+                            )
+                        overlap_judge_client.close()
+                        overlap_judge_client = None
+                        overlap_feed_splits = set()
         finally:
             if owned_retrieval_process is not None:
                 print("[merged_collect] Stopping collection-scoped retrieval worker...", flush=True)
@@ -1001,19 +1293,25 @@ def run_merged_collect(
         raise RuntimeError("Train raw rollout artifact is incomplete after policy collection")
 
     # ------------------------------------------------------------------
-    # Phase 2: one fresh judge process handles both complete raw artifacts.
+    # Phase 2: judge any rows the collection stream missed.  Reuses the
+    # still-healthy overlap judge worker when there is one; otherwise starts
+    # one fresh judge process for both complete raw artifacts.
     # ------------------------------------------------------------------
     if eval_judge_needed or train_judge_needed:
         if not config.judge.enabled:
             raise ValueError("judge.enabled must be true for merged collection")
-        print("[merged_collect] Starting post-collection judge...", flush=True)
-        judge_client = _build_overlap_judge_client(
-            judge=None,
-            config_path=str(config_path),
-            overrides=overrides,
-            checkpoint_id=checkpoint_id,
-            queue_max_batches=config.rollout.overlap_queue_max_batches,
-        )
+        if overlap_judge_client is not None:
+            print("[merged_collect] Reusing overlap judge for remaining rows...", flush=True)
+            judge_client = overlap_judge_client
+        else:
+            print("[merged_collect] Starting post-collection judge...", flush=True)
+            judge_client = _build_overlap_judge_client(
+                judge=None,
+                config_path=str(config_path),
+                overrides=overrides,
+                checkpoint_id=checkpoint_id,
+                queue_max_batches=config.rollout.overlap_queue_max_batches,
+            )
         try:
             if eval_judge_needed and has_eval and eval_judged_output is not None:
                 _judge_split(
@@ -1027,7 +1325,7 @@ def run_merged_collect(
                     group_size=config.evaluation.samples_per_task,
                     sample_seed=None,
                     profile_id=eval_profile_id,
-                    resume=resume,
+                    resume=resume or "eval" in overlap_feed_splits,
                 )
                 outputs["eval_judged"] = Path(eval_judged_output)
             if train_judge_needed and train_judged_output is not None:
@@ -1045,14 +1343,21 @@ def run_merged_collect(
                     group_size=config.training.group_size,
                     sample_seed=sample_seed,
                     profile_id=train_profile_id,
-                    resume=resume,
+                    resume=resume or "train" in overlap_feed_splits,
                 )
                 outputs["train_judged"] = Path(train_judged_output)
         finally:
+            judge_metrics = judge_client.metrics()
+            if overlap_requested:
+                judge_metrics["overlap_feed"] = {
+                    "fed_rows": overlap_feed_stats.get("fed_rows", 0),
+                    "judged_rows": overlap_feed_stats.get("judged_rows", 0),
+                    "failed": overlap_feed_stats.get("failure") is not None,
+                }
             print(
                 "[merged_collect] "
                 + json.dumps(
-                    {"event": "post_collection_judge_metrics", **judge_client.metrics()},
+                    {"event": "post_collection_judge_metrics", **judge_metrics},
                     sort_keys=True,
                 ),
                 flush=True,

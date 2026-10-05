@@ -842,9 +842,11 @@ def run_training_iteration(
     if training_already_advanced:
         return current.path
 
-    # The primary merged path always judges after collection teardown.  The
-    # legacy overlap_judge setting remains parseable but no longer controls the
-    # lifecycle.
+    # The merged path judges after collection teardown by default.  When
+    # rollout.overlap_judge is enabled (and judge.enabled is true), the merged
+    # step instead starts the judge worker before collection and streams raw
+    # rows to it as they complete; the post-collection judge phase then only
+    # catches rows the stream missed.
     use_merged_judge = config.judge.enabled
 
     # ------------------------------------------------------------------

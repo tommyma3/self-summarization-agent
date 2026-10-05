@@ -79,6 +79,9 @@ def build_judge(config) -> RewardJudge:
         max_model_len=config.judge.max_model_len
         if config.judge.max_model_len is not None
         else config.model.max_model_len,
+        gpu_memory_utilization=config.judge.gpu_memory_utilization
+        if config.judge.gpu_memory_utilization is not None
+        else config.model.gpu_memory_utilization,
     )
     return RewardJudge(build_generator(judge_model_config, judge_config=config.judge))
 

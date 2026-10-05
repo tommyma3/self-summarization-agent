@@ -125,9 +125,12 @@ class RolloutConfig:
     max_model_len: int | None = None
     enable_prefix_caching: bool = True
     max_concurrent_episodes: int = 32
-    # Compatibility switch for standalone rollout_collection. The primary
-    # merged collection path is always sequential and ignores this value.
-    overlap_judge: bool = True
+    # Judge completed raw rows concurrently with policy collection. Both the
+    # standalone collector and the merged path honor this; merged overlap
+    # requires the judge and policy engines to coexist in GPU memory
+    # (disjoint judge/rollout gpu_ids or reduced gpu_memory_utilization).
+    # Off by default so a missing key never changes GPU scheduling.
+    overlap_judge: bool = False
     overlap_queue_max_batches: int = 8
     max_new_tokens: int | None = None
     temperature: float | None = None
@@ -190,6 +193,11 @@ class JudgeConfig:
     tensor_parallel_size: int | None = None
     attention_backend: str | None = None
     max_model_len: int | None = None
+    # vLLM gpu_memory_utilization for the judge engine only.  None inherits
+    # model.gpu_memory_utilization.  Set this below model's value when the
+    # judge shares a device with the retrieval worker (overlap judging), so
+    # vLLM sizes its KV budget around the retrieval footprint at init.
+    gpu_memory_utilization: float | None = None
     max_new_tokens: int = 256
     temperature: float = 0.0
     top_p: float = 1.0

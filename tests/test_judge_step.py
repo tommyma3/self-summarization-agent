@@ -131,6 +131,43 @@ def test_create_judge_prompt_is_minimal() -> None:
     assert "extracted_final_answer:" not in prompt
 
 
+def test_build_judge_forwards_judge_gpu_memory_utilization(monkeypatch, tmp_path: Path) -> None:
+    from self_summarization_agent import judge_step
+
+    config = train_config(tmp_path)
+    config.model.gpu_memory_utilization = 0.7
+    config.judge.gpu_memory_utilization = 0.55
+    captured: dict = {}
+    monkeypatch.setattr(
+        judge_step,
+        "build_generator",
+        lambda model_config, judge_config=None: captured.update(model_config=model_config) or object(),
+    )
+    monkeypatch.setattr(judge_step, "RewardJudge", lambda generator: generator)
+
+    judge_step.build_judge(config)
+
+    assert captured["model_config"].gpu_memory_utilization == 0.55
+
+
+def test_build_judge_inherits_model_gpu_memory_utilization(monkeypatch, tmp_path: Path) -> None:
+    from self_summarization_agent import judge_step
+
+    config = train_config(tmp_path)
+    config.model.gpu_memory_utilization = 0.7
+    captured: dict = {}
+    monkeypatch.setattr(
+        judge_step,
+        "build_generator",
+        lambda model_config, judge_config=None: captured.update(model_config=model_config) or object(),
+    )
+    monkeypatch.setattr(judge_step, "RewardJudge", lambda generator: generator)
+
+    judge_step.build_judge(config)
+
+    assert captured["model_config"].gpu_memory_utilization == 0.7
+
+
 def train_config(tmp_path: Path) -> TrainConfig:
     return TrainConfig(
         experiment=ExperimentConfig(name="demo", seed=1, output_root=str(tmp_path), bc_plus_root=str(tmp_path)),
