@@ -1,5 +1,11 @@
-from self_summarization_agent.models import EpisodeState
+import io
+import pickle
+
+from multiprocessing.reduction import ForkingPickler
+
+from self_summarization_agent.models import EpisodeState, Message, ToolCall
 from self_summarization_agent.prompts import (
+    ConversationPrompt,
     build_compacted_messages,
     build_forced_answer_system_prompt,
     build_initial_messages,
@@ -85,3 +91,40 @@ def test_episode_state_starts_with_empty_summary() -> None:
     state = EpisodeState(query_id="q1", user_prompt="question", context_threshold_tokens=1024)
     assert state.latest_summary is None
     assert state.summary_count == 0
+
+
+def test_conversation_prompt_survives_pickle_round_trip() -> None:
+    tools = [{"type": "function", "function": {"name": "finish"}}]
+    prompt = ConversationPrompt(
+        [
+            Message(role="system", content="sys"),
+            Message(
+                role="assistant",
+                content="hi",
+                reasoning_content="think!",
+                tool_calls=[ToolCall(id="call_1", name="finish", arguments={"answer": "42"})],
+            ),
+            Message(role="tool", content="result", tool_call_id="call_1"),
+        ],
+        tools=tools,
+        tool_choice={"type": "function"},
+        parallel_tool_calls=True,
+        generation_kind="summary",
+    )
+
+    payloads = [pickle.dumps(prompt, protocol=proto) for proto in (2, 4, 5)]
+    buffer = io.BytesIO()
+    ForkingPickler(buffer).dump(prompt)
+    payloads.append(buffer.getvalue())
+
+    for payload in payloads:
+        restored = pickle.loads(payload)
+        assert isinstance(restored, ConversationPrompt)
+        assert str(restored) == str(prompt)
+        assert restored.generation_kind == "summary"
+        assert restored.parallel_tool_calls is True
+        assert restored.tool_choice == prompt.tool_choice
+        assert list(restored.tools) == list(prompt.tools)
+        assert len(restored.messages) == 3
+        assert restored.messages[1].tool_calls[0].id == "call_1"
+        assert restored.messages is not prompt.messages

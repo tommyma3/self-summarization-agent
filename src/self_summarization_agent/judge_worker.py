@@ -31,8 +31,19 @@ def run_judge_worker(
     request_queue: Queue,
     response_queue: Queue,
 ) -> None:
-    config = load_train_config(config_path, parse_cli_overrides(overrides))
-    judge = build_judge(config)
+    try:
+        config = load_train_config(config_path, parse_cli_overrides(overrides))
+        judge = build_judge(config)
+    except BaseException:
+        # Startup failures (e.g. judge engine OOM) must reach the parent
+        # immediately; without a signal it blocks on the ready queue until its
+        # full startup timeout even though this process is already dead.
+        response_queue.put(
+            {"error": "judge startup failed", "traceback": traceback.format_exc()}
+        )
+        # Flush the feeder thread so the diagnostic survives process teardown.
+        response_queue.join_thread()
+        raise
     batch_size = max(1, config.judge.batch_size)
     batch_wait_seconds = max(0, config.judge.batch_wait_ms) / 1000.0
     batch_timeout = max(0.0, config.judge.batch_timeout_seconds)

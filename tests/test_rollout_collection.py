@@ -1,7 +1,10 @@
 import json
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 from self_summarization_agent import rollout_collection
 from self_summarization_agent.backend import FakeBackend
@@ -111,6 +114,20 @@ def test_overlap_judge_progress_resets_watchdog_deadline() -> None:
     client._handle_response({"batch_id": 1, "rows": []})
     assert client.pending_batch_count == 0
     assert client._drain_deadline is None
+
+
+def test_overlap_judge_client_fails_fast_when_worker_crashes(tmp_path: Path) -> None:
+    # A missing config makes the judge worker die during startup. The client
+    # must surface that immediately (via the worker's error signal or its
+    # liveness poll) instead of blocking on the full 600s startup timeout.
+    start = time.monotonic()
+    with pytest.raises(RuntimeError, match="judge worker"):
+        _SubprocessOverlapJudgeClient(
+            config_path=str(tmp_path / "missing.yaml"),
+            overrides=[],
+            checkpoint_id="checkpoint",
+        )
+    assert time.monotonic() - start < 60
 
 
 def train_config(tmp_path: Path) -> TrainConfig:

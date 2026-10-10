@@ -27,6 +27,7 @@ from self_summarization_agent.config import (
 from self_summarization_agent.iteration_launcher import (
     _expected_eval_rollout_count,
     _has_complete_cached_rollouts,
+    _reclaim_stale_retrieval_workers,
     _run_timed_phase,
     _start_retrieval_worker,
     run_checkpoint_evaluation,
@@ -571,6 +572,33 @@ def test_start_retrieval_worker_isolates_configured_gpus(tmp_path: Path, monkeyp
 
     assert url == "http://127.0.0.1:12345"
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
+
+
+def test_reclaim_stale_retrieval_workers_targets_only_matching_ready_file(tmp_path: Path) -> None:
+    ready_file = tmp_path / "retrieval_worker.json"
+    other_ready_file = tmp_path / "other" / "retrieval_worker.json"
+    other_ready_file.parent.mkdir()
+
+    def spawn_decoy(bound_ready_file: Path) -> subprocess.Popen:
+        # Run /bin/sleep under an argv0 that looks like a retrieval worker bound
+        # to bound_ready_file, mimicking an orphan from a crashed launcher.
+        fake_argv0 = (
+            "python -m self_summarization_agent.retrieval_worker "
+            f"--config train.yaml --ready-file {bound_ready_file}"
+        )
+        return subprocess.Popen([fake_argv0, "600"], executable="/bin/sleep")
+
+    stale = spawn_decoy(ready_file)
+    unrelated = spawn_decoy(other_ready_file)
+    try:
+        _reclaim_stale_retrieval_workers(ready_file)
+        assert stale.wait(timeout=30) is not None
+        assert unrelated.poll() is None
+    finally:
+        for proc in (stale, unrelated):
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=30)
 
 
 def test_iteration_launcher_delegates_retrieval_ownership_to_merged_collect(

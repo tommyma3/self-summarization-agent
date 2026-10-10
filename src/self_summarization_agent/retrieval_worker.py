@@ -4,6 +4,7 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import os
 from pathlib import Path
 import threading
 from typing import Any
@@ -132,7 +133,10 @@ def main() -> None:
     host, port = server.server_address[:2]
     ready_path = Path(args.ready_file)
     ready_path.parent.mkdir(parents=True, exist_ok=True)
-    ready_path.write_text(json.dumps({"url": f"http://{host}:{port}"}) + "\n", encoding="utf-8")
+    ready_path.write_text(
+        json.dumps({"url": f"http://{host}:{port}", "pid": os.getpid()}) + "\n",
+        encoding="utf-8",
+    )
     print(f"[retrieval_worker] listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 

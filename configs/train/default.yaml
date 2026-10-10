@@ -9,12 +9,12 @@ dataset:
   offset: 0
   limit:
   shuffle: false
-  train_limit: 780
-  eval_limit: 50
+  train_limit: 730
+  eval_limit: 100
 
 collection:
   train_task_count: 50
-  eval_task_count: 50
+  eval_task_count: 100
 
 retrieval:
   backend: faiss
@@ -57,7 +57,7 @@ rollout:
   max_concurrent_episodes: 50
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: false
-  overlap_queue_max_batches: 8
+  overlap_queue_max_batches: 16
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
@@ -97,8 +97,9 @@ judge:
   enabled: true
   backend: vllm_offline
   model_path: /124090467/Qwen/Qwen3.5-35B-A3B
-  gpu_ids: [0, 1, 2, 3]
-  tensor_parallel_size: 4
+  gpu_ids: [0, 1]
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.7
   attention_backend:
   max_model_len: 12000
   max_new_tokens: 8192

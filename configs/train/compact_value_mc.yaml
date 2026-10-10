@@ -14,7 +14,7 @@ dataset:
 
 collection:
   train_task_count: 50
-  eval_task_count: 50
+  eval_task_count: 100
 
 retrieval:
   backend: faiss
@@ -63,7 +63,7 @@ rollout:
   max_concurrent_episodes: 25
   # Deprecated compatibility fields; merged_collect is strictly sequential.
   overlap_judge: true
-  overlap_queue_max_batches: 8
+  overlap_queue_max_batches: 16
   max_new_tokens: 8192
   temperature: 0.7
   top_p: 0.95
@@ -103,7 +103,10 @@ judge:
   model_path: /124090467/Qwen/Qwen3.5-35B-A3B
   gpu_ids: [0, 1]
   tensor_parallel_size: 2
-  gpu_memory_utilization: 0.85
+  # The ~16 GiB retrieval embedding worker stays resident on GPU 0 during
+  # overlap judging, leaving ~63 GiB free; 0.8 (63.4 GiB) does not fit, 0.75
+  # (59.4 GiB) leaves comfortable KV-cache headroom for the TP=2 judge.
+  gpu_memory_utilization: 0.7
   attention_backend:
   max_model_len: 12000
   max_new_tokens: 8192
@@ -134,10 +137,11 @@ training:
   epochs: 10
   steps: 10
   group_size: 4
-  # Ulysses-4 makes all GPUs collaborate on each long interval. Accumulate four
-  # intervals before each optimizer step while keeping per-rank microbatches at 1.
+  # Ulysses-4 makes all GPUs collaborate on each long interval. Match the default
+  # config's effective batch: accumulate 128 intervals per optimizer step while
+  # keeping per-rank microbatches at 1.
   update_epochs: 1
-  minibatch_size: 4
+  minibatch_size: 128
   clip_range: 0.2
   target_kl: 0.03
   gradient_accumulation_microbatch_size: 1
@@ -164,8 +168,8 @@ training:
     worker_backend: verl_fsdp
     fsdp:
       strategy: fsdp
-      ppo_micro_batch_size_per_gpu: 1
-      ppo_max_token_len_per_gpu: 12288
+      ppo_micro_batch_size_per_gpu: 2
+      ppo_max_token_len_per_gpu: 16384
       log_prob_micro_batch_size_per_gpu: 1
       log_prob_max_token_len_per_gpu: 12288
       use_dynamic_bsz: true

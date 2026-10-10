@@ -93,6 +93,13 @@ class ConversationPrompt(str):
         prompt.generation_kind = generation_kind
         return prompt
 
+    def __getnewargs__(self) -> tuple[tuple[Message, ...]]:
+        # str subclasses pickle their string value as the sole __new__ argument
+        # by default, which would re-enter this constructor with a plain string.
+        # Reconstruct from the structured messages instead so prompts survive
+        # multiprocessing queue round-trips.
+        return (self.messages,)
+
 
 def copy_tool_call(tool_call: ToolCall) -> ToolCall:
     return ToolCall(

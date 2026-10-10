@@ -259,13 +259,36 @@ class _SubprocessOverlapJudgeClient:
         )
         self.process.start()
         # Wait for worker to signal successful initialization (model load).
-        try:
-            signal = self.response_queue.get(timeout=600)
-        except Empty:
+        # Poll child liveness while waiting: a startup crash (e.g. engine OOM)
+        # kills the child without a queue signal, and a plain blocking get would
+        # otherwise sit out the full timeout on a dead process.
+        startup_deadline = time.monotonic() + 600
+        signal: Any | None = None
+        while time.monotonic() < startup_deadline:
+            try:
+                signal = self.response_queue.get(timeout=1)
+                break
+            except Empty:
+                if not self.process.is_alive():
+                    exit_code = self.process.exitcode
+                    self.process.kill()
+                    self.process.join(timeout=30)
+                    raise RuntimeError(
+                        f"Overlap judge worker exited during startup "
+                        f"(exit_code={exit_code})"
+                    )
+        else:
             self.process.kill()
             self.process.join(timeout=30)
             raise RuntimeError(
                 "Overlap judge worker failed to initialize within 600s startup timeout"
+            )
+        if isinstance(signal, dict) and "error" in signal:
+            self.process.kill()
+            self.process.join(timeout=30)
+            raise RuntimeError(
+                "Overlap judge worker failed during startup:\n"
+                f"{signal.get('traceback') or signal.get('error')}"
             )
         if not self.process.is_alive():
             raise RuntimeError(

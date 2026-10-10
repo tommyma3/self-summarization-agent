@@ -62,6 +62,85 @@ def _wait_for_retrieval_worker(
     raise TimeoutError(f"Timed out waiting for retrieval worker readiness at {ready_file}")
 
 
+def _retrieval_worker_pids_for_ready_file(ready_file: Path) -> list[int]:
+    """PIDs of live retrieval worker processes bound to this exact ready file.
+
+    A crashed or killed launcher can orphan its collection-scoped retrieval
+    worker (it reparents to init and keeps holding GPU memory), so every new
+    worker startup must be able to find and reclaim those orphans.
+    """
+    pids: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == os.getpid():
+            continue
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            continue
+        if (
+            "self_summarization_agent.retrieval_worker" in cmdline
+            and str(ready_file) in cmdline
+        ):
+            pids.append(pid)
+    return pids
+
+
+def _pid_holds_resources(pid: int) -> bool:
+    """True while pid exists and is not a zombie (zombies hold no GPU memory)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    # /proc/<pid>/stat: pid (comm) state ... — state is the first field after
+    # the parenthesized comm, which itself may contain spaces/parens.
+    after_comm = stat.rpartition(")")[2].split()
+    return bool(after_comm) and after_comm[0] != "Z"
+
+
+def _reclaim_stale_retrieval_workers(ready_file: Path) -> None:
+    """Stop orphaned retrieval workers from a previous run before starting a new one."""
+    stale_pids = _retrieval_worker_pids_for_ready_file(ready_file)
+    if not stale_pids:
+        return
+    print(
+        f"[iteration_launcher] Reclaiming stale retrieval worker process(es) {stale_pids} "
+        f"bound to {ready_file}",
+        flush=True,
+    )
+    # Best-effort graceful shutdown via the URL recorded by the previous run.
+    with suppress(Exception):
+        payload = json.loads(ready_file.read_text(encoding="utf-8"))
+        url = payload.get("url")
+        if isinstance(url, str):
+            req = request.Request(f"{url.rstrip('/')}/shutdown", data=b"{}", method="POST")
+            request.urlopen(req, timeout=5).close()
+    for pid in stale_pids:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 15
+    remaining = {pid for pid in stale_pids if _pid_holds_resources(pid)}
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.5)
+        remaining = {pid for pid in remaining if _pid_holds_resources(pid)}
+    for pid in remaining:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    for pid in remaining:
+        for _ in range(20):
+            if not _pid_holds_resources(pid):
+                break
+            time.sleep(0.5)
+
+
 def _start_retrieval_worker(
     *,
     config_path: str | Path,
@@ -72,6 +151,7 @@ def _start_retrieval_worker(
     gpu_ids: Sequence[int] = (),
 ) -> tuple[subprocess.Popen, str]:
     ready_file = train_dir / "retrieval_worker.json"
+    _reclaim_stale_retrieval_workers(ready_file)
     with suppress(FileNotFoundError):
         ready_file.unlink()
     command = [
