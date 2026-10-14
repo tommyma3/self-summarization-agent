@@ -5,6 +5,8 @@ experiment:
   bc_plus_root: /124090467/self-summarization-agent/bc-plus
 
 dataset:
+  # Fixed partition shared across methods; independent of experiment.seed.
+  split_seed: 0
   decrypted_path: /124090467/self-summarization-agent/bc-plus/data/browsecomp_plus_decrypted.jsonl
   offset: 0
   limit:

@@ -62,6 +62,12 @@ class DatasetConfig:
     shuffle: bool = False
     train_limit: int | None = None
     eval_limit: int = 0
+    # BrowseComp train/eval membership is independent of experiment/rollout seeds.
+    split_seed: int = 0
+
+    def __post_init__(self) -> None:
+        if type(self.split_seed) is not int:
+            raise ValueError("dataset.split_seed must be an integer")
 
 
 @dataclass(slots=True)

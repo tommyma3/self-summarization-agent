@@ -143,6 +143,47 @@ def train_config(tmp_path: Path) -> TrainConfig:
     )
 
 
+def test_collection_and_judging_share_seeded_split_across_runs(tmp_path: Path) -> None:
+    from self_summarization_agent.judge_step import _load_examples_by_query_id
+
+    dataset_path = tmp_path / "questions.jsonl"
+    dataset_path.write_text("".join(
+        json.dumps({"query_id": f"q{i}", "query": f"question {i}", "answer": "done"}) + "\n"
+        for i in range(20)
+    ), encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    results = []
+    for run in range(2):
+        config = train_config(tmp_path)
+        config.experiment.name = f"run-{run}"
+        config.experiment.seed = 10 + run
+        config.dataset = DatasetConfig(
+            decrypted_path=str(dataset_path), split_seed=42, shuffle=bool(run),
+            train_limit=15, eval_limit=5,
+        )
+        config.training.group_size = 1
+        config.collection.train_task_count = 5
+        config.collection.eval_task_count = 3
+        pools = {split: _load_examples_by_query_id(config, split=split) for split in ("train", "eval")}
+        assert set(pools["train"]).isdisjoint(pools["eval"])
+        collected = {}
+        for split in ("train", "eval"):
+            output = tmp_path / f"{run}-{split}.jsonl"
+            collect_rollouts(
+                config, checkpoint_path=checkpoint, output_path=output,
+                backend=FakeBackend(search_index={}, documents={}), generator=FinishingGenerator(),
+                split=split, sample_seed=100 + run,
+            )
+            collected[split] = [json.loads(line)["query_id"] for line in output.read_text().splitlines()]
+            assert set(collected[split]) <= set(pools[split])
+        results.append((pools, collected))
+
+    assert results[0][0] == results[1][0]
+    assert results[0][1]["eval"] == results[1][1]["eval"]
+    assert results[0][1]["train"] != results[1][1]["train"]
+
+
 def test_collect_rollouts_writes_raw_checkpoint_tagged_rows_by_default(tmp_path: Path) -> None:
     config = train_config(tmp_path)
     checkpoint = tmp_path / "checkpoints" / "step-00001"

@@ -17,6 +17,17 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
         from self_summarization_agent.benchmarks.terminal_bench.dataset import benchmark_identity
         identity["benchmark"] = benchmark_identity(config.benchmark)
         identity["runtime"] = asdict(config.runtime)
+    elif (dataset := getattr(config, "dataset", None)) is not None and dataset.train_limit is not None:
+        # Reject resume shortcuts for artifacts collected under a different
+        # partition, including the old experiment-seed/shuffle-based split.
+        identity["dataset_split"] = {
+            "version": "query-id-sorted-seeded-v1",
+            "seed": dataset.split_seed,
+            "offset": dataset.offset,
+            "limit": dataset.limit,
+            "train_limit": dataset.train_limit,
+            "eval_limit": dataset.eval_limit,
+        }
     for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt", "added_tokens.json"):
         path = checkpoint / name
         if path.is_file():

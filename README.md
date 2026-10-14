@@ -75,6 +75,37 @@ Sample configs live at:
 - [configs/run/default.yaml](/D:/M/CS/self-summarization-agent/configs/run/default.yaml)
 - [configs/train/default.yaml](/D:/M/CS/self-summarization-agent/configs/train/default.yaml)
 
+### Reproducible BrowseComp train/eval splits
+
+Set the same `dataset.split_seed` (default: `0`) and dataset sizes for every
+method being compared:
+
+```yaml
+dataset:
+  split_seed: 0
+  train_limit: 730
+  eval_limit: 100
+```
+
+When `train_limit` is set, the loader sorts unique query IDs, shuffles with a
+local RNG seeded by `dataset.split_seed`, applies `offset`/`limit`, and takes
+the train and eval ranges. The same questions, split seed, and size settings
+produce the same ordered splits even if source-file order, experiment name,
+method, `experiment.seed`, or `dataset.shuffle` differ. Duplicate query IDs are
+rejected to prevent train/eval overlap. `dataset.shuffle` only controls ordinary
+loading without a train/eval partition; it cannot disable seeded partitioning.
+
+Use `--set dataset.split_seed=42` to select another partition. Experiment and
+per-iteration sampling seeds still control training-task sampling within the
+fixed training pool. Evaluation uses a fixed prefix of the eval pool, so also
+keep `collection.eval_task_count` equal across comparisons.
+
+This replaces the historical shuffle-dependent splits. Start new experiment
+output directories for comparisons; do not mix the new partition with old
+training/evaluation artifacts. Production collection lineage includes the split
+seed and size settings and rejects resuming artifacts with an incompatible split.
+Existing artifacts are not rewritten.
+
 ### 1. Smoke run
 
 This is the quickest end-to-end check of the current runtime.

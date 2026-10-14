@@ -49,12 +49,20 @@ def load_query_examples(
             else default_queries_tsv_path(bc_plus_root)
         )
         examples = _load_query_tsv(queries_tsv_path)
+    # Partitioned datasets always use their own seed, never the experiment seed
+    # or the inference-only shuffle flag. Canonicalize before shuffling so file
+    # order cannot change membership (or the offset/limit subset).
+    partitioned = dataset_config.train_limit is not None
+    if partitioned:
+        examples = sorted(examples, key=lambda example: example.query_id)
+        if len({example.query_id for example in examples}) != len(examples):
+            raise ValueError("Train/eval splitting requires unique query_id values")
     return slice_examples(
         examples,
         offset=dataset_config.offset,
         limit=dataset_config.limit,
-        shuffle=dataset_config.shuffle,
-        seed=seed,
+        shuffle=True if partitioned else dataset_config.shuffle,
+        seed=dataset_config.split_seed if partitioned else seed,
     )
 
 

@@ -182,6 +182,37 @@ def test_overflow_retains_untrained_tool_tail():
     assert len(extract_trainable_samples([record], result.turn_rewards)) == 1
 
 
+@pytest.mark.parametrize("field,value", [("split_seed", 1), ("train_limit", 2), ("eval_limit", 2),
+                                         ("offset", 1), ("limit", 10)])
+def test_lineage_preflight_rejects_changed_dataset_split(tmp_path, field, value):
+    from types import SimpleNamespace
+    from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
+    from self_summarization_agent.config import DatasetConfig
+    from self_summarization_agent.token_stream import TITO_CONTRACT
+
+    config = SimpleNamespace(
+        model=SimpleNamespace(chat_template_path=TEMPLATE_PATH, enable_thinking=True),
+        rollout=SimpleNamespace(backend="vllm_offline"),
+        dataset=DatasetConfig(train_limit=3, eval_limit=1),
+        experiment=SimpleNamespace(name="grpo", seed=0),
+    )
+    result = runtime(TokenModel([FINISH])).run("q", "question")
+    path = tmp_path / "raw.jsonl"
+    identity = collection_profile_id(config, tmp_path)
+    path.write_text(json.dumps({
+        "collection_contract": TITO_CONTRACT, "collection_profile_id": identity,
+        "trajectory_records": result.trajectory_records,
+    }), encoding="utf-8")
+    config.dataset.shuffle = True
+    config.experiment.name = "value-mc"
+    config.experiment.seed = 99
+    assert collection_profile_id(config, tmp_path) == identity
+    validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
+    setattr(config.dataset, field, value)
+    with pytest.raises(ValueError, match="fresh output lineage"):
+        validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
+
+
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("thinking", [False, True])
 def test_renderer_matches_template_for_canonical_tool_result(native, thinking):

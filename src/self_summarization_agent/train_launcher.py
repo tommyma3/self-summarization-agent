@@ -7,7 +7,7 @@ from typing import Any
 
 from self_summarization_agent.bcplus_backend import build_backend
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
-from self_summarization_agent.dataset import QueryExample, load_query_examples
+from self_summarization_agent.dataset import QueryExample, load_query_examples, split_train_eval_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import (
@@ -92,21 +92,6 @@ def _apply_judged_rewards(result, example: QueryExample, judge: RewardJudge) -> 
         "judge_response": decision.judge_response,
         "parse_error": decision.parse_error,
     }
-
-
-def split_train_eval_examples(
-    examples: list[QueryExample],
-    *,
-    train_limit: int | None,
-    eval_limit: int,
-) -> tuple[list[QueryExample], list[QueryExample]]:
-    if train_limit is None:
-        train_examples = list(examples)
-        eval_examples: list[QueryExample] = []
-    else:
-        train_examples = list(examples[:train_limit])
-        eval_examples = list(examples[train_limit : train_limit + eval_limit])
-    return train_examples, eval_examples
 
 
 def _training_epoch_count(config) -> int:
