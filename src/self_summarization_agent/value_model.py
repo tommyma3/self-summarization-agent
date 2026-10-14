@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,25 @@ def rollout_value_weights(rollout_ids: list[str]) -> list[float]:
         counts[rollout_id] = counts.get(rollout_id, 0) + 1
     rollout_count = len(counts)
     return [1.0 / (rollout_count * counts[rollout_id]) for rollout_id in rollout_ids]
+
+
+def normalized_value_evaluation_loss(
+    per_state_losses: list[float],
+    rollout_weights: list[float],
+) -> float:
+    """Frozen-model CE, normalized once over all real collection states.
+
+    Pass cross-entropies computed directly from logits, not reconstructed from
+    expected rewards (which can round to +/-1 for confident predictions).
+    """
+    if not per_state_losses or len(per_state_losses) != len(rollout_weights):
+        raise ValueError("Frozen value losses and rollout weights must be nonempty and aligned")
+    if any(not math.isfinite(x) or x < 0 for x in [*per_state_losses, *rollout_weights]):
+        raise ValueError("Frozen value losses and weights must be finite and nonnegative")
+    weight_sum = math.fsum(rollout_weights)
+    if weight_sum <= 0:
+        raise ValueError("Frozen value evaluation requires positive total weight")
+    return math.fsum(loss * weight for loss, weight in zip(per_state_losses, rollout_weights)) / weight_sum
 
 
 def rollout_normalized_value_loss(

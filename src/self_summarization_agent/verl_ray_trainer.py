@@ -17,7 +17,10 @@ from self_summarization_agent.trainer import (
     _prepare_policy_batch,
 )
 from self_summarization_agent.trajectory import RLSample
-from self_summarization_agent.value_model import rollout_value_weights
+from self_summarization_agent.value_model import (
+    normalized_value_evaluation_loss,
+    rollout_value_weights,
+)
 
 
 SUPPORTED_VERL_WORKER_BACKENDS = {"transformers", "verl_fsdp"}
@@ -408,6 +411,7 @@ def build_verl_value_probe_dataproto(
             "loss_mask": torch.nested.as_nested_tensor(zero_mask_tensors, layout=torch.jagged),
             "state_prefix_lengths": torch.tensor(prefix_lengths, dtype=torch.long),
             "value_probe_mask": torch.ones(len(padded_samples), dtype=torch.bool),
+            "rewards": torch.tensor([sample.reward for sample in padded_samples], dtype=torch.float32),
             "value_valid_mask": valid,
             "sample_indices": sample_indices,
             "temperature": torch.ones(len(padded_samples), dtype=torch.float32),
@@ -789,19 +793,21 @@ def _extract_worker_metrics(worker_output: Any) -> dict[str, Any]:
     }
 
 
-def _extract_compaction_value_rows(worker_output: Any) -> list[tuple[int, float]]:
+def _extract_compaction_value_rows(
+    worker_output: Any, *, value_key: str = "compaction_values"
+) -> list[tuple[int, float]]:
     if worker_output is None:
         return []
     if isinstance(worker_output, list):
         rows: list[tuple[int, float]] = []
         for item in worker_output:
-            rows.extend(_extract_compaction_value_rows(item))
+            rows.extend(_extract_compaction_value_rows(item, value_key=value_key))
         return rows
     if hasattr(worker_output, "batch"):
-        return _extract_compaction_value_rows(worker_output.batch)
+        return _extract_compaction_value_rows(worker_output.batch, value_key=value_key)
     if isinstance(worker_output, dict) or hasattr(worker_output, "keys"):
         try:
-            values = worker_output["compaction_values"]
+            values = worker_output[value_key]
             indices = worker_output["sample_indices"]
         except (KeyError, TypeError):
             values = None
@@ -879,26 +885,35 @@ class VerlFSDPWorkerGroup:
         return self._world_size // sequence_parallel_size
 
     def compute_compaction_values(self, batch: Any) -> list[float]:
+        values, _losses = self.evaluate_compaction_values(batch)
+        return values
+
+    def evaluate_compaction_values(self, batch: Any) -> tuple[list[float], list[float]]:
+        """Return values and CE from one frozen pass, ordered by real sample ID."""
         if hasattr(batch, "to_tensordict"):
             batch_td = batch.to_tensordict()
         else:
             batch_td = getattr(batch, "batch", batch)
         output = self.worker_group.compute_compaction_values(batch_td)
-        rows = _extract_compaction_value_rows(output)
-        by_index: dict[int, float] = {}
-        for index, value in rows:
-            if index < 0:
-                continue
-            if index in by_index:
-                raise RuntimeError(f"Distributed frozen-value output duplicated sample index {index}")
-            by_index[index] = value
-        expected_indices = list(range(len(by_index)))
-        if sorted(by_index) != expected_indices:
-            raise RuntimeError(
-                "Distributed frozen-value output has missing or non-contiguous sample indices: "
-                f"{sorted(by_index)}"
-            )
-        return [by_index[index] for index in expected_indices]
+        expected_count = int(batch.meta_info["sample_count"])
+
+        def ordered(value_key: str) -> list[float]:
+            rows = _extract_compaction_value_rows(output, value_key=value_key)
+            by_index: dict[int, float] = {}
+            for index, value in rows:
+                if index == -1:  # alignment padding
+                    continue
+                if index in by_index:
+                    raise RuntimeError(f"Distributed frozen-value output duplicated sample index {index}")
+                by_index[index] = value
+            if sorted(by_index) != list(range(expected_count)):
+                raise RuntimeError(
+                    "Distributed frozen-value output has missing or invalid sample indices: "
+                    f"{sorted(by_index)}; expected {expected_count} states"
+                )
+            return [by_index[index] for index in range(expected_count)]
+
+        return ordered("compaction_values"), ordered("compaction_value_losses")
 
     def save_checkpoint(self, path: str) -> None:
         self.worker_group.save_checkpoint(path, None, 0, None)
@@ -1047,7 +1062,7 @@ class VerlRayPolicyTrainer:
             flush=True,
         )
         old_value_started = time.monotonic()
-        old_values = self._worker_group.compute_compaction_values(probe_batch)
+        old_values, old_value_losses = self._worker_group.evaluate_compaction_values(probe_batch)
         old_value_seconds = time.monotonic() - old_value_started
         if len(old_values) != len(samples):
             raise RuntimeError(
@@ -1057,6 +1072,7 @@ class VerlRayPolicyTrainer:
         advantages = [sample.reward - old_value for sample, old_value in zip(samples, old_values)]
         rollout_ids = [str(sample.rollout_id) for sample in samples]
         value_weights = rollout_value_weights(rollout_ids)
+        eval_loss_before = normalized_value_evaluation_loss(old_value_losses, value_weights)
 
         mini_batch_size = self.training_config.minibatch_size or len(samples)
         if mini_batch_size < self._worker_group.data_parallel_size:
@@ -1092,6 +1108,11 @@ class VerlRayPolicyTrainer:
         worker_metrics = self._worker_group.update_actor(actor_batch)
         update_seconds = time.monotonic() - update_started
 
+        eval_started = time.monotonic()
+        _new_values, new_value_losses = self._worker_group.evaluate_compaction_values(probe_batch)
+        eval_loss_after = normalized_value_evaluation_loss(new_value_losses, value_weights)
+        eval_seconds = time.monotonic() - eval_started
+
         predicted_classes = [1.0 if value >= 0 else -1.0 for value in old_values]
         accuracy = sum(
             prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
@@ -1112,7 +1133,20 @@ class VerlRayPolicyTrainer:
             {
                 "backend": "verl_ray",
                 "verl_ray/worker_backend": "verl_fsdp",
+                # Retain the historical contribution metric for compatibility;
+                # only the eval losses compare frozen models on a unit mass.
                 "value/loss": value_loss,
+                "value/train_loss_contribution_mean": value_loss,
+                "value/eval_loss_before": eval_loss_before,
+                "value/eval_loss_after": eval_loss_after,
+                "value/eval_weight_sum": math.fsum(value_weights),
+                "value/eval_seconds": eval_seconds,
+                "value/minibatches_per_epoch": padded_count // mini_batch_size,
+                "value/train_weight_mass_mean": _mean_metric(worker_metrics, "value/weight_mass"),
+                "value/loss_coefficient": self.training_config.value.loss_coefficient,
+                "value/expected_coefficient_per_minibatch": (
+                    self.training_config.value.loss_coefficient / (padded_count // mini_batch_size)
+                ),
                 "value/old_mean": sum(old_values) / len(old_values),
                 "value/advantage_std": float(torch.tensor(advantages).std(unbiased=False)),
                 "value/classification_accuracy": accuracy,

@@ -8,6 +8,7 @@ from self_summarization_agent.trajectory import RLSample
 from self_summarization_agent import verl_ray_trainer
 from self_summarization_agent.verl_ray_trainer import (
     VerlRayPolicyTrainer,
+    VerlFSDPWorkerGroup,
     _extract_compaction_value_rows,
     _extract_worker_metrics,
     build_verl_actor_dataproto,
@@ -221,9 +222,9 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
             self.probe_batch = None
             self.actor_batch = None
 
-        def compute_compaction_values(self, batch):
+        def evaluate_compaction_values(self, batch):
             self.probe_batch = batch
-            return [0.25, -0.25]
+            return [0.25, -0.25], [0.47, 0.47]
 
         def update_actor(self, batch):
             self.actor_batch = batch
@@ -359,8 +360,8 @@ def test_verl_fsdp_value_step_reduces_worker_metric_payloads(monkeypatch, tmp_pa
     class FakeMetricWorkerGroup:
         data_parallel_size = 1
 
-        def compute_compaction_values(self, batch):
-            return [0.25, -0.25]
+        def evaluate_compaction_values(self, batch):
+            return [0.25, -0.25], [0.47, 0.47]
 
         def update_actor(self, batch):
             # Mirror VerlFSDPWorkerGroup.update_actor: reduce the raw engine payload.
@@ -396,3 +397,80 @@ def test_verl_fsdp_value_step_reduces_worker_metric_payloads(monkeypatch, tmp_pa
     assert metrics.extra_metrics["value/loss"] == pytest.approx(0.4)
     assert metrics.extra_metrics["verl_fsdp/raw/value/loss"] == pytest.approx(0.4)
     assert metrics.extra_metrics["verl_fsdp/raw/actor/pg_loss"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("minibatch_size,epochs", [(5, 1), (4, 1), (4, 3)])
+def test_frozen_loss_is_independent_of_minibatch_count(monkeypatch, minibatch_size, epochs) -> None:
+    import math
+
+    patch_fake_dataproto(monkeypatch)
+    config = TrainingConfig(
+        backend="verl_ray", advantage_estimator="compaction_mc_value",
+        value=CompactionValueConfig(enabled=True, loss_coefficient=0.7),
+        minibatch_size=minibatch_size, update_epochs=epochs,
+    )
+    config.verl.worker_backend = "verl_fsdp"
+    # Twenty states: four or five optimizer minibatches; uneven rollout lengths.
+    samples = [sample(str(i), 1.0, -0.5) for i in range(20)]
+    for i, state in enumerate(samples):
+        state.rollout_id = "short" if i == 0 else "long"
+        state.state_prefix_length = 1
+    events = []
+
+    class Worker:
+        data_parallel_size = 1
+
+        def evaluate_compaction_values(self, batch):
+            events.append("eval")
+            if len(events) == 1:
+                return [0.0] * 20, [math.log(2)] * 20
+            return [0.5] * 20, [0.2] + [0.8] * 19
+
+        def update_actor(self, batch):
+            events.append("update")
+            assert batch.batch["advantages"].values().tolist() == [1.0] * 60
+            count = 20 // minibatch_size
+            return {"value/loss": math.log(2) / count, "value/weight_mass": 1 / count}
+
+    trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
+    trainer.training_config = config
+    trainer.checkpoint_id = "test"
+    trainer._worker_group = Worker()
+    metrics = trainer._step_compaction_value_fsdp({"q1": samples})
+    assert events == ["eval", "update", "eval"]
+    extra = metrics.extra_metrics
+    count = 20 // minibatch_size
+    assert extra["value/eval_loss_before"] == pytest.approx(math.log(2))
+    assert extra["value/eval_loss_after"] == pytest.approx(0.5)
+    assert extra["value/eval_weight_sum"] == pytest.approx(1.0)
+    assert extra["value/train_loss_contribution_mean"] == pytest.approx(math.log(2) / count)
+    assert extra["value/train_weight_mass_mean"] == pytest.approx(1 / count)
+    assert extra["value/expected_coefficient_per_minibatch"] == pytest.approx(0.7 / count)
+    assert metrics.optimizer_step_count == count * epochs
+
+
+def test_frozen_value_gather_orders_ranks_and_excludes_padding() -> None:
+    from types import SimpleNamespace
+
+    output = [
+        {"sample_indices": torch.tensor([[2], [-1]]),
+         "compaction_values": torch.tensor([[0.3], [99.0]]),
+         "compaction_value_losses": torch.tensor([[0.7], [999.0]])},
+        None,
+        {"sample_indices": torch.tensor([[1], [0]]),
+         "compaction_values": torch.tensor([[0.2], [0.1]]),
+         "compaction_value_losses": torch.tensor([[0.8], [0.9]])},
+    ]
+    group = VerlFSDPWorkerGroup.__new__(VerlFSDPWorkerGroup)
+    group.worker_group = SimpleNamespace(compute_compaction_values=lambda _: output)
+    batch = SimpleNamespace(batch={}, meta_info={"sample_count": 3})
+    values, losses = group.evaluate_compaction_values(batch)
+    assert values == pytest.approx([0.1, 0.2, 0.3])
+    assert losses == pytest.approx([0.9, 0.8, 0.7])
+    # A missing trailing sample must not pass the old contiguous-index check.
+    batch.meta_info["sample_count"] = 4
+    with pytest.raises(RuntimeError, match="missing or invalid"):
+        group.evaluate_compaction_values(batch)
+    output[0]["sample_indices"][0, 0] = 1
+    with pytest.raises(RuntimeError, match="duplicated"):
+        group.evaluate_compaction_values(batch)

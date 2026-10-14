@@ -228,6 +228,11 @@ class CompactionValueTrainingWorker(TrainingWorker):
             # dimension. Keep per-state outputs at least 1-D so they are not treated
             # as zero-dimensional scalars.
             model_output["compaction_values"] = expected_binary_value(state_logits).unsqueeze(-1)
+            model_output["compaction_value_losses"] = torch.nn.functional.cross_entropy(
+                state_logits.float(),
+                reward_class_indices(data["rewards"].to(state_logits.device)),
+                reduction="none",
+            ).unsqueeze(-1)
             model_output["sample_indices"] = data["sample_indices"].to(state_logits.device).unsqueeze(-1)
             return state_logits.sum() * 0.0, {}
         if bool(torch.any(value_probe)):
@@ -250,6 +255,9 @@ class CompactionValueTrainingWorker(TrainingWorker):
         )
         local_value_loss = (per_state_loss * value_weights * valid.to(value_weights.dtype)).sum()
         dp_size = int(data["dp_size"])
+        # FSDP averages DP gradients; undo that average here. Microbatch
+        # contributions accumulate without another division. These weights sum
+        # to one over the collection, NOT over this optimizer minibatch.
         value_loss = local_value_loss * dp_size
         total_loss = policy_loss + self.value_loss_coefficient * value_loss.to(policy_loss.device)
 
@@ -257,6 +265,10 @@ class CompactionValueTrainingWorker(TrainingWorker):
         correct_weight = value_weights * valid.to(value_weights.dtype)
         local_accuracy = ((predicted == rewards).to(value_weights.dtype) * correct_weight).sum()
         metrics["value/loss"] = Metric(value=value_loss, aggregation=AggregationType.SUM)
+        metrics["value/weight_mass"] = Metric(
+            value=correct_weight.sum() * dp_size,
+            aggregation=AggregationType.SUM,
+        )
         metrics["value/classification_accuracy"] = Metric(
             value=local_accuracy * dp_size,
             aggregation=AggregationType.SUM,
@@ -270,7 +282,15 @@ class CompactionValueTrainingWorker(TrainingWorker):
     def compute_compaction_values(self, data: Any):
         if self._captured_hidden_states:
             raise RuntimeError("Stale LM-head captures exist before frozen value evaluation")
-        output = self.infer_batch(data)
+        was_training = self.value_head.training
+        self.value_head.eval()
+        try:
+            # infer_batch also puts the backbone in eval mode. Explicit no_grad
+            # covers the sidecar and keeps this diagnostic out of optimization.
+            with torch.no_grad():
+                output = self.infer_batch(data)
+        finally:
+            self.value_head.train(was_training)
         if self._captured_hidden_states:
             raise RuntimeError("Unused LM-head captures remain after frozen value evaluation")
         return output

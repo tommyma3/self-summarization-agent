@@ -10,6 +10,7 @@ from self_summarization_agent.value_model import (
     expected_binary_value,
     load_value_head,
     migrate_compaction_value_head_sidecar,
+    normalized_value_evaluation_loss,
     reward_class_indices,
     rollout_normalized_value_loss,
     rollout_value_weights,
@@ -100,3 +101,18 @@ def test_legacy_top_level_sidecar_is_migrated_and_loadable(tmp_path: Path) -> No
         assert torch.equal(expected, actual)
     assert not old_weights.exists()
     assert not old_manifest.exists()
+
+
+def test_frozen_value_loss_uses_rollout_mass_not_state_or_batch_count() -> None:
+    weights = rollout_value_weights(["short", "long", "long", "long"])
+    losses = [0.2, 0.8, 0.8, 0.8]
+    assert normalized_value_evaluation_loss(losses, weights) == pytest.approx(0.5)
+    assert normalized_value_evaluation_loss(losses, [w * 7 for w in weights]) == pytest.approx(0.5)
+    assert normalized_value_evaluation_loss(losses + [100.0], weights + [0.0]) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("losses,weights", [([], []), ([1.0], []), ([1.0], [0.0]),
+                                           ([float("nan")], [1.0]), ([1.0], [-1.0])])
+def test_frozen_value_loss_rejects_invalid_evaluation(losses, weights) -> None:
+    with pytest.raises(ValueError):
+        normalized_value_evaluation_loss(losses, weights)

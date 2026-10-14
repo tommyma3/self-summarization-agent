@@ -36,7 +36,7 @@ PANELS = [
     ("train_accuracy", "Train rollout accuracy per checkpoint (higher is better)", "Accuracy"),
     ("train_malformed_rate", "Train malformed-outcome rate (lower is better)", "Fraction of train rollouts"),
     ("mean_reward", "Mean training reward per step", "Reward"),
-    ("value/loss", "Value loss per step (compact value MC)", "Loss"),
+    ("value/eval_loss_after", "Frozen critic loss after update (training batch)", "Rollout-weighted CE"),
     ("value/classification_accuracy", "Value classification accuracy per step (compact value MC)", "Accuracy"),
     ("mean_policy_kl", "Policy KL per step", "KL"),
     ("clip_fraction", "PPO clip fraction per step", "Fraction"),
@@ -46,7 +46,7 @@ PANELS = [
 STANDALONE = [
     ("eval_accuracy", "eval_accuracy.svg"),
     ("train_accuracy", "train_accuracy.svg"),
-    ("value/loss", "value_loss.svg"),
+    ("value/eval_loss_after", "value_loss.svg"),
     ("value/classification_accuracy", "value_classification_accuracy.svg"),
 ]
 
@@ -211,10 +211,10 @@ def render_standalone(eval_runs, train_stats, step_runs, output: Path) -> None:
 def summary_text(eval_runs, train_stats, step_runs) -> str:
     lines = ["Compact value MC vs default GRPO — training dynamics", ""]
     mc_steps = step_runs[1]
-    latest_value_loss = number(mc_steps[-1], "value/loss")
+    latest_value_loss = number(mc_steps[-1], "value/eval_loss_after")
     latest_value_acc = number(mc_steps[-1], "value/classification_accuracy")
-    lines.append(f"Value loss at final step: {latest_value_loss:.4f}" if math.isfinite(latest_value_loss)
-                 else "Value loss at final step: unavailable")
+    lines.append(f"Frozen critic loss after final update (training batch): {latest_value_loss:.4f}" if math.isfinite(latest_value_loss)
+                 else "Frozen critic loss after final update (training batch): unavailable (legacy loss is not comparable)")
     lines.append(f"Value classification accuracy at final step: {latest_value_acc:.2%}"
                  if math.isfinite(latest_value_acc)
                  else "Value classification accuracy at final step: unavailable")
