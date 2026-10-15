@@ -55,6 +55,8 @@ class RLSample:
     reference_logprob: float | None = None
     reference_logprobs: list[float] | None = None
     state_prefix_length: int | None = None
+    # Diagnostic view of recorded interval metadata; never used to render tokens.
+    state_kind: str = "unknown"
 
     @property
     def has_training_cache(self) -> bool:
@@ -75,6 +77,21 @@ class RLSample:
             self.collection_full_token_ids is not None
             and self.collection_assistant_token_mask is not None
         )
+
+
+def _interval_state_kind(record: Mapping[str, object]) -> str:
+    """Use explicit runtime metadata, never prompt text or inferred turn IDs."""
+    segment = record.get("segment_index")
+    if isinstance(segment, bool) or not isinstance(segment, int) or segment < 1:
+        return "unknown"
+    if "prefix_summary_turn_id" not in record:
+        return "unknown"
+    prefix_summary = record["prefix_summary_turn_id"]
+    if segment == 1 and prefix_summary is None:
+        return "initial"
+    if segment > 1 and isinstance(prefix_summary, str) and prefix_summary:
+        return "post_compaction"
+    return "unknown"
 
 
 def _validate_int_list(value: Any, *, field_name: str, turn_id: str) -> list[int]:
@@ -756,6 +773,7 @@ def extract_trainable_samples(
                 reference_logprob=reference_logprob,
                 reference_logprobs=reference_logprobs,
                 state_prefix_length=state_prefix_length,
+                state_kind=_interval_state_kind(record),
             )
         )
     unknown_reward_ids = sorted(set(rewards) - seen_record_ids - skipped_history_rewrite_ids)

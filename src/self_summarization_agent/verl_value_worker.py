@@ -13,6 +13,7 @@ from self_summarization_agent.value_model import (
     reward_class_indices,
     save_value_head,
 )
+from self_summarization_agent.value_optimizer import attach_value_head, value_learning_rate_metrics
 
 
 def _require_verl_value_worker_dependencies():
@@ -88,6 +89,7 @@ class CompactionValueTrainingWorker(TrainingWorker):
         loss_coefficient: float,
         zero_initialize_head: bool,
         policy_loss_fn: Any,
+        head_learning_rate: float | None = None,
     ) -> None:
         if getattr(self, "value_head", None) is not None:
             raise RuntimeError("Compaction value worker was configured more than once")
@@ -126,11 +128,14 @@ class CompactionValueTrainingWorker(TrainingWorker):
 
         self._value_capture_handle = output_embeddings.register_forward_pre_hook(capture_hidden_states)
 
-        # Keep one optimizer group so the already-created scheduler continues to
-        # address every trainable parameter. Optimizer state is initialized lazily.
         if self.engine.optimizer is None or not self.engine.optimizer.param_groups:
             raise RuntimeError("Compaction value training requires an initialized actor optimizer")
-        self.engine.optimizer.param_groups[0]["params"].extend(list(self.value_head.parameters()))
+        self.value_head_optimizer_group = attach_value_head(
+            self.engine.optimizer,
+            self.value_head.parameters(),
+            learning_rate=head_learning_rate,
+            scheduler=self.engine.lr_scheduler,
+        )
 
         # The head is intentionally replicated rather than FSDP-sharded because it
         # has only 2 * hidden_size parameters. Average its gradients across the full
@@ -277,6 +282,12 @@ class CompactionValueTrainingWorker(TrainingWorker):
             value=valid.sum().to(torch.float32),
             aggregation=AggregationType.SUM,
         )
+        if hasattr(self, "value_head_optimizer_group"):
+            for name, value in value_learning_rate_metrics(
+                self.engine.optimizer, self.value_head_optimizer_group
+            ).items():
+                if value is not None:
+                    metrics[name] = Metric(value=value, aggregation=AggregationType.MEAN)
         return total_loss, metrics
 
     def compute_compaction_values(self, data: Any):
@@ -315,6 +326,7 @@ class CompactionValueActorRolloutRefWorker(ActorRolloutRefWorker):
             loss_coefficient=float(value_config.loss_coefficient),
             zero_initialize_head=bool(value_config.zero_initialize_head),
             policy_loss_fn=self.loss_fn,
+            head_learning_rate=value_config.get("head_learning_rate"),
         )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

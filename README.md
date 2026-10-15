@@ -351,6 +351,31 @@ Both value backends exploit causal prefix equivalence for the frozen `V_old` pas
 
 The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved in a `compaction_value/` sidecar subdirectory as `compaction_value/compaction_value_head.safetensors` plus `compaction_value/compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: verl_fsdp`. A repository-owned verl actor adds the shared-backbone value loss while the four FSDP/Ulysses ranks keep the exported policy namespace unchanged. Frozen values are evaluated from exact causal prefixes, and alignment padding is explicitly zero-weighted instead of dropping intervals. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
 
+#### Joint loss with a separate value-head learning rate
+
+[`configs/train/compact_value_mc_head_lr.yaml`](configs/train/compact_value_mc_head_lr.yaml) changes only the run identity/output directory and sets `training.value.head_learning_rate: 1.0e-4`. The backbone keeps `training.learning_rate: 1.0e-6`. The objective remains `L_policy + loss_coefficient * L_value`: critic gradients still reach the backbone, both optimizer groups step together, and old actor advantages remain frozen. Omitting the head LR (or setting it to null) keeps the historical shared parameter group. An explicit head LR equal to the actor LR is the compatibility control. Compare `1e-5` and `1e-4` while keeping the coefficient, batching, epochs, splits, and seed set matched; use the existing `--set training.value.head_learning_rate=1.0e-5` override when launching an experiment.
+
+For R rollouts with m_r eligible states each, the value loss uses `w_(r,j) = 1 / (R * m_r)`. One single-interval rollout and one three-interval rollout therefore receive weights `[1/2, 1/6, 1/6, 1/6]`. Weights are computed before batching/padding, and padding contributes zero. Each minibatch retains its collection-weighted contribution; this experiment does not rescale value gradients by minibatch count or normalize each minibatch independently.
+
+The verl integration extends its existing LambdaLR to include the new group, preserving scheduler progress and the head/backbone LR ratio. Unsupported scheduler types fail explicitly. Head weights retain the existing checkpoint sidecar format. **This change does not add optimizer-state persistence across collection iterations**; Adam moments follow the existing reset lifecycle in every comparison arm.
+
+Metrics include actual `value/backbone_learning_rate`, `value/head_learning_rate`, and their ratio. `value/eval_loss_before` and `value/eval_loss_after` are frozen, rollout-weighted BCE on the training collection. `value/eval_before/*` and `value/eval_after/*` also report Brier score, explained variance (null for constant targets), value distribution summaries, and weighted calibration bins/error. Initial/post-compaction breakdowns use explicit interval metadata; legacy records without it are labeled unknown. Each breakdown recomputes equal rollout weights within its own subset. Historical `value/loss` and contribution metrics remain available but are not held-out validation losses.
+
+For LR selection, reserve a fixed critic diagnostic set by query before any training, separate from both all training queries and the final policy holdout. Prepare exact-token, judged, cached records with the existing collection/cache workflow. Evaluate these same records without updating weights:
+
+```bash
+python -m self_summarization_agent.evaluate_value \
+  --config configs/train/compact_value_mc_head_lr.yaml \
+  --checkpoint /path/to/checkpoint \
+  --rollouts /path/to/fixed-critic-records.cached.jsonl \
+  --generating-checkpoint-id iteration-00000 \
+  --training-query-ids /path/to/all-training-query-ids.json \
+  --policy-eval-query-ids /path/to/final-policy-eval-query-ids.json \
+  --output /path/to/critic-diagnostics.json
+```
+
+Both query manifests are JSON arrays of string IDs and must cover the full intended splits, not just one collection batch. The evaluator rejects overlap and missing exact token evidence, records the generating policy separately from the evaluated checkpoint, and never calls an optimizer update or saves weights. Fixed outcome labels belong to the generating policy, so account for their staleness when evaluating later checkpoints. Compare against a constant predictor estimated from training outcomes; keep final policy evaluation separate.
+
 To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
 
 ```powershell

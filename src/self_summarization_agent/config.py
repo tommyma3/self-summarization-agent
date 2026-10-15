@@ -257,6 +257,7 @@ class VerlRayConfig:
 class CompactionValueConfig:
     enabled: bool = False
     loss_coefficient: float = 0.5
+    head_learning_rate: float | None = None
     zero_initialize_head: bool = True
     state_anchor: str = "first_generation_prompt_end"
 
@@ -272,6 +273,13 @@ class CompactionValueConfig:
             or self.loss_coefficient < 0
         ):
             raise ValueError("training.value.loss_coefficient must be finite and non-negative")
+        if self.head_learning_rate is not None and (
+            not isinstance(self.head_learning_rate, (int, float))
+            or isinstance(self.head_learning_rate, bool)
+            or not math.isfinite(float(self.head_learning_rate))
+            or self.head_learning_rate <= 0
+        ):
+            raise ValueError("training.value.head_learning_rate must be finite and positive")
         if self.state_anchor != "first_generation_prompt_end":
             raise ValueError(
                 "training.value.state_anchor currently supports only "

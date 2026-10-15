@@ -21,6 +21,7 @@ from self_summarization_agent.value_model import (
     normalized_value_evaluation_loss,
     rollout_value_weights,
 )
+from self_summarization_agent.value_diagnostics import value_diagnostics
 
 
 SUPPORTED_VERL_WORKER_BACKENDS = {"transformers", "verl_fsdp"}
@@ -165,6 +166,7 @@ def build_verl_dataproto(
         "turn_ids": np.array([sample.turn_id for sample in flat_samples], dtype=object),
         "trainable_kinds": np.array([sample.trainable_kind for sample in flat_samples], dtype=object),
         "rollout_ids": np.array([sample.rollout_id for sample in flat_samples], dtype=object),
+        "state_kinds": np.array([sample.state_kind for sample in flat_samples], dtype=object),
     }
     return DataProto.from_single_dict(
         {
@@ -560,6 +562,7 @@ def grouped_samples_from_verl_dataproto(batch: Any) -> dict[str, list[RLSample]]
     turn_ids = batch.non_tensor_batch["turn_ids"]
     kinds = batch.non_tensor_batch["trainable_kinds"]
     rollout_ids = batch.non_tensor_batch.get("rollout_ids", [None] * len(batch))
+    state_kinds = batch.non_tensor_batch.get("state_kinds", ["unknown"] * len(batch))
     for index in range(len(batch)):
         length = int(tensors["sequence_lengths"][index].item())
         sample = RLSample(
@@ -579,6 +582,7 @@ def grouped_samples_from_verl_dataproto(batch: Any) -> dict[str, list[RLSample]]
                 for value in tensors["token_reference_logprobs"][index, :length].tolist()
             ],
             state_prefix_length=int(tensors["state_prefix_lengths"][index].item()),
+            state_kind=str(state_kinds[index]),
         )
         grouped.setdefault(sample.query_id, []).append(sample)
     return grouped
@@ -629,6 +633,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
         "compaction_value": {
             "enabled": training_config.value.enabled,
             "loss_coefficient": training_config.value.loss_coefficient,
+            "head_learning_rate": training_config.value.head_learning_rate,
             "zero_initialize_head": training_config.value.zero_initialize_head,
             "state_anchor": training_config.value.state_anchor,
         },
@@ -952,6 +957,9 @@ class _VerlRayTrainerActor:
             progress_path=progress_path,
         )
 
+    def evaluate_compaction_values(self, samples, microbatch_size):
+        return self.trainer.evaluate_compaction_values(samples, microbatch_size=microbatch_size)
+
     def ready(self) -> dict[str, str]:
         return {"status": "ready", "worker_backend": "transformers"}
 
@@ -1039,6 +1047,19 @@ class VerlRayPolicyTrainer:
             flush=True,
         )
 
+    def evaluate_compaction_values(self, samples, *, microbatch_size: int):
+        """Evaluate exact critic prefixes without updating or saving a checkpoint."""
+        if not self.training_config.value.enabled:
+            raise ValueError("Critic evaluation requires training.value.enabled")
+        if self.training_config.verl.worker_backend == "verl_fsdp":
+            batch = build_verl_value_probe_dataproto(
+                samples, checkpoint_id=self.checkpoint_id,
+                alignment=self._worker_group.data_parallel_size,
+                max_sequence_length=self.training_config.max_sequence_length,
+            )
+            return self._worker_group.evaluate_compaction_values(batch)
+        return self._ray.get(self._actor.evaluate_compaction_values.remote(samples, microbatch_size))
+
     def _step_compaction_value_fsdp(
         self,
         grouped_samples: dict[str, list[RLSample]],
@@ -1109,7 +1130,7 @@ class VerlRayPolicyTrainer:
         update_seconds = time.monotonic() - update_started
 
         eval_started = time.monotonic()
-        _new_values, new_value_losses = self._worker_group.evaluate_compaction_values(probe_batch)
+        new_values, new_value_losses = self._worker_group.evaluate_compaction_values(probe_batch)
         eval_loss_after = normalized_value_evaluation_loss(new_value_losses, value_weights)
         eval_seconds = time.monotonic() - eval_started
 
@@ -1133,6 +1154,10 @@ class VerlRayPolicyTrainer:
             {
                 "backend": "verl_ray",
                 "verl_ray/worker_backend": "verl_fsdp",
+                **value_diagnostics(samples, old_values, old_value_losses, prefix="value/eval_before"),
+                **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after"),
+                "value/eval_scope": "training_collection",
+                "value/optimizer_step_count": expected_steps,
                 # Retain the historical contribution metric for compatibility;
                 # only the eval losses compare frozen models on a unit mass.
                 "value/loss": value_loss,
@@ -1163,6 +1188,9 @@ class VerlRayPolicyTrainer:
                 "verl_fsdp/sequence_parallel_size": self.training_config.verl.fsdp.ulysses_sequence_parallel_size,
             }
         )
+        for name in ("value/backbone_learning_rate", "value/head_learning_rate", "value/head_to_backbone_lr_ratio"):
+            if name in worker_metrics:
+                metrics.extra_metrics[name] = _mean_metric(worker_metrics, name)
         if update_seconds > 0:
             metrics.extra_metrics["verl_fsdp/effective_train_tokens_per_second"] = (
                 float(actor_batch.meta_info["train_tokens"]) / update_seconds

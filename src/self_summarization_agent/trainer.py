@@ -37,7 +37,11 @@ from self_summarization_agent.value_model import (
     rollout_value_weights,
     rollout_normalized_value_loss,
     save_value_head,
+    normalized_value_evaluation_loss,
+    reward_class_indices,
 )
+from self_summarization_agent.value_diagnostics import value_diagnostics
+from self_summarization_agent.value_optimizer import attach_value_head, value_learning_rate_metrics
 
 
 def _write_training_progress(path: str | None, stage: str, **payload: Any) -> None:
@@ -551,6 +555,8 @@ class TransformersPolicyTrainer:
     optimizer: torch.optim.Optimizer = field(init=False)
     value_head: CompactionValueHead | None = field(default=None, init=False)
     value_head_loaded: bool = field(default=False, init=False)
+    value_head_optimizer_group: int = field(default=0, init=False)
+    _old_value_losses: list[float] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         print(
@@ -598,8 +604,13 @@ class TransformersPolicyTrainer:
             except (AttributeError, StopIteration):
                 output_parameter = next(self.model.parameters())
             self.value_head.to(device=output_parameter.device, dtype=output_parameter.dtype)
-            optimizer_parameters.extend(self.value_head.parameters())
         self.optimizer = torch.optim.AdamW(optimizer_parameters, lr=self.training_config.learning_rate)
+        if self.value_head is not None:
+            self.value_head_optimizer_group = attach_value_head(
+                self.optimizer,
+                self.value_head.parameters(),
+                learning_rate=self.training_config.value.head_learning_rate,
+            )
         self.model.train()
         print("[TransformersPolicyTrainer] Model and optimizer are ready", flush=True)
         _write_training_progress(self.progress_path, "trainer_ready")
@@ -821,12 +832,20 @@ class TransformersPolicyTrainer:
         return torch.cat(logits, dim=0)
 
     def _old_values(self, samples: list[RLSample], *, microbatch_size: int) -> list[float]:
+        values, self._old_value_losses = self.evaluate_compaction_values(samples, microbatch_size=microbatch_size)
+        return values
+
+    def evaluate_compaction_values(
+        self, samples: list[RLSample], *, microbatch_size: int
+    ) -> tuple[list[float], list[float]]:
+        """Frozen prefix-only predictions and stable CE; never step an optimizer."""
         was_training = self.model.training
         value_was_training = self.value_head.training if self.value_head is not None else False
         self.model.eval()
         if self.value_head is not None:
             self.value_head.eval()
         values: list[float] = []
+        losses: list[float] = []
         try:
             with torch.no_grad():
                 ranges = list(_microbatch_ranges(0, len(samples), microbatch_size))
@@ -834,6 +853,12 @@ class TransformersPolicyTrainer:
                 for batch_index, (start, end) in enumerate(ranges, start=1):
                     logits = self._value_logits(samples[start:end])
                     values.extend(expected_binary_value(logits).detach().cpu().tolist())
+                    rewards = torch.tensor(
+                        [s.reward for s in samples[start:end]], device=logits.device, dtype=torch.float32
+                    )
+                    losses.extend(torch.nn.functional.cross_entropy(
+                        logits.float(), reward_class_indices(rewards), reduction="none"
+                    ).cpu().tolist())
                     if _report_progress(batch_index, len(ranges)):
                         elapsed = time.monotonic() - started
                         print(
@@ -856,7 +881,7 @@ class TransformersPolicyTrainer:
                 self.model.train()
             if self.value_head is not None and value_was_training:
                 self.value_head.train()
-        return values
+        return values, losses
 
     def _step_compaction_value(
         self,
@@ -1000,6 +1025,15 @@ class TransformersPolicyTrainer:
                 self.optimizer.step()
                 optimizer_step_count += 1
 
+        update_seconds = time.monotonic() - update_started
+        eval_started = time.monotonic()
+        new_values, new_value_losses = self.evaluate_compaction_values(samples, microbatch_size=microbatch_size)
+        eval_seconds = time.monotonic() - eval_started
+        evaluation_metrics = {
+            **value_diagnostics(samples, old_values, self._old_value_losses, prefix="value/eval_before"),
+            **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after"),
+        }
+        minibatches_per_epoch = len(list(_minibatch_ranges(len(samples), minibatch_size)))
         predicted_classes = [1.0 if value >= 0 else -1.0 for value in old_values]
         accuracy = sum(
             prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
@@ -1021,6 +1055,21 @@ class TransformersPolicyTrainer:
                 sum(detached_clipped) / len(detached_clipped) if detached_clipped else 0.0
             ),
             extra_metrics={
+                **value_learning_rate_metrics(self.optimizer, getattr(self, "value_head_optimizer_group", 0)),
+                "value/loss_coefficient": self.training_config.value.loss_coefficient,
+                "value/optimizer_step_count": optimizer_step_count,
+                **evaluation_metrics,
+                "value/eval_scope": "training_collection",
+                "value/eval_loss_before": normalized_value_evaluation_loss(self._old_value_losses, value_weights),
+                "value/eval_loss_after": normalized_value_evaluation_loss(new_value_losses, value_weights),
+                "value/eval_weight_sum": sum(value_weights),
+                "value/eval_seconds": eval_seconds,
+                "value/train_loss_contribution_mean": mean_value_loss,
+                "value/minibatches_per_epoch": minibatches_per_epoch,
+                "value/train_weight_mass_mean": 1.0 / len(microbatch_ranges),
+                "value/expected_coefficient_per_minibatch": (
+                    self.training_config.value.loss_coefficient / minibatches_per_epoch
+                ),
                 "value/loss": mean_value_loss,
                 "value/old_mean": sum(old_values) / len(old_values),
                 "value/advantage_std": float(torch.tensor(advantages).std(unbiased=False)),
@@ -1029,7 +1078,7 @@ class TransformersPolicyTrainer:
                 "value/rollout_count": len(set(rollout_ids)),
                 "value/head_loaded": self.value_head_loaded,
                 "value/old_value_seconds": old_value_seconds,
-                "value/update_seconds": time.monotonic() - update_started,
+                "value/update_seconds": update_seconds,
                 "value/total_tokens": total_tokens,
                 "value/trainable_tokens": trainable_tokens,
                 "value/prefix_tokens": prefix_tokens,
