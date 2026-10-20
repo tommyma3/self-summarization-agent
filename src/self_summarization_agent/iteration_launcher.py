@@ -378,11 +378,12 @@ def _promote_staged_checkpoint(
     destination: Path,
     *,
     require_value_head: bool,
+    require_separate_critic: bool = False,
 ) -> Path:
-    if not is_vllm_loadable_checkpoint(staged, require_value_head=require_value_head):
+    if not is_vllm_loadable_checkpoint(staged, require_value_head=require_value_head, require_separate_critic=require_separate_critic):
         raise RuntimeError(f"Training subprocess did not produce a complete checkpoint: {staged}")
     if destination.exists():
-        if is_vllm_loadable_checkpoint(destination, require_value_head=require_value_head):
+        if is_vllm_loadable_checkpoint(destination, require_value_head=require_value_head, require_separate_critic=require_separate_critic):
             raise RuntimeError(f"Refusing to replace an existing complete checkpoint: {destination}")
         _move_incomplete_checkpoint_aside(destination)
     os.replace(staged, destination)
@@ -896,6 +897,9 @@ def run_training_iteration(
         train_update_timeout = phase_timeout
     train_dir = ensure_dir(latest_root or _train_dir(config))
     current = resolve_latest_checkpoint(train_dir)
+    if config.training.value.separate:
+        from self_summarization_agent.separate_value import validate_resume_checkpoint
+        validate_resume_checkpoint(current.path)
     migrate_compaction_value_head_sidecar(current.path)
     should_resume = resume or resume_rollouts
     rollouts_dir = ensure_dir(train_dir / "rollouts")
@@ -1210,19 +1214,23 @@ def run_training_iteration(
             timeout_seconds=phase_timeout,
         )
 
-    require_value_head = config.training.value.enabled
+    require_value_head = config.training.value.shared
+    require_separate_critic = config.training.value.separate
     checkpoint_complete = is_vllm_loadable_checkpoint(
         next_checkpoint,
         require_value_head=require_value_head,
+        require_separate_critic=require_separate_critic,
     )
     if not checkpoint_complete and is_vllm_loadable_checkpoint(
         staged_checkpoint,
         require_value_head=require_value_head,
+        require_separate_critic=require_separate_critic,
     ):
         _promote_staged_checkpoint(
             staged_checkpoint,
             next_checkpoint,
             require_value_head=require_value_head,
+            require_separate_critic=require_separate_critic,
         )
         checkpoint_complete = True
     elif not checkpoint_complete and staged_checkpoint.exists():
@@ -1272,6 +1280,7 @@ def run_training_iteration(
             staged_checkpoint,
             next_checkpoint,
             require_value_head=require_value_head,
+            require_separate_critic=require_separate_critic,
         )
     advanced = advance_latest_checkpoint(train_dir, next_checkpoint)
     return advanced.path

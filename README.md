@@ -327,6 +327,56 @@ For the intended GPU run:
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
+### Separate MC critic with PPO updates
+
+[`configs/train/compact_separate_mc_ppo.yaml`](configs/train/compact_separate_mc_ppo.yaml)
+keeps the Qwen3.5-9B actor and initializes a separate Qwen3.5-0.8B critic from
+`/124090467/Qwen/Qwen3.5-0.8B`. The critic trains its text backbone and a
+zero-initialized two-class linear head at exact interval-start prefixes.
+
+Each iteration fits the critic on all current trajectories for
+`training.value.fitting_epochs`, using the final binary rollout outcome as the
+MC cross-entropy label. Loss is averaged over intervals within each rollout,
+then over rollouts. After fitting, the same trajectories receive fixed
+`R - V_fitted` advantages, broadcast over every assistant token. The actor runs
+`training.update_epochs` clipped PPO passes with the original cached behavior
+log probabilities. There is no cross-fitting, GAE, bootstrapping, group-relative
+normalization, or shared actor/value gradient. The critic subprocess exits
+before actor workers allocate GPUs.
+
+Use a fresh artifact root with its `latest` pointer initialized to the chosen
+base actor, then use the existing iteration launcher:
+
+```bash
+scripts/train_iterations.sh --iterations 10 \
+  --latest-root /path/to/separate-mc-run \
+  --config configs/train/compact_separate_mc_ppo.yaml
+```
+
+The preset starts with 3 critic epochs (backbone LR `1e-5`, head LR `1e-4`)
+and 2 actor epochs (LR `1e-6`, clip range `0.2`). Critic minibatches are measured
+in rollouts (`rollout_minibatch_size`); `prefix_microbatch_size` controls prefix
+memory use. `training.value.gpu_id` selects the critic subprocess's GPU.
+`training.target_kl` stops further actor minibatches after the measured
+behavior-policy KL exceeds the threshold. `training.value.loss_coefficient`
+is for the older shared-head mode and is not used by the separate critic.
+These settings are pilot defaults, not evidence of better task performance.
+
+Actor files stay at the checkpoint root for vLLM. The `critic/` directory stores
+the critic model, head, tokenizer metadata, AdamW state, and update count.
+`training_manifest.json` identifies the paired checkpoint, and
+`fitted_advantages.json` records immutable update inputs and provenance.
+Publication requires both models. Resume requires the saved critic; it never
+silently reinitializes it. An incomplete update restarts from the prior
+committed pair. Critic optimizer state persists across iterations; the actor
+retains the existing per-iteration optimizer reset behavior.
+
+The local Transformers actor and `verl_ray` Transformers/FSDP actor backends
+support this mode. Training consumes exact token caches and never truncates or
+retokenizes interval histories. The existing read-only `evaluate_value` command
+also supports paired separate-critic checkpoints and loads only the small
+critic. Same-collection critic metrics remain labeled as training metrics.
+
 ### Value for compaction experiment
 
 Compare the compact value MC run with the default GRPO run (requires `matplotlib`):

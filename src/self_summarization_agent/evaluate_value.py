@@ -45,6 +45,20 @@ def evaluate_value_checkpoint(
     if not samples or any(not sample.has_exact_collection_tokens for sample in samples):
         raise ValueError("Critic diagnostics require exact collected tokens and current training caches")
     checkpoint = Path(checkpoint_path)
+    if config.training.value.separate:
+        from self_summarization_agent.separate_value import CRITIC_DIR, validate_resume_checkpoint
+        from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
+        if not validate_resume_checkpoint(checkpoint):
+            raise ValueError("Separate critic evaluation requires a complete saved pair")
+        trainer = SeparateValueTrainer(checkpoint / CRITIC_DIR, checkpoint, config.training.value,
+            dtype=config.model.dtype, device=f"cuda:{config.training.value.gpu_id}",
+            resume=False, activation_checkpointing=False)
+        values, losses = trainer.evaluate(samples)
+        return {"evaluated_checkpoint": str(checkpoint.resolve()),
+            "generating_checkpoint_id": generating_checkpoint_id, "rollout_path": str(Path(rollout_path).resolve()),
+            "query_ids": sorted(queries), "value/eval_scope": "fixed_held_out_records",
+            "value/target_policy_may_differ": True,
+            **value_diagnostics(samples, values, losses, prefix="value/held_out")}
     if not ((checkpoint / VALUE_HEAD_FILENAME).is_file() or
             (checkpoint / "compaction_value_head.safetensors").is_file()):
         raise ValueError("Critic evaluation requires saved value-head weights")

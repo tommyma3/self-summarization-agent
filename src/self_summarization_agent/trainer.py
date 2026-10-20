@@ -42,6 +42,7 @@ from self_summarization_agent.value_model import (
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.value_optimizer import attach_value_head, value_learning_rate_metrics
+from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
 
 def _write_training_progress(path: str | None, stage: str, **payload: Any) -> None:
@@ -577,7 +578,7 @@ class TransformersPolicyTrainer:
             device_map=self.model_config.device_map,
             trust_remote_code=self.model_config.trust_remote_code,
         )
-        if self.training_config.value.enabled:
+        if self.training_config.value.shared:
             forward_parameters = inspect.signature(self.model.forward).parameters
             if "logits_to_keep" not in forward_parameters:
                 raise ValueError(
@@ -592,7 +593,7 @@ class TransformersPolicyTrainer:
                 ),
             )
         optimizer_parameters: list[torch.nn.Parameter] = list(self.model.parameters())
-        if self.training_config.value.enabled:
+        if self.training_config.value.shared:
             self.value_head, self.value_head_loaded = load_value_head(
                 self.model_config.model_path,
                 hidden_size=model_hidden_size(self.model),
@@ -1141,11 +1142,11 @@ class TransformersPolicyTrainer:
             )
         ]
 
-    def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
+    def step(self, grouped_samples: dict[str, list[RLSample]], *, fixed_advantages=None) -> UpdateMetrics:
         update_epochs, minibatch_size, microbatch_size, clip_range = _validate_grpo_training_config(
             self.training_config
         )
-        if self.training_config.value.enabled:
+        if self.training_config.value.shared:
             return self._step_compaction_value(
                 grouped_samples,
                 update_epochs=update_epochs,
@@ -1153,7 +1154,17 @@ class TransformersPolicyTrainer:
                 microbatch_size=microbatch_size,
                 clip_range=clip_range,
             )
-        batch = _prepare_policy_batch(grouped_samples)
+        if self.training_config.value.separate:
+            if fixed_advantages is None:
+                raise ValueError("Separate critic actor update requires fitted advantages")
+            samples = [s for group in grouped_samples.values() for s in group]
+            validate_samples(samples, self.training_config.max_sequence_length)
+            advantages = validate_advantages(samples, fixed_advantages)
+            batch = _PolicyBatch(samples, advantages, [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)])
+        else:
+            if fixed_advantages is not None:
+                raise ValueError("Fixed advantages require separate critic mode")
+            batch = _prepare_policy_batch(grouped_samples)
         if not batch.flat_samples or not batch.contributing:
             return _metrics_without_update(batch)
 
@@ -1185,14 +1196,18 @@ class TransformersPolicyTrainer:
         detached_clipped: list[float] = []
         optimizer_step_count = 0
         stop_training = False
+        epochs_started = 0
         for epoch_index in range(update_epochs):
             if stop_training:
                 break
+            epochs_started += 1
             for start, end in _minibatch_ranges(len(batch.contributing), minibatch_size):
                 minibatch_size_actual = end - start
                 self.optimizer.zero_grad(set_to_none=True)
                 minibatch_kl_sum = 0.0
                 minibatch_kl_count = 0
+                token_denominator = (sum(sum(s.completion_mask) for s, _ in batch.contributing[start:end])
+                                     if self.training_config.value.separate else None)
                 for micro_start, micro_end in _microbatch_ranges(start, end, microbatch_size):
                     microbatch = batch.contributing[micro_start:micro_end]
                     microbatch_reference_logprobs = reference_token_logprobs[micro_start:micro_end]
@@ -1217,9 +1232,12 @@ class TransformersPolicyTrainer:
                         detached_clipped.extend(clipped.detach()[valid_mask].cpu().tolist())
                         minibatch_kl_sum += float(approx_kls.detach().sum().cpu())
                         minibatch_kl_count += int(valid_mask.sum().item())
-                    loss_denominator = loss_mask.sum().clamp_min(1.0)
+                    loss_denominator = token_denominator if self.training_config.value.separate else loss_mask.sum().clamp_min(1.0)
                     (losses.sum() / loss_denominator).backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.training_config.max_grad_norm,
+                    error_if_nonfinite=self.training_config.value.separate,
+                )
                 self.optimizer.step()
                 optimizer_step_count += 1
                 if is_main:
@@ -1243,6 +1261,7 @@ class TransformersPolicyTrainer:
             optimizer_step_count=optimizer_step_count,
             mean_policy_kl=sum(detached_kls) / len(detached_kls),
             clip_fraction=sum(detached_clipped) / len(detached_clipped),
+            extra_metrics={"actor/early_stop": stop_training, "actor/epochs_started": epochs_started},
         )
 
     def save_checkpoint(self, path: str) -> None:

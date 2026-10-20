@@ -11,6 +11,8 @@ import torch
 
 from self_summarization_agent.config import ModelConfig, TrainingConfig
 from self_summarization_agent.trainer import (
+    _write_training_progress,
+    _validate_grpo_training_config,
     TransformersPolicyTrainer,
     UpdateMetrics,
     _metrics_without_update,
@@ -22,6 +24,7 @@ from self_summarization_agent.value_model import (
     rollout_value_weights,
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
+from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
 
 SUPPORTED_VERL_WORKER_BACKENDS = {"transformers", "verl_fsdp"}
@@ -631,7 +634,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
     save_contents = ["hf_model"] if fsdp_config.save_hf_model else ["model"]
     return {
         "compaction_value": {
-            "enabled": training_config.value.enabled,
+            "enabled": training_config.value.shared,
             "loss_coefficient": training_config.value.loss_coefficient,
             "head_learning_rate": training_config.value.head_learning_rate,
             "zero_initialize_head": training_config.value.zero_initialize_head,
@@ -846,7 +849,10 @@ class VerlFSDPWorkerGroup:
             name_prefix=f"{training_config.verl.namespace}-actor-",
         )
         worker_type = ActorRolloutRefWorker
-        if training_config.value.enabled:
+        if training_config.value.separate:
+            from self_summarization_agent.verl_separate_actor_worker import SeparateCriticActorWorker
+            worker_type = SeparateCriticActorWorker
+        if training_config.value.shared:
             from self_summarization_agent.verl_value_worker import CompactionValueActorRolloutRefWorker
 
             worker_type = CompactionValueActorRolloutRefWorker
@@ -962,6 +968,9 @@ class _VerlRayTrainerActor:
 
     def ready(self) -> dict[str, str]:
         return {"status": "ready", "worker_backend": "transformers"}
+
+    def step_fixed(self, grouped_samples, fixed_advantages):
+        return _metrics_to_dict(self.trainer.step(grouped_samples, fixed_advantages=fixed_advantages))
 
     def step(self, batch: Any) -> dict[str, Any]:
         grouped_samples = grouped_samples_from_verl_dataproto(batch)
@@ -1199,7 +1208,69 @@ class VerlRayPolicyTrainer:
             metrics.extra_metrics[f"verl_fsdp/raw/{key}"] = value
         return metrics
 
-    def step(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
+    def _step_fixed(self, grouped_samples, fixed_advantages):
+        _validate_grpo_training_config(self.training_config)
+        samples = _flatten_grouped_samples(grouped_samples)
+        validate_samples(samples, self.training_config.max_sequence_length)
+        advantages = validate_advantages(samples, fixed_advantages)
+        if self.training_config.verl.worker_backend != "verl_fsdp":
+            return _metrics_from_dict(self._ray.get(self._actor.step_fixed.remote(grouped_samples, fixed_advantages)))
+        contributing = [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)]
+        metrics = UpdateMetrics(sample_count=len(samples),
+            mean_reward=sum(s.reward for s in samples) / max(1, len(samples)),
+            mean_advantage=sum(advantages) / max(1, len(samples)), loss=0.0)
+        if not contributing:
+            return metrics
+        group = self._worker_group
+        size = self.training_config.minibatch_size or len(contributing)
+        weighted_loss = weighted_kl = weighted_clip = total_tokens = 0.0
+        stopped = False
+        for epoch in range(self.training_config.update_epochs):
+            for start in range(0, len(contributing), size):
+                chunk = contributing[start:start + size]
+                batch = build_verl_value_actor_dataproto(
+                    [s for s, _ in chunk], advantages=[a for _, a in chunk], value_weights=[0.0] * len(chunk),
+                    checkpoint_id=self.checkpoint_id, alignment=group.data_parallel_size,
+                    max_sequence_length=self.training_config.max_sequence_length,
+                )
+                # One optimizer minibatch per RPC enables KL stopping without
+                # replacing the fixed behavior probabilities between epochs.
+                batch.meta_info.update(mini_batch_size=batch.meta_info["padded_sample_count"],
+                    global_batch_size=len(chunk), epochs=1, seed=42)
+                self._last_batch_meta = dict(batch.meta_info)
+                result = group.update_actor(batch)
+                required_metrics = ("actor/pg_loss", "actor/ppo_kl", "actor/pg_clipfrac")
+                if any(key not in result or not math.isfinite(_mean_metric(result, key)) for key in required_metrics):
+                    raise RuntimeError("Separate PPO worker returned missing or nonfinite metrics")
+                tokens = batch.meta_info["train_tokens"]
+                loss = _mean_metric(result, "actor/pg_loss")
+                kl = _mean_metric(result, "actor/ppo_kl")
+                clip = _mean_metric(result, "actor/pg_clipfrac")
+                weighted_loss += tokens * loss
+                weighted_kl += tokens * kl
+                weighted_clip += tokens * clip
+                total_tokens += tokens
+                metrics.optimizer_step_count += 1
+                _write_training_progress(self.progress_path, "actor_update", epoch=epoch + 1,
+                    epochs=self.training_config.update_epochs, optimizer_steps=metrics.optimizer_step_count)
+                if self.training_config.target_kl is not None and kl > self.training_config.target_kl:
+                    stopped = True
+                    break
+            if stopped:
+                break
+        metrics.loss = weighted_loss / total_tokens
+        metrics.mean_policy_kl = weighted_kl / total_tokens
+        metrics.clip_fraction = weighted_clip / total_tokens
+        metrics.extra_metrics.update({"actor/early_stop": stopped, "actor/epochs_started": epoch + 1})
+        return metrics
+
+    def step(self, grouped_samples: dict[str, list[RLSample]], *, fixed_advantages=None) -> UpdateMetrics:
+        if self.training_config.value.separate:
+            if fixed_advantages is None:
+                raise ValueError("Separate critic actor update requires fitted advantages")
+            return self._step_fixed(grouped_samples, fixed_advantages)
+        if fixed_advantages is not None:
+            raise ValueError("Fixed advantages require separate critic mode")
         if self.training_config.verl.worker_backend == "verl_fsdp":
             if self.training_config.value.enabled:
                 return self._step_compaction_value_fsdp(grouped_samples)

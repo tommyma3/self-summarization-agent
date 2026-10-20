@@ -32,7 +32,8 @@ def mark_checkpoint_complete(path: str | Path) -> Path:
     return marker
 
 
-def is_vllm_loadable_checkpoint(path: str | Path, *, require_value_head: bool = False) -> bool:
+def is_vllm_loadable_checkpoint(path: str | Path, *, require_value_head: bool = False,
+                                require_separate_critic: bool = False) -> bool:
     checkpoint_path = Path(path)
     if not checkpoint_path.is_dir():
         return False
@@ -52,6 +53,10 @@ def is_vllm_loadable_checkpoint(path: str | Path, *, require_value_head: bool = 
     )
     if not (has_config and (has_model_weights or has_sharded_index)):
         return False
+    if require_separate_critic:
+        from self_summarization_agent.separate_value import separate_checkpoint_complete
+        if not separate_checkpoint_complete(checkpoint_path):
+            return False
     if require_value_head:
         if not (checkpoint_path / VALUE_HEAD_FILENAME).exists():
             return False

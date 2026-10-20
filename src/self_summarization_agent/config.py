@@ -256,12 +256,48 @@ class VerlRayConfig:
 @dataclass(slots=True)
 class CompactionValueConfig:
     enabled: bool = False
+    architecture: str = "shared"
+    model_path: str | None = None
+    learning_rate: float = 1e-5
+    fitting_epochs: int = 3
+    rollout_minibatch_size: int = 32
+    prefix_microbatch_size: int = 1
+    max_grad_norm: float = 1.0
+    gpu_id: int = 0
+    seed: int = 0
     loss_coefficient: float = 0.5
     head_learning_rate: float | None = None
     zero_initialize_head: bool = True
     state_anchor: str = "first_generation_prompt_end"
 
+    @property
+    def separate(self) -> bool:
+        return self.enabled and self.architecture == "separate"
+
+    @property
+    def shared(self) -> bool:
+        return self.enabled and self.architecture == "shared"
+
     def __post_init__(self) -> None:
+        if self.architecture not in {"shared", "separate"}:
+            raise ValueError("training.value.architecture must be shared or separate")
+        if self.architecture == "separate":
+            if not self.enabled or not self.model_path:
+                raise ValueError("Separate critic requires value.enabled and value.model_path")
+            if self.loss_coefficient != 0.5:
+                raise ValueError("training.value.loss_coefficient is shared-mode-only")
+            for name in ("fitting_epochs", "rollout_minibatch_size", "prefix_microbatch_size"):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f"training.value.{name} must be a positive integer")
+            for name in ("learning_rate", "max_grad_norm"):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"training.value.{name} must be finite and positive")
+            for name in ("gpu_id", "seed"):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"training.value.{name} must be a nonnegative integer")
         if not isinstance(self.enabled, bool):
             raise ValueError("training.value.enabled must be a boolean")
         if not isinstance(self.zero_initialize_head, bool):
@@ -317,6 +353,13 @@ class TrainingConfig:
     verl: VerlRayConfig = field(default_factory=VerlRayConfig)
 
     def __post_init__(self) -> None:
+        if self.value.separate:
+            if self.backend not in {"transformers", "verl_ray"} or (
+                self.backend == "verl_ray" and self.verl.worker_backend not in {"transformers", "verl_fsdp"}
+            ):
+                raise ValueError("Separate critic supports transformers or verl_ray with transformers/verl_fsdp")
+            if not self.train_compaction_tokens:
+                raise ValueError("Separate MC preset requires all assistant tokens, including compactions")
         supported = {"group_relative", "compaction_mc_value"}
         if self.advantage_estimator not in supported:
             raise ValueError(

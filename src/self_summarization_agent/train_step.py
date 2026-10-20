@@ -5,11 +5,21 @@ from dataclasses import replace
 import json
 import os
 import warnings
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from self_summarization_agent.checkpoints import checkpoint_id_from_path, mark_checkpoint_complete
-from self_summarization_agent.config import load_train_config, parse_cli_overrides
+from self_summarization_agent.separate_value import (
+    ADVANTAGES, CRITIC_DIR, CRITIC_MANIFEST, PAIR_MANIFEST, atomic_json,
+    load_advantages, separate_checkpoint_complete, validate_samples, validate_resume_checkpoint,
+)
+from self_summarization_agent.config import load_train_config, parse_cli_overrides, config_to_dict
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import (
@@ -164,7 +174,7 @@ def run_train_step(
     migrate_compaction_value_head_sidecar(checkpoint)
     checkpoint_id = checkpoint_id_from_path(checkpoint)
     if (
-        config.training.value.enabled
+        config.training.value.shared
         and checkpoint_id.startswith("iteration-")
         and checkpoint_id != "iteration-00000"
         and not all(
@@ -175,6 +185,8 @@ def run_train_step(
         raise ValueError(
             f"Value-enabled resume checkpoint {checkpoint_id} is missing its value-head sidecar"
         )
+    if config.training.value.separate:
+        validate_resume_checkpoint(checkpoint)
     rows = _load_rollout_rows(rollout_path)
     samples = samples_from_rollout_rows(
         rows,
@@ -203,6 +215,34 @@ def run_train_step(
         group_count=len(grouped_samples),
         **diagnostics,
     )
+
+    fixed_advantages = None
+    critic_metrics = {}
+    if config.training.value.separate:
+        validate_samples(samples, config.training.max_sequence_length)
+        if trainer is not None:
+            raise ValueError("Separate critic orchestration must run before constructing the actor")
+        output = Path(output_checkpoint_path).resolve()
+        if output == checkpoint:
+            raise ValueError("Actor/critic output must differ from the committed input checkpoint")
+        if (output / ".complete").exists():
+            raise ValueError("Refusing to overwrite a completed checkpoint")
+        output.mkdir(parents=True, exist_ok=True)
+        # Always restart fitting from the committed input, never from staged files.
+        with tempfile.TemporaryDirectory(prefix="separate-critic-") as work:
+            config_path = Path(work) / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config_to_dict(config)))
+            environment = os.environ.copy()
+            environment["CUDA_VISIBLE_DEVICES"] = str(config.training.value.gpu_id)
+            command = [sys.executable, "-m", "self_summarization_agent.critic_step",
+                "--config", str(config_path), "--checkpoint", str(checkpoint),
+                "--rollouts", str(Path(rollout_path).resolve()), "--output", str(output),
+                "--output-id", output_checkpoint_id or output.name]
+            if progress:
+                command.extend(["--progress", progress])
+            subprocess.run(command, env=environment, check=True)
+        fixed_advantages, critic_metrics = load_advantages(output / ADVANTAGES, samples,
+            checkpoint_id, config.training.value)
 
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
@@ -261,7 +301,13 @@ def run_train_step(
             )
 
     _write_training_progress(progress, "update_start", sample_count=len(samples), **diagnostics)
-    metrics = trainer.step(grouped_samples)
+    if fixed_advantages is not None:
+        actor_started = time.monotonic()
+        metrics = trainer.step(grouped_samples, fixed_advantages=fixed_advantages)
+        metrics.extra_metrics.update(critic_metrics)
+        metrics.extra_metrics["actor/update_seconds"] = time.monotonic() - actor_started
+    else:
+        metrics = trainer.step(grouped_samples)
     _write_training_progress(progress, "update_complete", sample_count=metrics.sample_count)
     print(
         f"[train_step] Done: sample_count={metrics.sample_count}, mean_reward={metrics.mean_reward:.4f}, "
@@ -278,6 +324,15 @@ def run_train_step(
     trainer.save_checkpoint(str(output_checkpoint))
     is_main = int(os.environ.get("RANK", "0")) == 0
     if is_main:
+        if config.training.value.separate:
+            logical_id = output_checkpoint_id or output_checkpoint.name
+            critic_manifest = json.loads((output_checkpoint / CRITIC_DIR / CRITIC_MANIFEST).read_text())
+            atomic_json(output_checkpoint / PAIR_MANIFEST, {"version": 1, "architecture": "separate",
+                "checkpoint_id": logical_id, "actor_source": checkpoint_id,
+                "critic_identity": critic_manifest["identity"],
+                "actor_optimizer": "reset_each_iteration", "critic_optimizer": "persistent"})
+            if not separate_checkpoint_complete(output_checkpoint, expected_id=logical_id):
+                raise ValueError("Refusing to publish incomplete actor/critic pair")
         mark_checkpoint_complete(output_checkpoint)
         _write_training_progress(progress, "checkpoint_complete", output_checkpoint=str(output_checkpoint))
         print(f"[train_step] Checkpoint complete: {output_checkpoint}", flush=True)
