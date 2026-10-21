@@ -72,6 +72,26 @@ metrics and the FSDP audit above apply specifically to the distributed path;
 coefficients should not be transferred between backends without checking that
 additional difference.
 
+## Same-policy eval-set diagnostics (`value/evalset/`)
+
+A value network is only defined relative to the policy it was fit against. After
+each separate-critic fit, `critic_step` therefore also scores the freshly fitted
+critic on the states of that policy's own checkpoint-evaluation rollouts
+(`iteration-<behavior>.eval.jsonl`, whose rows carry the matching
+`policy_checkpoint_id`) and records the frozen diagnostics under `value/evalset/`:
+classification accuracy, BCE, Brier score, explained variance, calibration, and
+the initial/post-compaction strata, plus `value/evalset/policy_id` and
+`value/evalset/data_policy_id` tags. These metrics measure same-policy
+generalization to unseen evaluation queries; they are computed in memory only
+(native caches attached to deep-copied rows, never persisted) and never affect
+fitting or advantages.
+
+Scope distinction: `value/eval_before`/`value/eval_after` are the training
+collection; `value/evalset/` is the same policy's evaluation collection; and
+`value/held_out/` (in `evaluate_value.py`) is the fixed query-disjoint probe
+records. Note that eval-set states come from greedy decoding of the same policy
+weights, while training collections use the configured sampling temperature.
+
 ## Interval contract
 
 Evaluation reads only the exact cached state prefix at the interval-start anchor.
