@@ -4,8 +4,9 @@ from functools import partial
 import torch
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.metric import AggregationType, Metric
-from verl.workers.engine_workers import ActorRolloutRefWorker
 from verl.workers.utils.padding import no_padding_2_padding
+
+from self_summarization_agent.verl_interval_worker import IntervalActorRolloutRefWorker
 
 
 def fixed_advantage_ppo_loss(config, model_output, data, dp_group=None):
@@ -28,7 +29,7 @@ def fixed_advantage_ppo_loss(config, model_output, data, dp_group=None):
                             "actor/pg_clipfrac": clip}.items()}
 
 
-class SeparateCriticActorWorker(ActorRolloutRefWorker):
+class SeparateCriticActorWorker(IntervalActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         super().init_model()

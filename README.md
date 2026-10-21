@@ -397,7 +397,7 @@ Missing optional metrics remain gaps. Use `--artifacts-dir`, `--default-run`,
 
 [`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
 
-Both value backends exploit causal prefix equivalence for the frozen `V_old` pass and evaluate only through the exact state anchor. The Transformers compatibility backend additionally uses Qwen's `logits_to_keep` path to materialize vocabulary logits only for the state anchor and trainable assistant-token positions. The distributed backend uses verl's packed remove-padding/Ulysses log-probability path. These changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing worker and loss path.
+Both value backends exploit causal prefix equivalence for the frozen `V_old` pass and evaluate only through the exact state anchor. The Transformers compatibility backend additionally uses Qwen's `logits_to_keep` path to materialize vocabulary logits only for the state anchor and trainable assistant-token positions. The distributed backend uses verl's packed remove-padding/Ulysses log-probability path. The value-specific changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing loss path.
 
 The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved in a `compaction_value/` sidecar subdirectory as `compaction_value/compaction_value_head.safetensors` plus `compaction_value/compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: verl_fsdp`. A repository-owned verl actor adds the shared-backbone value loss while the four FSDP/Ulysses ranks keep the exported policy namespace unchanged. Frozen values are evaluated from exact causal prefixes, and alignment padding is explicitly zero-weighted instead of dropping intervals. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
 
@@ -431,6 +431,26 @@ To use the legacy SGLang policy rollout path, install SGLang in the runtime envi
 ```powershell
 python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer
 ```
+
+### Qwen3.5 recurrent interval isolation
+
+All repository-owned verl FSDP actors (GRPO, shared value, and separate value) install
+`qwen_interval_attention.py` before FSDP wrapping. Qwen3.5's recurrent layers
+require interval boundaries in addition to the position resets already handled
+by full attention. The adapter gathers recurrent inputs across Ulysses shards,
+runs the native convolution and recurrence separately for each complete interval,
+and returns the local output slice. Its autograd gather sums cross-rank input
+gradients; FSDP retains responsibility for parameter-gradient averaging. This
+also applies during activation-checkpoint recomputation.
+
+Keep the current packing and Ulysses configuration: the adapter fixes both
+cross-interval state leakage and missing state at shard boundaries. It leaves
+collected token IDs, masks, cached probabilities, model parameters, and checkpoint
+namespaces unchanged. Full attention and feed-forward layers remain sequence
+parallel; recurrent computation may be repeated on ranks that share an interval,
+so its memory and runtime costs are higher than the incorrect shard-local path.
+This adapter supports the text-only, cache-free training path and rejects
+ambiguous packed position metadata.
 
 ### Optional verl/Ray training backend
 

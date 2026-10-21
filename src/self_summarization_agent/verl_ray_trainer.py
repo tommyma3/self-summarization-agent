@@ -49,7 +49,7 @@ def _require_verl_worker_group():
         import ray
         from omegaconf import OmegaConf
         from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
-        from verl.workers.engine_workers import ActorRolloutRefWorker
+        from self_summarization_agent.verl_interval_worker import IntervalActorRolloutRefWorker as ActorRolloutRefWorker
     except ImportError as exc:
         raise ImportError(
             "training.verl.worker_backend='verl_fsdp' requires official verl worker-group dependencies. "

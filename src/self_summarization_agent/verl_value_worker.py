@@ -25,7 +25,8 @@ def _require_verl_value_worker_dependencies():
         )
         from verl.utils.metric import AggregationType, Metric
         from verl.utils.ulysses import gather_outputs_and_unpad
-        from verl.workers.engine_workers import ActorRolloutRefWorker, TrainingWorker
+        from verl.workers.engine_workers import TrainingWorker
+        from self_summarization_agent.verl_interval_worker import IntervalActorRolloutRefWorker as ActorRolloutRefWorker
     except ImportError as exc:  # pragma: no cover - exercised on the remote verl environment
         raise ImportError(
             "Compaction-value FSDP training requires the verl version pinned by uv.lock"
