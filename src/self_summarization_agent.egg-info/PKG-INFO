@@ -24,6 +24,7 @@ Requires-Dist: torchvision
 Requires-Dist: vllm>=0.19.1
 Requires-Dist: tensordict>=0.10
 Requires-Dist: flash-linear-attention[cuda]
+Requires-Dist: causal-conv1d
 Provides-Extra: terminal-bench
 Requires-Dist: harbor==0.1.44; extra == "terminal-bench"
 
