@@ -130,7 +130,18 @@ training:
     head_learning_rate: 1.0e-5
     fitting_epochs: 3
     rollout_minibatch_size: 32
-    prefix_microbatch_size: 1
+    # Batch exact state prefixes independently of the actor's full intervals.
+    prefix_microbatch_size: 8
+    eval_prefix_microbatch_size: 32
+    max_prefix_tokens_per_batch: 8192
+    length_bucketing: true
+    activation_checkpointing: false
+    eval_before_fit: false
+    eval_every_n_epochs: 0
+    # Final fitted predictions are always computed for every training state.
+    evalset_interval: 5
+    diagnostics_interval: 5
+    progress_interval_seconds: 30
     max_grad_norm: 1.0
     gpu_id: 0
     seed: 0

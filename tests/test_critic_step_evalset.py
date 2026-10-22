@@ -135,6 +135,7 @@ def test_evalset_drops_records_with_failed_native_cache_and_counts_them(tmp_path
 def test_critic_step_run_records_evalset_metrics(monkeypatch, tmp_path):
     monkeypatch.setattr(separate_value_trainer_module, "SeparateValueTrainer", ConstantCritic)
     config = separate_config(tmp_path)
+    config.training.value.evalset_interval = 1
     checkpoint = tmp_path / "iteration-00000"
     checkpoint.mkdir()
     rollouts = tmp_path / "rollouts"
@@ -158,3 +159,36 @@ def test_critic_step_run_records_evalset_metrics(monkeypatch, tmp_path):
     # Advantage rows still cover exactly the train-collection intervals.
     assert len(body["rows"]) == 2
     assert body["behavior_checkpoint_id"] == "iteration-00000"
+    timings = json.loads((output / critic_step.TIMINGS_FILE).read_text())
+    assert timings["value/critic_total_seconds"] >= timings["value/advantage_export_seconds"] >= 0
+    for phase in ("sample_load", "model_load", "checkpoint_save", "evalset", "advantage_prepare"):
+        assert metrics[f"value/{phase}_seconds"] >= 0
+
+
+@pytest.mark.parametrize("interval,output_id,expected", [
+    (0, "iteration-00005", False), (5, "iteration-00001", False),
+    (5, "iteration-00005", True), (5, ".iteration-00010.incomplete", True),
+    (5, "iteration-00000", False), (5, "custom", False), (1, "custom", True),
+])
+def test_diagnostic_schedule_uses_output_iteration(interval, output_id, expected):
+    assert critic_step.scheduled_iteration(interval, output_id) is expected
+
+
+@pytest.mark.parametrize("interval,reason", [(0, "disabled"), (5, "not_scheduled")])
+def test_skipped_eval_does_not_load_collection_or_skip_advantages(monkeypatch, tmp_path, interval, reason):
+    monkeypatch.setattr(separate_value_trainer_module, "SeparateValueTrainer", ConstantCritic)
+    def unexpected(*args):
+        pytest.fail("Unscheduled evaluation must not read or score the eval collection")
+    monkeypatch.setattr(critic_step, "evaluate_on_eval_collection", unexpected)
+    config = separate_config(tmp_path)
+    config.training.value.evalset_interval = interval
+    checkpoint = tmp_path / "iteration-00000"
+    checkpoint.mkdir()
+    rollouts = tmp_path / "train.jsonl"
+    write_jsonl(rollouts, [attach_native_caches(rollout_row("q", checkpoint.name, -1.0, compaction=2))])
+    output = tmp_path / "iteration-00001"
+    critic_step.run(config, checkpoint, rollouts, output, output.name)
+    body = json.loads((output / ADVANTAGES).read_text())
+    assert body["metrics"]["value/evalset_skipped"] == reason
+    assert len(body["rows"]) == 3
+    assert all(row["advantage"] == -1.0 for row in body["rows"])

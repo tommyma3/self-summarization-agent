@@ -240,9 +240,16 @@ def run_train_step(
                 "--output-id", output_checkpoint_id or output.name]
             if progress:
                 command.extend(["--progress", progress])
+            critic_started = time.monotonic()
             subprocess.run(command, env=environment, check=True)
+            critic_subprocess_seconds = time.monotonic() - critic_started
         fixed_advantages, critic_metrics = load_advantages(output / ADVANTAGES, samples,
             checkpoint_id, config.training.value)
+        from self_summarization_agent.critic_step import TIMINGS_FILE
+        timing_path = output / TIMINGS_FILE
+        if timing_path.is_file():
+            critic_metrics.update(json.loads(timing_path.read_text()))
+        critic_metrics["value/critic_subprocess_seconds"] = critic_subprocess_seconds
 
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))

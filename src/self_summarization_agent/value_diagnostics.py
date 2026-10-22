@@ -12,6 +12,7 @@ def prediction_metrics(
     values: Sequence[float],
     losses: Sequence[float],
     rollout_ids: Sequence[str],
+    *, detailed: bool = True,
 ) -> dict[str, Any]:
     """Normalize once over real states, with equal total weight per rollout."""
     size = len(rewards)
@@ -21,6 +22,8 @@ def prediction_metrics(
         raise ValueError("Critic diagnostics require binary -1/+1 rewards")
     if any(not math.isfinite(v) or not -1 <= v <= 1 for v in values):
         raise ValueError("Critic predictions must be finite expected rewards in [-1, 1]")
+    if any(not math.isfinite(loss) or loss < 0 for loss in losses):
+        raise ValueError("Critic losses must be finite and nonnegative")
     weights = rollout_value_weights(list(rollout_ids))
     weight_sum = math.fsum(weights)
     weights = [w / weight_sum for w in weights]
@@ -37,7 +40,7 @@ def prediction_metrics(
     residuals = [r - v for r, v in zip(rewards, values)]
     reward_variance = variance(rewards)
     bins = []
-    for index in range(10):
+    for index in range(10 if detailed else 0):
         selected = [i for i, p in enumerate(probabilities) if min(9, int(p * 10)) == index]
         mass = math.fsum(weights[i] for i in selected)
         bins.append({
@@ -46,7 +49,7 @@ def prediction_metrics(
             "predicted_success": math.fsum(weights[i] * probabilities[i] for i in selected) / mass if mass else None,
             "observed_success": math.fsum(weights[i] * targets[i] for i in selected) / mass if mass else None,
         })
-    return {
+    result = {
         "state_count": size,
         "rollout_count": len(set(rollout_ids)),
         "weight_sum": weight_sum,
@@ -60,15 +63,19 @@ def prediction_metrics(
         "value_max": max(values),
         "mean_success_probability": mean(probabilities),
         "classification_accuracy": mean([float((v >= 0) == (r > 0)) for v, r in zip(values, rewards)]),
-        "calibration_error": math.fsum(
-            b["weight_mass"] * abs(b["predicted_success"] - b["observed_success"])
-            for b in bins if b["weight_mass"]
-        ),
-        "calibration_bins": bins,
     }
+    if detailed:
+        result.update({
+            "calibration_error": math.fsum(
+                b["weight_mass"] * abs(b["predicted_success"] - b["observed_success"])
+                for b in bins if b["weight_mass"]
+            ),
+            "calibration_bins": bins,
+        })
+    return result
 
 
-def value_diagnostics(samples, values, losses, *, prefix: str) -> dict[str, Any]:
+def value_diagnostics(samples, values, losses, *, prefix: str, detailed: bool = True) -> dict[str, Any]:
     """Include metadata-derived state strata; absent legacy metadata is unknown.
 
     Each stratum recomputes rollout weights among its own real eligible states.
@@ -79,7 +86,7 @@ def value_diagnostics(samples, values, losses, *, prefix: str) -> dict[str, Any]
     if any(sample.rollout_id is None for sample in samples):
         raise ValueError("Critic diagnostics require rollout identities")
     groups = {"": list(range(len(samples)))}
-    for kind in ("initial", "post_compaction", "unknown"):
+    for kind in (("initial", "post_compaction", "unknown") if detailed else ()):
         indices = [i for i, s in enumerate(samples) if getattr(s, "state_kind", "unknown") == kind]
         if indices:
             groups[kind + "/"] = indices
@@ -88,6 +95,7 @@ def value_diagnostics(samples, values, losses, *, prefix: str) -> dict[str, Any]
         metrics = prediction_metrics(
             [samples[i].reward for i in indices], [values[i] for i in indices],
             [losses[i] for i in indices], [str(samples[i].rollout_id) for i in indices],
+            detailed=detailed,
         )
         result.update({f"{prefix}/{group}{key}": value for key, value in metrics.items()})
     return result

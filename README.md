@@ -353,7 +353,7 @@ scripts/train_iterations.sh --iterations 10 \
   --config configs/train/compact_separate_mc_ppo.yaml
 ```
 
-The preset starts with 3 critic epochs (backbone LR `1e-5`, head LR `1e-4`)
+The preset starts with 3 critic epochs (backbone LR `1e-5`, head LR `1e-5`)
 and 2 actor epochs (LR `1e-6`, clip range `0.2`). Critic minibatches are measured
 in rollouts (`rollout_minibatch_size`); `prefix_microbatch_size` controls prefix
 memory use. `training.value.gpu_id` selects the critic subprocess's GPU.
@@ -361,6 +361,55 @@ memory use. `training.value.gpu_id` selects the critic subprocess's GPU.
 behavior-policy KL exceeds the threshold. `training.value.loss_coefficient`
 is for the older shared-head mode and is not used by the separate critic.
 These settings are pilot defaults, not evidence of better task performance.
+
+The separate critic performance preset uses 8 training prefixes and up to 32
+evaluation prefixes per microbatch, length bucketing, and an 8192 padded-token
+budget (`max_prefix_tokens_per_batch`). A valid prefix above this batching budget
+runs alone; it is never truncated. `eval_prefix_microbatch_size: null` inherits
+the training microbatch size. Batching preserves the global rollout minibatch
+and each interval's rollout-normalized weight. These batch sizes should be tuned
+against available memory and the actual prefix-length distribution.
+
+`training.value.activation_checkpointing` controls only the critic (the preset
+disables it); `null` inherits the actor's setting. The default fit path skips
+pre-fit and intermediate full evaluations, then computes all final fitted values
+exactly once for PPO advantages. Set `eval_before_fit: true` and
+`eval_every_n_epochs: 1` to restore intermediate diagnostics. The epoch `online_bce`
+metric averages losses observed during training; it is not frozen-model validation.
+
+`evalset_interval: 5` scores the matching behavior-policy evaluation collection
+every fifth output iteration. `diagnostics_interval: 5` enables calibration bins
+and state-stratified training diagnostics on that cadence. Each accepts `0` to
+disable optional work and `1` for every update; custom non-iteration checkpoint
+names are skipped unless the interval is `1`. Neither setting skips final training
+predictions. Unscheduled measurements have explicit skip markers, not stale values.
+Progress updates are throttled by `progress_interval_seconds`, with phase boundaries
+always reported. Basic final value/advantage metrics and integrity checks remain enabled.
+
+Metrics include model/sample loading, epoch training, final prediction throughput
+and padding, diagnostic evaluation, saving, and advantage preparation. The
+`critic_phase_timings.json` sidecar records actual advantage export and total phase
+time without rewriting the advantage artifact; the parent adds subprocess wall time.
+Kernel diagnostics report which Qwen linear-attention kernels are available.
+`flash-attn` alone does not provide the separate FLA and causal-conv1d kernels.
+
+For an isolated comparison on saved data, run the following only on an idle GPU.
+It reads the checkpoint, fits in memory, and writes a new benchmark JSON without
+modifying the checkpoint or input trajectories:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/benchmark_separate_value.py \
+  --config configs/train/compact_separate_mc_ppo.yaml \
+  --checkpoint /path/to/checkpoints/iteration-00003 \
+  --rollouts /path/to/rollouts/iteration-00004.jsonl \
+  --output /path/to/new-benchmark.json --rollout-limit 8 --repeats 2
+```
+
+The benchmark compares the previous evaluation/batching/checkpointing settings
+against the configured settings, using the same global rollout batches and epochs.
+It reports model-load/fit time and final-value differences; checkpoint saving and
+evaluation-collection scoring are outside its scope. `--fitting-epochs 1` is an
+optional benchmark-only override for a short smoke run.
 
 Actor files stay at the checkpoint root for vLLM. The `critic/` directory stores
 the critic model, head, tokenizer metadata, AdamW state, and update count.

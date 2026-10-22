@@ -262,6 +262,15 @@ class CompactionValueConfig:
     fitting_epochs: int = 3
     rollout_minibatch_size: int = 32
     prefix_microbatch_size: int = 1
+    eval_prefix_microbatch_size: int | None = None
+    max_prefix_tokens_per_batch: int | None = None
+    length_bucketing: bool = True
+    activation_checkpointing: bool | None = None
+    eval_before_fit: bool = False
+    eval_every_n_epochs: int = 0
+    evalset_interval: int = 5
+    diagnostics_interval: int = 5
+    progress_interval_seconds: float = 30.0
     max_grad_norm: float = 1.0
     gpu_id: int = 0
     seed: int = 0
@@ -294,7 +303,20 @@ class CompactionValueConfig:
                 value = getattr(self, name)
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                     raise ValueError(f"training.value.{name} must be finite and positive")
-            for name in ("gpu_id", "seed"):
+            for name in ("eval_prefix_microbatch_size", "max_prefix_tokens_per_batch"):
+                value = getattr(self, name)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+                    raise ValueError(f"training.value.{name} must be a positive integer or null")
+            for name in ("length_bucketing", "eval_before_fit"):
+                if not isinstance(getattr(self, name), bool):
+                    raise ValueError(f"training.value.{name} must be a boolean")
+            if self.activation_checkpointing is not None and not isinstance(self.activation_checkpointing, bool):
+                raise ValueError("training.value.activation_checkpointing must be a boolean or null")
+            if (isinstance(self.progress_interval_seconds, bool)
+                    or not isinstance(self.progress_interval_seconds, (int, float))
+                    or not math.isfinite(self.progress_interval_seconds) or self.progress_interval_seconds <= 0):
+                raise ValueError("training.value.progress_interval_seconds must be finite and positive")
+            for name in ("gpu_id", "seed", "eval_every_n_epochs", "evalset_interval", "diagnostics_interval"):
                 value = getattr(self, name)
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     raise ValueError(f"training.value.{name} must be a nonnegative integer")
