@@ -145,7 +145,7 @@ training:
   update_epochs: 1
   minibatch_size: 128
   clip_range: 0.2
-  target_kl: 0.03
+  target_kl: null
   gradient_accumulation_microbatch_size: 1
   learning_rate: 1.0e-6
   checkpoint_interval: 5

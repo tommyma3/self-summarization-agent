@@ -1,8 +1,9 @@
 # Separate value-MC performance plan
 
 Status: phase timings, batching, critic-specific checkpointing, evaluation cadence,
-and reduced diagnostics implemented. Multi-GPU work is deferred. Kernel dependency
-installation remains pending user approval; dependencies have not been changed.
+and reduced diagnostics implemented. Multi-GPU work is deferred. The user installed
+FLA and causal-conv1d; Qwen fast-path imports and GPU forward/backward execution
+have now been verified. No further dependency changes were made during validation.
 
 Goal: reduce time from collected trajectories to saved fitted advantages, preserving the existing three-epoch critic objective and the append-only/exact-token training contract.
 
@@ -122,7 +123,7 @@ Keep full diagnostics for controlled validation comparisons. Then use the fast p
 
 ## Expected benefit and remaining bottleneck
 
-No measured speedup is claimed yet. A useful target is at least 2x lower total critic-phase time, with larger gains contingent on kernel fallback and batching measurements. At current timings, a 3x improvement in the recorded fit portion alone saves about 18–23 minutes per update, roughly 9–12% of total train-update wall time. Actor updates remain the dominant cost.
+The initial target was at least 2x lower total critic-phase time; the sample measurements below now establish gains for fitting, but not for a full production iteration. At the original timings, a 3x improvement in the recorded fit portion alone would save about 18–23 minutes per update, roughly 9–12% of total train-update wall time. Actor updates remain the dominant cost.
 
 After critic work, profile the actor's 157–162 minutes separately. Its logs also contain fast-path warnings, so kernel repair may help both components, but this needs independent validation with the actor's FSDP/sequence-parallel setup.
 
@@ -137,10 +138,11 @@ critic activation checkpointing disabled. Three fitting epochs and the global
 eval-collection scoring and detailed training diagnostics run every five output
 iterations. The README describes all overrides, timing metrics, and the benchmark.
 
-The environment already has flash-attn 2.8.3.post1, but neither FLA nor causal-conv1d.
-Both the installed Qwen implementation and the GPU benchmark report the linear
-attention fast path unavailable. No dependency manifest, lockfile, or installed
-package was changed. Adding the missing packages is a separate approval decision.
+At the initial benchmark, the environment had flash-attn 2.8.3.post1 but neither
+FLA nor causal-conv1d. The Qwen implementation reported its linear-attention fast
+path unavailable. The code-only optimization did not modify dependency manifests,
+lockfiles, or installed packages. The user subsequently installed both missing
+packages; their validation is recorded below.
 
 GPU benchmark: Qwen3.5-0.8B, bf16, one A100 80 GiB, checkpoint iteration-00003,
 reservoir sample of 16 whole rollouts from iteration-00004: 37 states, including
@@ -185,3 +187,39 @@ already disagree with unchanged committed presets: shared-value head LR expects
 no-compaction-loss preset differs from default in more than identity and masking.
 Those unrelated configuration files and tests were left unchanged. Whitespace
 validation (`git diff --check`) passed.
+
+## Fast-kernel validation after user installation
+
+Verified flash-linear-attention 0.5.2 and causal-conv1d 1.7.0 with the unchanged
+PyTorch 2.10.0+cu128 and Transformers 5.5.3. Qwen reports all fast-path components
+available: causal convolution, chunked/recurrent gated-delta-rule functions, and
+fused gated normalization import successfully. Dense attention remains SDPA.
+
+Repeated the same 16-rollout / 37-state sample and three-epoch schedule on GPU 0.
+Both settings completed forward/backward execution and three optimizer updates.
+
+| Kernel-enabled trial | Previous settings fit | Optimized settings fit | Previous settings final CE | Optimized settings final CE |
+| --- | ---: | ---: | ---: | ---: |
+| First pass, including startup overhead | 106.23 s | 9.24 s | 0.42621 | 0.42768 |
+| Repeated pass, warmed kernels | 32.59 s | 2.73 s | 0.42665 | 0.42754 |
+
+The warmed optimized fit is about 4.8–4.9x faster than the earlier optimized
+PyTorch-fallback fit (13.09–13.43 s). Peak allocated memory fell from 36.0 GiB
+to 15.2 GiB. Model loading plus optimized fitting took 19.04 s initially and
+11.12 s on the repeat; these figures exclude sample loading, checkpoint saving,
+eval-collection scoring, and actor training.
+
+The first kernel-enabled pass showed substantial startup overhead, consistent
+with first-use kernel compilation: pre-fit evaluation took 30.54 s initially
+versus 1.48 s on repeat; the first training epoch took 54.01 s initially versus
+8.52 s on repeat under the previous settings. Compilation time was not separately
+profiled, so warmed timing must not be presented as cold-start latency.
+
+Maximum same-weight batched/unbatched value differences were 0.01179 and 0.00627;
+maximum post-update differences between the two settings were 0.00966 and 0.01055.
+Final losses and gradient norms were finite. These bf16 sample checks do not
+establish bitwise equality, full-iteration speed, or long-run policy quality.
+
+Results: `artifacts/benchmarks/separate-value-performance-fast-kernels.json`.
+All benchmark GPU memory was released. No saved checkpoint, rollout, dependency,
+or training-source changes were needed for this validation.
