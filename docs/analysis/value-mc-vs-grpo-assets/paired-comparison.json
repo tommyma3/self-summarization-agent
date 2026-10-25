@@ -1,0 +1,34 @@
+[
+  {
+    "checkpoint": 0,
+    "both_correct": 34,
+    "mc_only": 13,
+    "grpo_only": 9,
+    "neither": 44,
+    "mcnemar_exact_p": 0.5234670639038086
+  },
+  {
+    "checkpoint": 3,
+    "both_correct": 42,
+    "mc_only": 24,
+    "grpo_only": 13,
+    "neither": 21,
+    "mcnemar_exact_p": 0.09887174959294498
+  },
+  {
+    "checkpoint": 24,
+    "both_correct": 84,
+    "mc_only": 5,
+    "grpo_only": 11,
+    "neither": 0,
+    "mcnemar_exact_p": 0.210113525390625
+  },
+  {
+    "checkpoint": 28,
+    "both_correct": 76,
+    "mc_only": 6,
+    "grpo_only": 15,
+    "neither": 3,
+    "mcnemar_exact_p": 0.0783538818359375
+  }
+]
