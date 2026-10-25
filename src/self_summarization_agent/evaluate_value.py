@@ -52,7 +52,8 @@ def evaluate_value_checkpoint(
             raise ValueError("Separate critic evaluation requires a complete saved pair")
         trainer = SeparateValueTrainer(checkpoint / CRITIC_DIR, checkpoint, config.training.value,
             dtype=config.model.dtype, device=f"cuda:{config.training.value.gpu_id}",
-            resume=False, activation_checkpointing=False)
+            resume=False, activation_checkpointing=False,
+            advantage_estimator=config.training.advantage_estimator)
         values, losses = trainer.evaluate(samples)
         return {"evaluated_checkpoint": str(checkpoint.resolve()),
             "generating_checkpoint_id": generating_checkpoint_id, "rollout_path": str(Path(rollout_path).resolve()),

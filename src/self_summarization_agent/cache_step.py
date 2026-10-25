@@ -9,7 +9,7 @@ from typing import Any
 import warnings
 
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
-from self_summarization_agent.config import load_train_config, parse_cli_overrides
+from self_summarization_agent.config import CompactionValueConfig, load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
 from self_summarization_agent.trajectory import (
@@ -297,7 +297,7 @@ def build_cache_scorer(config, *, checkpoint_path: str | Path):
     # adds an unnecessary sidecar dependency.
     scoring_config = replace(
         training_config,
-        value=replace(training_config.value, enabled=False),
+        value=CompactionValueConfig(),
         advantage_estimator="group_relative",
     )
     if scoring_config.backend == "fsdp2_context_parallel":

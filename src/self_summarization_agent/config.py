@@ -256,6 +256,9 @@ class VerlRayConfig:
 @dataclass(slots=True)
 class CompactionValueConfig:
     enabled: bool = False
+    num_bins: int = 2
+    baseline_timing: str = "post_fit"
+    gae_lambda: float = 0.95
     architecture: str = "shared"
     model_path: str | None = None
     learning_rate: float = 1e-5
@@ -288,6 +291,15 @@ class CompactionValueConfig:
         return self.enabled and self.architecture == "shared"
 
     def __post_init__(self) -> None:
+        if isinstance(self.num_bins, bool) or not isinstance(self.num_bins, int) or self.num_bins < 2:
+            raise ValueError("training.value.num_bins must be an integer >= 2")
+        if self.baseline_timing not in {"pre_fit", "post_fit"}:
+            raise ValueError("training.value.baseline_timing must be pre_fit or post_fit")
+        if (isinstance(self.gae_lambda, bool) or not isinstance(self.gae_lambda, (float, int))
+                or not math.isfinite(self.gae_lambda) or not 0 <= self.gae_lambda <= 1):
+            raise ValueError("training.value.gae_lambda must be finite and in [0, 1]")
+        if self.architecture != "separate" and (self.num_bins != 2 or self.baseline_timing != "post_fit"):
+            raise ValueError("Categorical bins and baseline timing overrides require a separate critic")
         if self.architecture not in {"shared", "separate"}:
             raise ValueError("training.value.architecture must be shared or separate")
         if self.architecture == "separate":
@@ -382,17 +394,21 @@ class TrainingConfig:
                 raise ValueError("Separate critic supports transformers or verl_ray with transformers/verl_fsdp")
             if not self.train_compaction_tokens:
                 raise ValueError("Separate MC preset requires all assistant tokens, including compactions")
-        supported = {"group_relative", "compaction_mc_value"}
+        supported = {"group_relative", "compaction_mc_value", "compaction_gae_value"}
         if self.advantage_estimator not in supported:
             raise ValueError(
                 f"training.advantage_estimator must be one of {sorted(supported)}, "
                 f"got {self.advantage_estimator!r}"
             )
-        if self.value.enabled != (self.advantage_estimator == "compaction_mc_value"):
+        if self.value.enabled != (self.advantage_estimator in {"compaction_mc_value", "compaction_gae_value"}):
             raise ValueError(
                 "training.value.enabled must be true exactly when "
-                "training.advantage_estimator='compaction_mc_value'"
+                "training.advantage_estimator is compaction_mc_value or compaction_gae_value"
             )
+        if self.advantage_estimator == "compaction_gae_value" and (
+            not self.value.separate or self.value.baseline_timing != "pre_fit"
+        ):
+            raise ValueError("Segment GAE requires a separate critic with pre_fit baseline timing")
 
 
 @dataclass(slots=True)

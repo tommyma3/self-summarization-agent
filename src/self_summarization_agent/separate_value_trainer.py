@@ -1,8 +1,9 @@
-"""Prefix-only MC classification using an independently optimized text model."""
+"""Exact-prefix categorical value fitting with an independent text model."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import json
 import random
 import sys
 import time
@@ -12,11 +13,11 @@ import torch
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 from self_summarization_agent.separate_value import (
-    CRITIC_MANIFEST, CRITIC_STATE, atomic_json, digest, validate_samples,
+    CRITIC_MANIFEST, CRITIC_STATE, atomic_json, digest, validate_samples, sample_key, method_spec,
 )
 from self_summarization_agent.value_model import (
-    expected_binary_value, load_value_head, model_hidden_size,
-    reward_class_indices, save_value_head,
+    expected_categorical_value, load_value_head, model_hidden_size,
+    two_hot_targets, outcome_log_losses, save_value_head,
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.trainer import _write_training_progress
@@ -33,18 +34,29 @@ class _PreparedPrefixes:
     prefixes: list[torch.Tensor]
     lengths: list[int]
     targets: torch.Tensor
+    rewards: torch.Tensor
 
 
 class SeparateValueTrainer:
     def __init__(self, source, actor_path, config, *, dtype="bfloat16", device="cuda:0",
-                 activation_checkpointing=True, resume=False, progress_path=None):
+                 activation_checkpointing=True, resume=False, progress_path=None,
+                 advantage_estimator="compaction_mc_value"):
         self.config = config
+        self.method = method_spec(config, advantage_estimator)
+        self.frozen_digest = None
+        self.source_critic_identity = None
         self.progress_path = progress_path
         self.device = torch.device(device)
         self.update_count = 0
         self._last_progress = float("-inf")
         self.detailed_diagnostics = False
         self.source = str(source)
+        if resume:
+            manifest = json.loads((Path(source) / CRITIC_MANIFEST).read_text())
+            legacy_method = {**method_spec(config), "num_bins": 2, "support": [-1.0, 1.0],
+                             "baseline_timing": "post_fit"}
+            if manifest.get("method", legacy_method) != self.method:
+                raise ValueError("Critic method/support changed during resume; start a fresh experiment")
         self.tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=False)
         actor_tokenizer = AutoTokenizer.from_pretrained(actor_path, trust_remote_code=False)
         self.tokenizer_hash = tokenizer_signature(self.tokenizer)
@@ -70,8 +82,10 @@ class SeparateValueTrainer:
                                          else config.activation_checkpointing)
         if self.activation_checkpointing:
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        self.head, found = load_value_head(source, hidden_size=model_hidden_size(self.model),
-                                           zero_initialize=config.zero_initialize_head)
+        with torch.random.fork_rng(devices=[]):
+            torch.random.default_generator.manual_seed(config.seed)
+            self.head, found = load_value_head(source, hidden_size=model_hidden_size(self.model),
+                                               zero_initialize=config.zero_initialize_head, num_bins=config.num_bins)
         if resume and not found:
             raise ValueError("Resumed critic is missing its value head")
         self.head.to(device=self.device, dtype=torch_dtype)
@@ -112,14 +126,19 @@ class SeparateValueTrainer:
             _write_training_progress(self.progress_path, stage, **payload)
             self._last_progress = now
 
-    def _prepare(self, samples):
+    def _prepare(self, samples, scalar_targets=None):
         prefixes = [s.input_ids[:s.state_prefix_length] for s in samples]
         limit = self.model.config.max_position_embeddings
         vocab_size = self.model.get_input_embeddings().num_embeddings
         if any(not p or len(p) > limit or any(t < 0 or t >= vocab_size for t in p) for p in prefixes):
             raise ValueError("Critic prefix exceeds model capacity or vocabulary")
+        rewards = torch.tensor([s.reward for s in samples], dtype=torch.float32)
+        if scalar_targets is not None and set(scalar_targets) != {sample_key(s) for s in samples}:
+            raise ValueError("Fixed value targets must cover exactly the interval keys")
+        targets = (rewards if scalar_targets is None else
+                   torch.tensor([scalar_targets[sample_key(s)] for s in samples], dtype=torch.float32))
         return _PreparedPrefixes([torch.tensor(p, dtype=torch.long) for p in prefixes],
-            [len(p) for p in prefixes], reward_class_indices(torch.tensor([s.reward for s in samples])))
+            [len(p) for p in prefixes], two_hot_targets(targets, self.config.num_bins), rewards)
 
     def _batches(self, prepared, indices, batch_size):
         indices = list(indices)
@@ -185,9 +204,9 @@ class SeparateValueTrainer:
                 for indices in self._batches(prepared, range(size),
                         self.config.eval_prefix_microbatch_size or self.config.prefix_microbatch_size):
                     logits = self._logits_prepared(prepared, indices)
-                    targets = self._to_device(prepared.targets[indices])
-                    values = expected_binary_value(logits)
-                    losses = torch.nn.functional.cross_entropy(logits.float(), targets, reduction="none")
+                    rewards = self._to_device(prepared.rewards[indices])
+                    values = expected_categorical_value(logits)
+                    losses = outcome_log_losses(logits, rewards)
                     predictions[self._to_device(torch.tensor(indices))] = torch.stack((values, losses), dim=1)
                     padded_tokens += len(indices) * max(prepared.lengths[i] for i in indices)
                     completed += len(indices)
@@ -203,15 +222,17 @@ class SeparateValueTrainer:
         return values, losses, {"seconds": elapsed, "states_per_second": size / elapsed,
             "prefix_tokens_per_second": tokens / elapsed, "padding_fraction": 1 - tokens / padded_tokens}
 
-    def fit(self, samples, *, max_sequence_length=None):
+    def fit(self, samples, *, max_sequence_length=None, scalar_targets=None):
         self.synchronize()
         started = time.monotonic()
+        if self.method["estimator"] == "compaction_gae_value" and scalar_targets is None:
+            raise ValueError("GAE fitting requires frozen pre-fit scalar targets")
         validate_samples(samples, max_sequence_length)
         if not samples:
             return [], {"value/optimizer_step_count": 0}
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
-        prepared = self._prepare(samples)
+        prepared = self._prepare(samples, scalar_targets)
         metrics = {"value/prepare_seconds": time.monotonic() - started, **self.kernel_diagnostics(),
                    "value/detailed_diagnostics": self.detailed_diagnostics}
         if self.config.eval_before_fit:
@@ -264,7 +285,7 @@ class SeparateValueTrainer:
             train_seconds += elapsed
             prefix = f"value/epoch_{epoch + 1}"
             metrics.update({f"{prefix}/train_seconds": elapsed,
-                f"{prefix}/online_bce": float(online_loss) / len(keys),
+                f"{prefix}/target_ce": float(online_loss) / len(keys),
                 f"{prefix}/states_per_second": len(samples) / elapsed,
                 f"{prefix}/prefix_tokens_per_second": sum(prepared.lengths) / elapsed,
                 f"{prefix}/padding_fraction": 1 - sum(prepared.lengths) / padded_tokens})
@@ -275,7 +296,9 @@ class SeparateValueTrainer:
                                                  detailed=self.detailed_diagnostics))
                 metrics[f"{prefix}/eval_seconds"] = stats["seconds"]
             print(f"[critic] epoch={epoch + 1}/{self.config.fitting_epochs} "
-                  f"online_CE={metrics[f'{prefix}/online_bce']:.6f} train_seconds={elapsed:.2f}", flush=True)
+                  f"target_CE={metrics[f'{prefix}/target_ce']:.6f} train_seconds={elapsed:.2f}", flush=True)
+            if scalar_targets is None and self.config.num_bins == 2:
+                metrics[f"{prefix}/online_bce"] = metrics[f"{prefix}/target_ce"]
         self._progress("critic_final_predictions", force=True, state_count=len(samples))
         values, losses, stats = self._evaluate_prepared(prepared)
         metrics.update({f"value/final_predictions/{key}": value for key, value in stats.items()})
@@ -302,8 +325,12 @@ class SeparateValueTrainer:
         torch.save({"version": 1, "optimizer": self.optimizer.state_dict(),
                     "update_count": self.update_count}, path / CRITIC_STATE)
         identity = uuid.uuid4().hex
-        atomic_json(path / CRITIC_MANIFEST, {"version": 1, "identity": identity,
-            "checkpoint_id": checkpoint_id, "class_order": [-1, 1],
+        version = 1 if self.config.num_bins == 2 and self.config.baseline_timing == "post_fit" else 2
+        atomic_json(path / CRITIC_MANIFEST, {"version": version, "identity": identity,
+            "checkpoint_id": checkpoint_id,
+            **({"class_order": [-1, 1]} if version == 1 else {}),
+            **({"method": self.method, "frozen_digest": self.frozen_digest,
+                "source_critic_identity": self.source_critic_identity} if version == 2 else {}),
             "tokenizer_signature": self.tokenizer_hash, "initialization": self.config.model_path,
             "source": self.source, "config": asdict(self.config)})
         return identity

@@ -243,8 +243,17 @@ def run_train_step(
             critic_started = time.monotonic()
             subprocess.run(command, env=environment, check=True)
             critic_subprocess_seconds = time.monotonic() - critic_started
+        from self_summarization_agent.segment_returns import ordered_rollout_chains
+        from self_summarization_agent.separate_value import source_critic_identity
+        prefit = config.training.value.baseline_timing == "pre_fit"
+        resumed = validate_resume_checkpoint(checkpoint)
+        source_identity = (source_critic_identity(checkpoint / CRITIC_DIR if resumed else
+                           config.training.value.model_path, resume=resumed) if prefit else None)
+        chains = (ordered_rollout_chains(rows, samples)
+                  if config.training.advantage_estimator == "compaction_gae_value" else [])
         fixed_advantages, critic_metrics = load_advantages(output / ADVANTAGES, samples,
-            checkpoint_id, config.training.value)
+            checkpoint_id, config.training.value, estimator=config.training.advantage_estimator,
+            chains=chains, source_identity=source_identity)
         from self_summarization_agent.critic_step import TIMINGS_FILE
         timing_path = output / TIMINGS_FILE
         if timing_path.is_file():
@@ -334,9 +343,13 @@ def run_train_step(
         if config.training.value.separate:
             logical_id = output_checkpoint_id or output_checkpoint.name
             critic_manifest = json.loads((output_checkpoint / CRITIC_DIR / CRITIC_MANIFEST).read_text())
-            atomic_json(output_checkpoint / PAIR_MANIFEST, {"version": 1, "architecture": "separate",
+            from self_summarization_agent.separate_value import digest
+            pair_version = critic_manifest["version"]
+            atomic_json(output_checkpoint / PAIR_MANIFEST, {"version": pair_version, "architecture": "separate",
                 "checkpoint_id": logical_id, "actor_source": checkpoint_id,
                 "critic_identity": critic_manifest["identity"],
+                **({"method": critic_manifest["method"], "advantages_digest": digest(
+                    json.loads((output_checkpoint / ADVANTAGES).read_text()))} if pair_version == 2 else {}),
                 "actor_optimizer": "reset_each_iteration", "critic_optimizer": "persistent"})
             if not separate_checkpoint_complete(output_checkpoint, expected_id=logical_id):
                 raise ValueError("Refusing to publish incomplete actor/critic pair")

@@ -131,9 +131,9 @@ def test_prepares_prefixes_once_per_fit(tiny, monkeypatch):
     trainer = critic(tiny)
     original = trainer._prepare
     calls = []
-    def prepare(data):
+    def prepare(data, scalar_targets=None):
         calls.append(len(data))
-        return original(data)
+        return original(data, scalar_targets)
     monkeypatch.setattr(trainer, "_prepare", prepare)
     trainer.fit(samples())
     assert calls == [3]

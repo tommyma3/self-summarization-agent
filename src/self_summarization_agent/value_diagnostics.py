@@ -55,6 +55,7 @@ def prediction_metrics(
         "weight_sum": weight_sum,
         "bce": normalized_value_evaluation_loss(list(losses), weights),
         "brier_score": mean([(p - y) ** 2 for p, y in zip(probabilities, targets)]),
+        "value_mse": mean([residual ** 2 for residual in residuals]),
         "explained_variance": 1 - variance(residuals) / reward_variance if reward_variance > 0 else None,
         "mean_reward": mean(rewards),
         "mean_value": mean(values),
@@ -99,3 +100,47 @@ def value_diagnostics(samples, values, losses, *, prefix: str, detailed: bool = 
         )
         result.update({f"{prefix}/{group}{key}": value for key, value in metrics.items()})
     return result
+
+
+def frozen_target_diagnostics(samples, rows, chains, num_bins):
+    """Descriptive, rollout-weighted statistics; bin spread is not uncertainty."""
+    from self_summarization_agent.separate_value import sample_key
+    keyed = {tuple(row["key"]): row for row in rows}
+    depths = {tuple(item["key"]): item["segment_index"] for chain in chains for item in chain}
+    groups = {"all": list(samples)}
+    for sample in samples:
+        groups.setdefault(f"state/{sample.state_kind}", []).append(sample)
+        groups.setdefault("outcome/success" if sample.reward > 0 else "outcome/failure", []).append(sample)
+        if sample_key(sample) in depths:
+            groups.setdefault(f"depth/{depths[sample_key(sample)]}", []).append(sample)
+    metrics = {}
+    for name, selected in groups.items():
+        if not selected:
+            continue
+        weights = rollout_value_weights([str(s.rollout_id) for s in selected])
+        prefix = f"value/frozen/{name}"
+        for field in ("target", "advantage"):
+            values = [keyed[sample_key(s)][field] for s in selected]
+            ordered = sorted(zip(values, weights))
+            for quantile in (0.1, 0.5, 0.9):
+                cumulative = 0.0
+                value = ordered[-1][0]
+                for candidate, weight in ordered:
+                    cumulative += weight
+                    if cumulative >= quantile:
+                        value = candidate
+                        break
+                metrics[f"{prefix}/{field}_p{int(quantile * 100)}"] = value
+        metrics[f"{prefix}/abs_advantage_below_0.1"] = sum(
+            w for s, w in zip(selected, weights) if abs(keyed[sample_key(s)]["advantage"]) < 0.1)
+        metrics[f"{prefix}/target_mc_mae"] = sum(
+            w * abs(keyed[sample_key(s)]["target"] - s.reward) for s, w in zip(selected, weights))
+        occupancy = [0.0] * num_bins
+        for sample, weight in zip(selected, weights):
+            position = (keyed[sample_key(sample)]["target"] + 1) * (num_bins - 1) / 2
+            lower = min(num_bins - 1, max(0, int(position)))
+            fraction = position - lower
+            occupancy[lower] += weight * (1 - fraction)
+            occupancy[min(lower + 1, num_bins - 1)] += weight * fraction
+        metrics[f"{prefix}/target_bin_mass"] = occupancy
+    return metrics

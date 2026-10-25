@@ -69,7 +69,8 @@ def separate_config(tmp_path):
     value = CompactionValueConfig(enabled=True, architecture="separate",
         model_path=str(tmp_path / "unused-base"), fitting_epochs=1)
     config.training.value = value
-    config.training.max_sequence_length = 512
+    # The real renderer's system/tool prefix is longer than 512 tokens.
+    config.training.max_sequence_length = 27000
     config.model = replace(config.model, dtype="float32")
     return config
 

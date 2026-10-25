@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from dataclasses import asdict
+import json
 from pathlib import Path
 import re
 import time
@@ -11,8 +12,10 @@ import time
 from self_summarization_agent.config import load_train_config
 from self_summarization_agent.separate_value import (
     ADVANTAGES, CRITIC_DIR, atomic_json, digest, sample_fingerprint, sample_key,
-    validate_resume_checkpoint,
+    validate_resume_checkpoint, validate_samples, FROZEN_TARGETS, frozen_target_artifact,
+    validate_frozen_targets, source_critic_identity,
 )
+from self_summarization_agent.segment_returns import ordered_rollout_chains
 
 EVALSET_PREFIX = "value/evalset"
 TIMINGS_FILE = "critic_phase_timings.json"
@@ -98,20 +101,53 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
     from self_summarization_agent.trainer import _write_training_progress
     checkpoint, output = Path(checkpoint), Path(output)
     started = time.monotonic()
-    samples = samples_from_rollout_rows(_load_rollout_rows(rollouts), expected_checkpoint_id=checkpoint.name,
+    rollout_rows = _load_rollout_rows(rollouts)
+    samples = samples_from_rollout_rows(rollout_rows, expected_checkpoint_id=checkpoint.name,
                                        retain_critic_only_states=True)
+    validate_samples(samples, config.training.max_sequence_length)
+    estimator = config.training.advantage_estimator
+    chains = ordered_rollout_chains(rollout_rows, samples) if estimator == "compaction_gae_value" else []
     resume = validate_resume_checkpoint(checkpoint)
     source = checkpoint / CRITIC_DIR if resume else config.training.value.model_path
     phases = {"value/sample_load_seconds": time.monotonic() - started}
     _write_training_progress(progress, "critic_load", source=str(source))
     started = time.monotonic()
     critic = SeparateValueTrainer(source, checkpoint, config.training.value, dtype=config.model.dtype,
-        resume=resume, activation_checkpointing=config.training.activation_checkpointing, progress_path=progress)
+        resume=resume, activation_checkpointing=config.training.activation_checkpointing, progress_path=progress,
+        advantage_estimator=estimator)
     synchronize = getattr(critic, "synchronize", lambda: None)
     synchronize()
     phases["value/model_load_seconds"] = time.monotonic() - started
     critic.detailed_diagnostics = scheduled_iteration(config.training.value.diagnostics_interval, output_id)
-    values, metrics = critic.fit(samples, max_sequence_length=config.training.max_sequence_length)
+    frozen = None
+    prefit_metrics = {}
+    if config.training.value.baseline_timing == "pre_fit":
+        from self_summarization_agent.value_diagnostics import value_diagnostics
+        source_identity = source_critic_identity(source, resume=resume)
+        frozen_path = output / FROZEN_TARGETS
+        started = time.monotonic()
+        if frozen_path.exists():
+            frozen = json.loads(frozen_path.read_text())
+            validate_frozen_targets(frozen, samples, checkpoint.name, config.training.value, estimator,
+                                    chains=chains, source_identity=source_identity)
+        else:
+            _write_training_progress(progress, "critic_prefit_predictions", state_count=len(samples))
+            old_values, old_losses = critic.evaluate(samples)
+            if samples:
+                prefit_metrics = value_diagnostics(samples, old_values, old_losses, prefix="value/prefit",
+                                                   detailed=critic.detailed_diagnostics)
+            frozen = frozen_target_artifact(samples, old_values, checkpoint.name, config.training.value,
+                                            estimator, chains, source_identity)
+            atomic_json(frozen_path, frozen)
+        phases["value/frozen_target_seconds"] = time.monotonic() - started
+        critic.frozen_digest = frozen["digest"]
+        critic.source_critic_identity = source_identity
+        targets = {tuple(row["key"]): row["target"] for row in frozen["rows"]}
+        values, metrics = critic.fit(samples, max_sequence_length=config.training.max_sequence_length,
+                                     scalar_targets=targets)
+        metrics.update(prefit_metrics)
+    else:
+        values, metrics = critic.fit(samples, max_sequence_length=config.training.max_sequence_length)
     _write_training_progress(progress, "critic_save")
     started = time.monotonic()
     identity = critic.save(output / CRITIC_DIR, output_id)
@@ -126,7 +162,8 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
             "disabled" if config.training.value.evalset_interval == 0 else "not_scheduled")
     phases["value/evalset_seconds"] = time.monotonic() - started
     started = time.monotonic()
-    advantages = [s.reward - v for s, v in zip(samples, values)]
+    advantages = ([row["advantage"] for row in frozen["rows"]] if frozen is not None else
+                  [s.reward - v for s, v in zip(samples, values)])
     if advantages:
         mean_advantage = sum(advantages) / len(advantages)
         metrics.update({"value/advantage_mean": mean_advantage,
@@ -138,6 +175,12 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
         "config_fingerprint": digest(asdict(config.training.value)),
         "rows": [{"key": sample_key(s), "value": v, "advantage": a}
                  for s, v, a in zip(samples, values, advantages)], "metrics": metrics}
+    if frozen is not None:
+        body = {"version": 2, "critic_identity": identity, "frozen_digest": frozen["digest"],
+                "rows": frozen["rows"], "metrics": metrics}
+        from self_summarization_agent.value_diagnostics import frozen_target_diagnostics
+        metrics.update(frozen_target_diagnostics(samples, frozen["rows"], chains,
+                                                config.training.value.num_bins))
     phases["value/advantage_prepare_seconds"] = time.monotonic() - started
     metrics.update(phases)
     started = time.monotonic()

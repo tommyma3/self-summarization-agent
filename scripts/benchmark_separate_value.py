@@ -73,11 +73,21 @@ def main():
             torch.manual_seed(value.seed)
             started = time.monotonic()
             trainer = SeparateValueTrainer(source, args.checkpoint, settings, dtype=config.model.dtype,
-                device=args.device, resume=resume, activation_checkpointing=config.training.activation_checkpointing)
+                device=args.device, resume=resume, activation_checkpointing=config.training.activation_checkpointing,
+                advantage_estimator=config.training.advantage_estimator)
             trainer.synchronize()
             loaded = time.monotonic()
             trainer.detailed_diagnostics = name == "baseline"
-            predictions, metrics = trainer.fit(samples, max_sequence_length=config.training.max_sequence_length)
+            fit_kwargs = {}
+            if config.training.advantage_estimator == "compaction_gae_value":
+                from self_summarization_agent.segment_returns import ordered_rollout_chains, segment_gae
+                from self_summarization_agent.separate_value import sample_key
+                values, _ = trainer.evaluate(samples)
+                returns = segment_gae(ordered_rollout_chains(rows, samples),
+                    dict(zip(map(sample_key, samples), values)), settings.gae_lambda)
+                fit_kwargs["scalar_targets"] = {key: row["target"] for key, row in returns.items()}
+            predictions, metrics = trainer.fit(samples, max_sequence_length=config.training.max_sequence_length,
+                                                **fit_kwargs)
             trainer.synchronize()
             run = {"variant": name, "repeat": repeat, "load_seconds": loaded - started,
                    "total_seconds": time.monotonic() - started, "metrics": metrics}

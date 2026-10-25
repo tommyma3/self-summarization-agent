@@ -26,6 +26,52 @@ def expected_binary_value(logits: torch.Tensor) -> torch.Tensor:
     return probabilities[..., 1] - probabilities[..., 0]
 
 
+def value_support(num_bins: int) -> list[float]:
+    if isinstance(num_bins, bool) or not isinstance(num_bins, int) or num_bins < 2:
+        raise ValueError("Value support requires at least two bins")
+    return [-1.0 + 2.0 * k / (num_bins - 1) for k in range(num_bins)]
+
+
+def expected_categorical_value(logits: torch.Tensor) -> torch.Tensor:
+    if logits.shape[-1] == 2:
+        return expected_binary_value(logits)
+    support = logits.new_tensor(value_support(logits.shape[-1]), dtype=torch.float32)
+    return (logits.float().softmax(-1) * support).sum(-1)
+
+
+def two_hot_targets(targets: torch.Tensor, num_bins: int) -> torch.Tensor:
+    """Detached interpolation on [-1, 1]; only roundoff-sized overflow is clamped."""
+    value_support(num_bins)
+    targets = targets.detach().float()
+    if not bool(torch.isfinite(targets).all()) or bool((targets.abs() > 1 + 1e-6).any()):
+        raise ValueError("Value targets must be finite and in [-1, 1]")
+    positions = ((targets.clamp(-1, 1) + 1) * ((num_bins - 1) / 2)).clamp(0, num_bins - 1)
+    lower = positions.floor().long()
+    upper = (lower + 1).clamp(max=num_bins - 1)
+    fraction = positions - lower
+    result = targets.new_zeros((*targets.shape, num_bins))
+    result.scatter_add_(-1, lower.unsqueeze(-1), (1 - fraction).unsqueeze(-1))
+    result.scatter_add_(-1, upper.unsqueeze(-1), fraction.unsqueeze(-1))
+    return result
+
+
+def outcome_log_losses(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
+    """Binary outcome log loss implied by the categorical mean, computed stably."""
+    support = logits.new_tensor(value_support(logits.shape[-1]), dtype=torch.float32)
+    success = (support + 1) / 2
+    log_probs = logits.float().log_softmax(-1)
+    positive = torch.logsumexp(log_probs + success.log(), dim=-1)
+    negative = torch.logsumexp(log_probs + (1 - success).log(), dim=-1)
+    return -torch.where(rewards > 0, positive, negative)
+
+
+def value_head_manifest(hidden_size: int, num_bins: int) -> dict:
+    if num_bins == 2:
+        return {"version": 1, "hidden_size": hidden_size, "class_order": [-1, 1]}
+    return {"version": 2, "hidden_size": hidden_size, "num_bins": num_bins,
+            "support": value_support(num_bins), "target_encoding": "two_hot"}
+
+
 def rollout_value_weights(rollout_ids: list[str]) -> list[float]:
     if not rollout_ids:
         return []
@@ -70,9 +116,10 @@ def rollout_normalized_value_loss(
 
 
 class CompactionValueHead(torch.nn.Module):
-    def __init__(self, hidden_size: int, *, zero_initialize: bool = True) -> None:
+    def __init__(self, hidden_size: int, *, zero_initialize: bool = True, num_bins: int = 2) -> None:
         super().__init__()
-        self.projection = torch.nn.Linear(hidden_size, 2)
+        value_support(num_bins)
+        self.projection = torch.nn.Linear(hidden_size, num_bins)
         if zero_initialize:
             torch.nn.init.zeros_(self.projection.weight)
             torch.nn.init.zeros_(self.projection.bias)
@@ -127,11 +174,7 @@ def save_value_head(head: CompactionValueHead, checkpoint_path: str | Path) -> N
     )
     manifest_path.write_text(
         json.dumps(
-            {
-                "version": VALUE_HEAD_VERSION,
-                "hidden_size": head.projection.in_features,
-                "class_order": [-1, 1],
-            },
+            value_head_manifest(head.projection.in_features, head.projection.out_features),
             indent=2,
             sort_keys=True,
         )
@@ -145,6 +188,7 @@ def load_value_head(
     *,
     hidden_size: int,
     zero_initialize: bool,
+    num_bins: int = 2,
 ) -> tuple[CompactionValueHead, bool]:
     path = Path(checkpoint_path)
     weights_path = path / VALUE_HEAD_FILENAME
@@ -159,17 +203,13 @@ def load_value_head(
     if not manifest_path.exists() and legacy_manifest_path.exists():
         manifest_path = legacy_manifest_path
 
-    head = CompactionValueHead(hidden_size, zero_initialize=zero_initialize)
+    head = CompactionValueHead(hidden_size, zero_initialize=zero_initialize, num_bins=num_bins)
     if not weights_path.exists() and not manifest_path.exists():
         return head, False
     if not weights_path.exists() or not manifest_path.exists():
         raise ValueError(f"Incomplete compaction value-head checkpoint in {path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest != {
-        "version": VALUE_HEAD_VERSION,
-        "hidden_size": hidden_size,
-        "class_order": [-1, 1],
-    }:
+    if manifest != value_head_manifest(hidden_size, num_bins):
         raise ValueError("Compaction value-head manifest does not match the policy model")
     head.load_state_dict(load_file(str(weights_path)))
     return head, True

@@ -327,6 +327,49 @@ For the intended GPU run:
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
+### Segment GAE with a categorical critic
+
+[`configs/train/compact_separate_gae_ppo.yaml`](configs/train/compact_separate_gae_ppo.yaml)
+uses the separate critic with 51 evenly spaced value bins on `[-1, 1]`,
+`gae_lambda: 0.95`, and undiscounted returns (`gamma = 1`). Each segment is one
+existing compaction interval. Its value is the probability-weighted mean of the
+bin supports, evaluated at the exact first-generation prompt boundary.
+
+Each iteration first evaluates the carried critic, then freezes segment GAE
+advantages and targets `y = V_old + A` in `frozen_value_targets.json`. Critic
+training uses cross-entropy against targets interpolated between the two
+neighboring supports. The actor subsequently uses the original frozen
+advantages for every PPO epoch. Fitted predictions are diagnostics and supply
+the next iteration's critic. No reward KL or step costs are added.
+
+Successful compaction bootstraps from the successor's wrapped-summary prefix;
+actual termination has zero bootstrap. The final reward is counted once in the
+return recurrence while every original interval retains its judged reward.
+Missing interval links fail closed. Exact IDs, raw completions, masks, and
+runtime transitions are unchanged. Critic loss keeps equal total rollout weight.
+
+The new artifact and checkpoint manifests distinguish the source critic from
+the updated critic and bind the frozen targets to the ordered collection.
+Retries restart fitting from the committed input critic and reuse verified
+frozen targets. Start a fresh experiment when changing head support, baseline
+timing, or estimator; ordinary resume rejects incompatible method changes.
+Historical two-class MC checkpoints remain supported by the original preset.
+
+Use the existing launcher with a fresh artifact root and the GAE preset:
+
+```bash
+scripts/train_iterations.sh --iterations 1 \
+  --latest-root /path/to/separate-gae-run \
+  --config configs/train/compact_separate_gae_ppo.yaml
+```
+
+For matched controls, set `training.value.num_bins=2` on the GAE preset, or also
+set `training.advantage_estimator=compaction_mc_value` to use pre-fit MC.
+`gae_lambda=1` recovers the pre-fit MC targets. The historical separate-MC
+preset below retains post-fit advantages. Evaluate task success and held-out
+value MSE/Brier/log loss; `target_ce` is encoding-dependent and should not be
+compared directly across bin counts. Bin spread is not calibrated model uncertainty.
+
 ### Separate MC critic with PPO updates
 
 [`configs/train/compact_separate_mc_ppo.yaml`](configs/train/compact_separate_mc_ppo.yaml)
