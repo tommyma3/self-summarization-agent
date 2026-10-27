@@ -107,11 +107,7 @@ def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> 
     interval = sample("trajectory-1", 1.0, -0.5)
     interval.completion_mask = [True, False, True]
 
-    batch = build_verl_actor_dataproto(
-        {"q1": [interval, sample("trajectory-2", 0.0, -0.5)]},
-        checkpoint_id="step-00001",
-        max_contributing=1,
-    )
+    batch = build_verl_actor_dataproto([interval], [1.0], checkpoint_id="step-00001")
 
     assert batch.batch["prompts"].values().tolist() == [10]
     assert batch.batch["responses"].values().tolist() == [11, 12, 13]
@@ -119,6 +115,29 @@ def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> 
     assert batch.batch["response_mask"].values().tolist() == [True, False, True]
     assert batch.batch["old_log_probs"].values().tolist() == [0.0, -0.75, -0.25]
     assert batch.meta_info["train_tokens"] == 2
+
+
+def test_verl_actor_batch_zero_masks_alignment_padding(monkeypatch) -> None:
+    patch_fake_dataproto(monkeypatch)
+    first = sample("trajectory-1", 1.0, -0.5)
+    second = sample("trajectory-2", -1.0, -0.25)
+
+    batch = build_verl_actor_dataproto(
+        [first, second],
+        [0.75, -0.5],
+        checkpoint_id="step-00001",
+        alignment=4,
+    )
+
+    assert batch.batch["input_ids"].unbind()[0].tolist() == [10, 11, 12, 13]
+    assert batch.batch["response_mask"].unbind()[0].tolist() == [False, True, True]
+    assert batch.batch["response_mask"].unbind()[2].tolist() == [False, False, False]
+    assert batch.batch["response_mask"].unbind()[3].tolist() == [False, False, False]
+    assert batch.batch["advantages"].unbind()[2].tolist() == [0.0, 0.0, 0.0]
+    assert batch.meta_info["sample_count"] == 2
+    assert batch.meta_info["padded_sample_count"] == 4
+    assert batch.meta_info["padding_sample_count"] == 2
+    assert batch.meta_info["train_tokens"] == 4
 
 
 def test_transformers_ray_batch_preserves_token_reference_logprobs(monkeypatch) -> None:
@@ -176,12 +195,19 @@ def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) ->
     training_config.verl.worker_backend = "verl_fsdp"
 
     class FakeWorkerGroup:
+        data_parallel_size = 1
+
         def __init__(self):
             self.batch = None
 
         def update_actor(self, batch):
             self.batch = batch
-            return {"loss": [0.2], "actor/ppo_kl": [0.03], "actor/pg_clipfrac": [0.4]}
+            return {
+                "loss": [0.2],
+                "actor/pg_loss": [0.2],
+                "actor/ppo_kl": [0.03],
+                "actor/pg_clipfrac": [0.4],
+            }
 
     fake_worker = FakeWorkerGroup()
     trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
@@ -193,6 +219,7 @@ def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) ->
     trainer._worker_group = fake_worker
     trainer._owns_ray = False
     trainer._last_batch_meta = {}
+    trainer.progress_path = None
 
     metrics = trainer.step({"q1": [sample("low", 0.0, -0.5), sample("high", 2.0, -0.25)]})
 
@@ -201,8 +228,103 @@ def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) ->
     assert metrics.loss == 0.2
     assert metrics.mean_policy_kl == 0.03
     assert metrics.clip_fraction == 0.4
+    assert metrics.optimizer_step_count == 1
     assert metrics.extra_metrics["verl_ray/worker_backend"] == "verl_fsdp"
     assert metrics.extra_metrics["verl_fsdp/contributing_sample_count"] == 2
+
+
+def test_grpo_fsdp_step_keeps_zero_variance_group_traces(monkeypatch, tmp_path: Path) -> None:
+    patch_fake_dataproto(monkeypatch)
+    training_config = TrainingConfig(backend="verl_ray", group_size=4)
+    training_config.verl.worker_backend = "verl_fsdp"
+
+    class FakeWorkerGroup:
+        data_parallel_size = 1
+
+        def __init__(self):
+            self.batches = []
+
+        def update_actor(self, batch):
+            self.batches.append(batch)
+            return {"actor/pg_loss": [0.1], "actor/ppo_kl": [0.01], "actor/pg_clipfrac": [0.0]}
+
+    fake_worker = FakeWorkerGroup()
+    trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
+    trainer.model_config = ModelConfig(model_path=str(tmp_path))
+    trainer.training_config = training_config
+    trainer.checkpoint_id = "step-00001"
+    trainer._ray = None
+    trainer._actor = None
+    trainer._worker_group = fake_worker
+    trainer._owns_ray = False
+    trainer._last_batch_meta = {}
+    trainer.progress_path = None
+
+    # Every rollout in the group shares the same reward: the group-normalized
+    # advantage is exactly zero for all traces, but the frozen-advantage
+    # update keeps them, so GRPO must as well.
+    metrics = trainer.step(
+        {"q1": [sample("a", 1.0, -0.5), sample("b", 1.0, -0.25), sample("c", 1.0, -0.125)]}
+    )
+
+    assert len(fake_worker.batches) == 1
+    batch = fake_worker.batches[0]
+    assert list(batch.non_tensor_batch["turn_ids"]) == ["a", "b", "c"]
+    for advantage in batch.batch["advantages"].unbind():
+        assert advantage.tolist() == [0.0, 0.0, 0.0]
+    assert metrics.optimizer_step_count == 1
+    assert metrics.extra_metrics["verl_fsdp/contributing_sample_count"] == 3
+
+
+def test_grpo_fsdp_step_pads_minibatches_without_dropping_traces(monkeypatch, tmp_path: Path) -> None:
+    patch_fake_dataproto(monkeypatch)
+    training_config = TrainingConfig(
+        backend="verl_ray", group_size=2, minibatch_size=4, update_epochs=2
+    )
+    training_config.verl.worker_backend = "verl_fsdp"
+
+    class FakeWorkerGroup:
+        data_parallel_size = 4
+
+        def __init__(self):
+            self.batches = []
+
+        def update_actor(self, batch):
+            self.batches.append(batch)
+            return {"actor/pg_loss": [0.1], "actor/ppo_kl": [0.01], "actor/pg_clipfrac": [0.0]}
+
+    samples = [sample(f"trace-{index}", 1.0 if index % 2 == 0 else -1.0, -0.5) for index in range(6)]
+    fake_worker = FakeWorkerGroup()
+    trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
+    trainer.model_config = ModelConfig(model_path=str(tmp_path))
+    trainer.training_config = training_config
+    trainer.checkpoint_id = "step-00001"
+    trainer._ray = None
+    trainer._actor = None
+    trainer._worker_group = fake_worker
+    trainer._owns_ray = False
+    trainer._last_batch_meta = {}
+    trainer.progress_path = None
+
+    grouped = {f"q{index}": [samples[index]] for index in range(6)}
+    metrics = trainer.step(grouped)
+
+    # 6 traces, minibatch 4, 2 epochs: chunks of [4, 2] per epoch, all traces
+    # used every epoch; the short chunk is padded, never trimmed.
+    assert len(fake_worker.batches) == 4
+    first_epoch = fake_worker.batches[:2]
+    epoch_turn_ids = [list(batch.non_tensor_batch["turn_ids"]) for batch in first_epoch]
+    assert epoch_turn_ids[0] == ["trace-0", "trace-1", "trace-2", "trace-3"]
+    assert epoch_turn_ids[1][:2] == ["trace-4", "trace-5"]
+    short_chunk = first_epoch[1]
+    assert short_chunk.meta_info["global_batch_size"] == 2
+    assert short_chunk.meta_info["padded_sample_count"] == 4
+    assert short_chunk.meta_info["padding_sample_count"] == 2
+    assert short_chunk.batch["response_mask"].unbind()[2].tolist() == [False, False, False]
+    assert short_chunk.batch["response_mask"].unbind()[3].tolist() == [False, False, False]
+    assert metrics.optimizer_step_count == 4
+    assert metrics.extra_metrics["verl_fsdp/contributing_sample_count"] == 6
+    assert metrics.extra_metrics["verl_fsdp/train_tokens"] == 24
 
 
 def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeypatch, tmp_path: Path) -> None:
@@ -252,6 +374,7 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
     trainer._worker_group = fake_worker
     trainer._owns_ray = False
     trainer._last_batch_meta = {}
+    trainer.progress_path = None
 
     metrics = trainer.step({"q1": [positive, negative]})
 

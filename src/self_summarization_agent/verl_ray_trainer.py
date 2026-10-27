@@ -187,54 +187,31 @@ def build_verl_dataproto(
 
 
 def build_verl_actor_dataproto(
-    grouped_samples: dict[str, list[RLSample]],
+    samples: list[RLSample],
+    advantages: list[float],
     *,
     checkpoint_id: str,
-    max_contributing: int | None = None,
+    alignment: int = 1,
     max_sequence_length: int | None = None,
 ):
+    """Build a lossless clipped-update actor batch.
+
+    Every interval appears exactly once. Alignment padding duplicates the last
+    interval with a fully masked response and zero advantage, so no trace is
+    dropped to satisfy worker divisibility.
+    """
     np, _ray, DataProto = _require_verl_ray()
-    policy_batch = _prepare_policy_batch(grouped_samples)
-    for sample in policy_batch.flat_samples:
+    if len(samples) != len(advantages):
+        raise ValueError("Actor samples and advantages must align")
+    if not samples:
+        raise ValueError("Actor updates require at least one interval")
+    for sample in samples:
         if not sample.has_training_cache:
             raise ValueError(f"Sample {sample.turn_id} is missing training cache")
-    contributing = policy_batch.contributing
-    if max_contributing is not None and len(contributing) > max_contributing:
-        contributing = contributing[:max_contributing]
-    samples = [sample for sample, _advantage in contributing]
-    tensors = _pad_cached_sequences(samples, max_sequence_length=max_sequence_length)
-    batch_size = len(samples)
-    if batch_size == 0:
-        # Return an empty DataProto — caller should guard against this.
-        return DataProto.from_single_dict(
-            {
-                "input_ids": torch.empty((0, 0), dtype=torch.long),
-                "attention_mask": torch.empty((0, 0), dtype=torch.long),
-                "position_ids": torch.empty((0, 0), dtype=torch.long),
-                "prompts": torch.empty((0, 0), dtype=torch.long),
-                "responses": torch.empty((0, 0), dtype=torch.long),
-                "response_mask": torch.empty((0, 0), dtype=torch.bool),
-                "loss_mask": torch.empty((0, 0), dtype=torch.bool),
-                "old_log_probs": torch.empty((0, 0), dtype=torch.float32),
-                "advantages": torch.empty((0, 0), dtype=torch.float32),
-                "rewards": torch.empty((0,), dtype=torch.float32),
-                "sequence_lengths": torch.empty((0,), dtype=torch.long),
-                "temperature": torch.empty((0,), dtype=torch.float32),
-            },
-            meta_info={
-                "policy_checkpoint_id": checkpoint_id,
-                "query_count": len(grouped_samples),
-                "sample_count": len(policy_batch.flat_samples),
-                "contributing_sample_count": 0,
-                "total_tokens": 0,
-                "train_tokens": 0,
-                "max_sequence_length": 0,
-                "old_logprob_scope": "token",
-                "mini_batch_size": None,
-                "epochs": 1,
-                "seed": 42,
-            },
-        )
+    padding = _padding_count(len(samples), alignment)
+    padded_samples = [*samples, *([samples[-1]] * padding)]
+    padded_advantages = [*advantages, *([0.0] * padding)]
+    batch_size = len(padded_samples)
 
     # verl represents a rollout as a prompt followed by one response. An
     # interval has non-contiguous assistant spans, so use its first token as
@@ -250,7 +227,7 @@ def build_verl_actor_dataproto(
     old_log_probs_tensors: list[torch.Tensor] = []
     advantages_tensors: list[torch.Tensor] = []
 
-    for sample, advantage in contributing:
+    for index, (sample, advantage) in enumerate(zip(padded_samples, padded_advantages)):
         input_tokens = list(sample.input_ids or [])
         response_tokens = list(sample.labels or [])
         response_mask_values = list(sample.completion_mask or [])
@@ -260,6 +237,13 @@ def build_verl_actor_dataproto(
             raise ValueError(f"Interval {sample.turn_id} has non-contiguous shifted token tensors")
         if len(response_mask_values) != len(response_tokens):
             raise ValueError(f"Interval {sample.turn_id} has a misaligned completion mask")
+        if max_sequence_length is not None and len(input_tokens) > max_sequence_length:
+            raise ValueError(
+                f"Interval {sample.turn_id} exceeds training.max_sequence_length: "
+                f"{len(input_tokens)} > {max_sequence_length}; interval prefixes are never left-truncated"
+            )
+        if index >= len(samples):
+            response_mask_values = [False] * len(response_mask_values)
 
         full_tokens = torch.tensor([input_tokens[0], *response_tokens], dtype=torch.long)
         full_input_tensors.append(full_tokens)
@@ -300,9 +284,9 @@ def build_verl_actor_dataproto(
         else "sequence_mean_broadcast_to_completion_tokens"
     )
     non_tensors = {
-        "query_ids": np.array([sample.query_id for sample in samples], dtype=object),
-        "turn_ids": np.array([sample.turn_id for sample in samples], dtype=object),
-        "trainable_kinds": np.array([sample.trainable_kind for sample in samples], dtype=object),
+        "query_ids": np.array([sample.query_id for sample in padded_samples], dtype=object),
+        "turn_ids": np.array([sample.turn_id for sample in padded_samples], dtype=object),
+        "trainable_kinds": np.array([sample.trainable_kind for sample in padded_samples], dtype=object),
     }
     return DataProto.from_single_dict(
         {
@@ -315,16 +299,17 @@ def build_verl_actor_dataproto(
             "loss_mask": response_mask,
             "old_log_probs": old_log_probs,
             "advantages": advantages,
-            "rewards": tensors["rewards"],
+            "rewards": torch.tensor([sample.reward for sample in padded_samples], dtype=torch.float32),
             "sequence_lengths": sequence_lengths,
             "temperature": torch.full((batch_size,), 1.0, dtype=torch.float32),
             **non_tensors,
         },
         meta_info={
             "policy_checkpoint_id": checkpoint_id,
-            "query_count": len(grouped_samples),
-            "sample_count": len(policy_batch.flat_samples),
-            "contributing_sample_count": len(contributing),
+            "sample_count": len(samples),
+            "padded_sample_count": len(padded_samples),
+            "padding_sample_count": padding,
+            "contributing_sample_count": len(samples),
             "total_tokens": total_tokens,
             "train_tokens": train_tokens,
             "max_sequence_length": max((len(sample.input_ids or []) for sample in samples), default=0),
@@ -996,6 +981,21 @@ class _VerlRayTrainerActor:
 
 
 @dataclass(slots=True)
+class _PpoMinibatchLoopResult:
+    loss: float
+    mean_policy_kl: float
+    clip_fraction: float
+    optimizer_step_count: int
+    update_seconds: float
+    total_tokens: int
+    train_tokens: int
+    max_sequence_length: int
+    old_logprob_scope: str
+    stopped: bool
+    epochs_started: int
+
+
+@dataclass(slots=True)
 class VerlRayPolicyTrainer:
     model_config: ModelConfig
     training_config: TrainingConfig
@@ -1208,6 +1208,140 @@ class VerlRayPolicyTrainer:
             metrics.extra_metrics[f"verl_fsdp/raw/{key}"] = value
         return metrics
 
+    def _run_ppo_minibatch_loop(self, contributing, *, build_batch, query_count) -> _PpoMinibatchLoopResult:
+        """Run clipped PPO updates, one worker RPC per (epoch, minibatch).
+
+        GRPO and frozen-advantage (separate critic) updates share this loop so
+        both handle traces identically: every interval reaches an optimizer
+        minibatch, each minibatch pads to the data-parallel alignment with
+        zero-masked duplicates, and no trace is dropped for divisibility.
+        One optimizer minibatch per RPC enables KL stopping without
+        replacing the fixed behavior probabilities between epochs.
+        """
+        assert self._worker_group is not None
+        size = self.training_config.minibatch_size or len(contributing)
+        weighted_loss = weighted_kl = weighted_clip = 0.0
+        total_tokens = train_tokens = 0
+        max_sequence_length = 0
+        old_logprob_scope = ""
+        optimizer_step_count = 0
+        stopped = False
+        started = time.monotonic()
+        for epoch in range(self.training_config.update_epochs):
+            for start in range(0, len(contributing), size):
+                chunk = contributing[start:start + size]
+                batch = build_batch(chunk)
+                batch.meta_info.update(
+                    mini_batch_size=batch.meta_info["padded_sample_count"],
+                    global_batch_size=len(chunk),
+                    epochs=1,
+                    seed=42,
+                    query_count=query_count,
+                    contributing_sample_count=len(chunk),
+                )
+                self._last_batch_meta = dict(batch.meta_info)
+                result = self._worker_group.update_actor(batch)
+                required_metrics = ("actor/pg_loss", "actor/ppo_kl", "actor/pg_clipfrac")
+                if any(key not in result or not math.isfinite(_mean_metric(result, key)) for key in required_metrics):
+                    raise RuntimeError("PPO worker returned missing or nonfinite metrics")
+                tokens = int(batch.meta_info["train_tokens"])
+                loss = _mean_metric(result, "actor/pg_loss")
+                kl = _mean_metric(result, "actor/ppo_kl")
+                clip = _mean_metric(result, "actor/pg_clipfrac")
+                weighted_loss += tokens * loss
+                weighted_kl += tokens * kl
+                weighted_clip += tokens * clip
+                total_tokens += int(batch.meta_info["total_tokens"])
+                train_tokens += tokens
+                max_sequence_length = max(max_sequence_length, int(batch.meta_info["max_sequence_length"]))
+                old_logprob_scope = str(batch.meta_info["old_logprob_scope"])
+                optimizer_step_count += 1
+                _write_training_progress(self.progress_path, "actor_update", epoch=epoch + 1,
+                    epochs=self.training_config.update_epochs, optimizer_steps=optimizer_step_count)
+                if self.training_config.target_kl is not None and kl > self.training_config.target_kl:
+                    stopped = True
+                    break
+            if stopped:
+                break
+        return _PpoMinibatchLoopResult(
+            loss=weighted_loss / train_tokens,
+            mean_policy_kl=weighted_kl / train_tokens,
+            clip_fraction=weighted_clip / train_tokens,
+            optimizer_step_count=optimizer_step_count,
+            update_seconds=time.monotonic() - started,
+            total_tokens=total_tokens,
+            train_tokens=train_tokens,
+            max_sequence_length=max_sequence_length,
+            old_logprob_scope=old_logprob_scope,
+            stopped=stopped,
+            epochs_started=epoch + 1,
+        )
+
+    def _step_grpo_fsdp(self, grouped_samples: dict[str, list[RLSample]]) -> UpdateMetrics:
+        """Clipped GRPO update over every collected trace with trainable tokens.
+
+        Trace handling matches the frozen-advantage (separate critic) update:
+        zero-variance groups are kept with their exactly-zero group-normalized
+        advantage, and alignment padding never discards samples.
+        """
+        _validate_grpo_training_config(self.training_config)
+        policy_batch = _prepare_policy_batch(grouped_samples, include_zero_advantage=True)
+        if not policy_batch.flat_samples or not policy_batch.contributing:
+            return _metrics_without_update(policy_batch)
+        metrics = UpdateMetrics(
+            sample_count=len(policy_batch.flat_samples),
+            mean_reward=sum(sample.reward for sample in policy_batch.flat_samples) / len(policy_batch.flat_samples),
+            mean_advantage=sum(policy_batch.advantages) / len(policy_batch.advantages),
+            loss=0.0,
+        )
+
+        def build_batch(chunk: list[tuple[RLSample, float]]):
+            return build_verl_actor_dataproto(
+                [sample for sample, _advantage in chunk],
+                [advantage for _sample, advantage in chunk],
+                checkpoint_id=self.checkpoint_id,
+                alignment=self._worker_group.data_parallel_size,
+                max_sequence_length=self.training_config.max_sequence_length,
+            )
+
+        result = self._run_ppo_minibatch_loop(
+            policy_batch.contributing, build_batch=build_batch, query_count=len(grouped_samples)
+        )
+        metrics.loss = result.loss
+        metrics.mean_policy_kl = result.mean_policy_kl
+        metrics.clip_fraction = result.clip_fraction
+        metrics.optimizer_step_count = result.optimizer_step_count
+        metrics.extra_metrics.update(
+            {
+                "backend": "verl_ray",
+                "verl_ray/worker_backend": "verl_fsdp",
+                "verl_ray/driver_roundtrip_seconds": result.update_seconds,
+                "verl_fsdp/update_seconds": result.update_seconds,
+                "verl_fsdp/query_count": len(grouped_samples),
+                "verl_fsdp/sample_count": metrics.sample_count,
+                "verl_fsdp/contributing_sample_count": len(policy_batch.contributing),
+                "verl_fsdp/total_tokens": result.total_tokens,
+                "verl_fsdp/train_tokens": result.train_tokens,
+                "verl_fsdp/max_sequence_length": result.max_sequence_length,
+                "verl_fsdp/old_logprob_scope": result.old_logprob_scope,
+                "actor/early_stop": result.stopped,
+                "actor/epochs_started": result.epochs_started,
+            }
+        )
+        if result.update_seconds > 0:
+            metrics.extra_metrics["verl_fsdp/effective_train_tokens_per_second"] = (
+                float(result.train_tokens) / result.update_seconds
+            )
+        print(
+            f"[train_step] FSDP GRPO update: contributing={len(policy_batch.contributing)} "
+            f"(of {len(policy_batch.flat_samples)} samples), "
+            f"minibatch_size={self.training_config.minibatch_size or len(policy_batch.contributing)}, "
+            f"epochs={result.epochs_started} -> {result.optimizer_step_count} optimizer steps, "
+            f"train_tokens={result.train_tokens}",
+            flush=True,
+        )
+        return metrics
+
     def _step_fixed(self, grouped_samples, fixed_advantages):
         _validate_grpo_training_config(self.training_config)
         samples = _flatten_grouped_samples(grouped_samples)
@@ -1221,47 +1355,20 @@ class VerlRayPolicyTrainer:
             mean_advantage=sum(advantages) / max(1, len(samples)), loss=0.0)
         if not contributing:
             return metrics
-        group = self._worker_group
-        size = self.training_config.minibatch_size or len(contributing)
-        weighted_loss = weighted_kl = weighted_clip = total_tokens = 0.0
-        stopped = False
-        for epoch in range(self.training_config.update_epochs):
-            for start in range(0, len(contributing), size):
-                chunk = contributing[start:start + size]
-                batch = build_verl_value_actor_dataproto(
-                    [s for s, _ in chunk], advantages=[a for _, a in chunk], value_weights=[0.0] * len(chunk),
-                    checkpoint_id=self.checkpoint_id, alignment=group.data_parallel_size,
-                    max_sequence_length=self.training_config.max_sequence_length,
-                )
-                # One optimizer minibatch per RPC enables KL stopping without
-                # replacing the fixed behavior probabilities between epochs.
-                batch.meta_info.update(mini_batch_size=batch.meta_info["padded_sample_count"],
-                    global_batch_size=len(chunk), epochs=1, seed=42)
-                self._last_batch_meta = dict(batch.meta_info)
-                result = group.update_actor(batch)
-                required_metrics = ("actor/pg_loss", "actor/ppo_kl", "actor/pg_clipfrac")
-                if any(key not in result or not math.isfinite(_mean_metric(result, key)) for key in required_metrics):
-                    raise RuntimeError("Separate PPO worker returned missing or nonfinite metrics")
-                tokens = batch.meta_info["train_tokens"]
-                loss = _mean_metric(result, "actor/pg_loss")
-                kl = _mean_metric(result, "actor/ppo_kl")
-                clip = _mean_metric(result, "actor/pg_clipfrac")
-                weighted_loss += tokens * loss
-                weighted_kl += tokens * kl
-                weighted_clip += tokens * clip
-                total_tokens += tokens
-                metrics.optimizer_step_count += 1
-                _write_training_progress(self.progress_path, "actor_update", epoch=epoch + 1,
-                    epochs=self.training_config.update_epochs, optimizer_steps=metrics.optimizer_step_count)
-                if self.training_config.target_kl is not None and kl > self.training_config.target_kl:
-                    stopped = True
-                    break
-            if stopped:
-                break
-        metrics.loss = weighted_loss / total_tokens
-        metrics.mean_policy_kl = weighted_kl / total_tokens
-        metrics.clip_fraction = weighted_clip / total_tokens
-        metrics.extra_metrics.update({"actor/early_stop": stopped, "actor/epochs_started": epoch + 1})
+
+        def build_batch(chunk):
+            return build_verl_value_actor_dataproto(
+                [s for s, _a in chunk], advantages=[a for _s, a in chunk], value_weights=[0.0] * len(chunk),
+                checkpoint_id=self.checkpoint_id, alignment=self._worker_group.data_parallel_size,
+                max_sequence_length=self.training_config.max_sequence_length,
+            )
+
+        result = self._run_ppo_minibatch_loop(contributing, build_batch=build_batch, query_count=len(grouped_samples))
+        metrics.loss = result.loss
+        metrics.mean_policy_kl = result.mean_policy_kl
+        metrics.clip_fraction = result.clip_fraction
+        metrics.optimizer_step_count = result.optimizer_step_count
+        metrics.extra_metrics.update({"actor/early_stop": result.stopped, "actor/epochs_started": result.epochs_started})
         return metrics
 
     def step(self, grouped_samples: dict[str, list[RLSample]], *, fixed_advantages=None) -> UpdateMetrics:
@@ -1274,98 +1381,7 @@ class VerlRayPolicyTrainer:
         if self.training_config.verl.worker_backend == "verl_fsdp":
             if self.training_config.value.enabled:
                 return self._step_compaction_value_fsdp(grouped_samples)
-            policy_batch = _prepare_policy_batch(grouped_samples)
-            if not policy_batch.flat_samples or not policy_batch.contributing:
-                return _metrics_without_update(policy_batch)
-            # Trim contributing samples to a count that is evenly divisible
-            # by both data-parallel world_size and per-gpu mini_batch_size.
-            # This must happen *before* building the DataProto because
-            # NestedTensors do not support dim-0 slicing.
-            assert self._worker_group is not None
-            align_step = getattr(self._worker_group, "alignment_step", 1)
-            if len(policy_batch.contributing) < align_step:
-                # Not enough contributing samples to meet the full alignment
-                # step (LCM of world_size and minibatch_size).  Fall back to
-                # world_size-only alignment so we use every available sample
-                # rather than zeroing out the batch.
-                align_step = self._worker_group._world_size
-            max_contributing = (len(policy_batch.contributing) // align_step) * align_step
-            if max_contributing == 0:
-                return _metrics_without_update(policy_batch)
-            global_mini_batch = self.training_config.minibatch_size
-            if global_mini_batch is not None and max_contributing < global_mini_batch:
-                # The configured mini-batch size exceeds the actual number of
-                # contributing samples, which would fail verl's divisibility
-                # check (batch_size % mini_batch_size == 0).  Use the actual
-                # count as the effective mini-batch size for this update.
-                global_mini_batch = max_contributing
-            batch = build_verl_actor_dataproto(
-                grouped_samples,
-                checkpoint_id=self.checkpoint_id,
-                max_contributing=max_contributing,
-                max_sequence_length=self.training_config.max_sequence_length,
-            )
-            batch.meta_info["mini_batch_size"] = global_mini_batch or max_contributing
-            batch.meta_info["global_batch_size"] = max_contributing
-            batch.meta_info["epochs"] = self.training_config.update_epochs
-            batch.meta_info["seed"] = 42
-            self._last_batch_meta = dict(batch.meta_info)
-            expected_steps = int(
-                self.training_config.update_epochs
-                * max(1, (max_contributing + global_mini_batch - 1) // global_mini_batch)
-                if global_mini_batch
-                else self.training_config.update_epochs
-            )
-            print(
-                f"[train_step] FSDP update: contributing={max_contributing} "
-                f"(of {len(policy_batch.contributing)} eligible), "
-                f"mini_batch={global_mini_batch or max_contributing}, "
-                f"steps_per_epoch={max(1, (max_contributing + (global_mini_batch or max_contributing) - 1) // (global_mini_batch or max_contributing))}, "
-                f"epochs={self.training_config.update_epochs} "
-                f"-> {expected_steps} optimizer steps, "
-                f"train_tokens={self._last_batch_meta.get('train_tokens', '?')}",
-                flush=True,
-            )
-            started = time.monotonic()
-            assert self._worker_group is not None
-            worker_metrics = self._worker_group.update_actor(batch)
-            update_seconds = time.monotonic() - started
-            batch_sample_count = int(self._last_batch_meta.get("contributing_sample_count", len(policy_batch.contributing)))
-            batch_minibatch = self.training_config.minibatch_size or batch_sample_count
-            metrics = UpdateMetrics(
-                sample_count=int(self._last_batch_meta.get("sample_count", 0)),
-                mean_reward=sum(sample.reward for sample in policy_batch.flat_samples) / len(policy_batch.flat_samples),
-                mean_advantage=sum(policy_batch.advantages) / len(policy_batch.advantages),
-                loss=_mean_metric(worker_metrics, "loss", "actor/pg_loss"),
-                optimizer_step_count=int(
-                    self.training_config.update_epochs
-                    * max(1, (batch_sample_count + batch_minibatch - 1) // batch_minibatch)
-                ),
-                mean_policy_kl=_mean_metric(worker_metrics, "actor/ppo_kl"),
-                clip_fraction=_mean_metric(worker_metrics, "actor/pg_clipfrac", "actor/clipfrac"),
-            )
-            metrics.extra_metrics.update(
-                {
-                    "backend": "verl_ray",
-                    "verl_ray/worker_backend": "verl_fsdp",
-                    "verl_ray/driver_roundtrip_seconds": update_seconds,
-                    "verl_fsdp/update_seconds": update_seconds,
-                    "verl_fsdp/query_count": self._last_batch_meta.get("query_count", 0),
-                    "verl_fsdp/sample_count": self._last_batch_meta.get("sample_count", 0),
-                    "verl_fsdp/contributing_sample_count": self._last_batch_meta.get("contributing_sample_count", 0),
-                    "verl_fsdp/total_tokens": self._last_batch_meta.get("total_tokens", 0),
-                    "verl_fsdp/train_tokens": self._last_batch_meta.get("train_tokens", 0),
-                    "verl_fsdp/max_sequence_length": self._last_batch_meta.get("max_sequence_length", 0),
-                    "verl_fsdp/old_logprob_scope": self._last_batch_meta.get("old_logprob_scope", ""),
-                }
-            )
-            if update_seconds > 0:
-                metrics.extra_metrics["verl_fsdp/effective_train_tokens_per_second"] = (
-                    float(self._last_batch_meta.get("train_tokens", 0)) / update_seconds
-                )
-            for key, value in worker_metrics.items():
-                metrics.extra_metrics[f"verl_fsdp/raw/{key}"] = value
-            return metrics
+            return self._step_grpo_fsdp(grouped_samples)
 
         batch = build_verl_dataproto(
             grouped_samples,

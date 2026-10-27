@@ -120,7 +120,11 @@ def _copy_processor_configs(source_dir: str, target_dir: str) -> None:
             shutil.copy2(src, target / filename)
 
 
-def _prepare_policy_batch(grouped_samples: dict[str, list[RLSample]]) -> _PolicyBatch:
+def _prepare_policy_batch(
+    grouped_samples: dict[str, list[RLSample]],
+    *,
+    include_zero_advantage: bool = False,
+) -> _PolicyBatch:
     flat_samples: list[RLSample] = []
     advantages: list[float] = []
     for samples in grouped_samples.values():
@@ -129,11 +133,21 @@ def _prepare_policy_batch(grouped_samples: dict[str, list[RLSample]]) -> _Policy
         group_advantages = compute_group_advantages(samples)
         flat_samples.extend(samples)
         advantages.extend(group_advantages)
-    contributing = [
-        (sample, advantage)
-        for sample, advantage in zip(flat_samples, advantages)
-        if abs(advantage) >= 1e-8
-    ]
+    if include_zero_advantage:
+        # Match the frozen-advantage (separate critic) trace handling: keep
+        # every interval with trainable tokens, including zero-variance
+        # groups whose group-normalized advantage is exactly zero.
+        contributing = [
+            (sample, advantage)
+            for sample, advantage in zip(flat_samples, advantages)
+            if any(sample.completion_mask or [])
+        ]
+    else:
+        contributing = [
+            (sample, advantage)
+            for sample, advantage in zip(flat_samples, advantages)
+            if abs(advantage) >= 1e-8
+        ]
     return _PolicyBatch(
         flat_samples=flat_samples,
         advantages=advantages,
