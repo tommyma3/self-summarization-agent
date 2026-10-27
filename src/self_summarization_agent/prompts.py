@@ -188,7 +188,7 @@ def format_tool_response(tool_result: str) -> str:
     return f"<tool_response>\n{format_tool_result(tool_result)}\n</tool_response>"
 
 
-_FINAL_ANSWER_FORMAT = """Your response should be in the following format:
+_FINAL_ANSWER_FORMAT = """Your final answer should be in the following format:
 Explanation: {{your explanation for your final answer. For this explanation section only, you
 should cite your evidence documents inline by enclosing their docids in square brackets [] at
 the end of sentences. For example, [20].}}
