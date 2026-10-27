@@ -55,6 +55,16 @@ _ACTION_BLOCK_RE = {
 _ACTION_CLOSE_RE = {
     tag: re.compile(rf"<\s*/\s*{tag}\s*>", flags=re.IGNORECASE) for tag in _ACTION_TAGS
 }
+_FINAL_ANSWER_FIELD_RE = re.compile(
+    r"^[ \t]*(?:(?:Explanation|Exact Answer|Confidence):|\*\*(?:Explanation|Exact Answer|Confidence):\*\*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_FINAL_ANSWER_RE = re.compile(
+    r"(?:Explanation:|\*\*Explanation:\*\*)[ \t]*(?P<explanation>.+?)\r?\n[ \t]*"
+    r"(?:Exact Answer:|\*\*Exact Answer:\*\*)[ \t]*(?P<answer>.+?)\r?\n[ \t]*"
+    r"(?:Confidence:|\*\*Confidence:\*\*)[ \t]*(?P<confidence>\d+(?:\.\d+)?)[ \t]*%?",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +196,21 @@ def _parse_json_tool_call(raw_output: str) -> tuple[dict[str, object], str] | No
 
 
 def parse_model_tool_call(raw_output: str) -> tuple[dict[str, object], str] | None:
+    # A plain final answer is a routing view, never a replacement for sampled
+    # output. Strip the sampled ChatML terminator only from this parsed view.
+    action_text = _action_text(raw_output).removesuffix("<|im_end|>").strip()
+    if _FINAL_ANSWER_FIELD_RE.match(action_text):
+        answer = _FINAL_ANSWER_RE.fullmatch(action_text)
+        if (
+            answer is None
+            or not answer.group("explanation").strip()
+            or not answer.group("answer").strip()
+            or not 0 <= float(answer.group("confidence")) <= 100
+            or len(_FINAL_ANSWER_FIELD_RE.findall(action_text)) != 3
+        ):
+            return None
+        normalized = {"tool_name": "finish", "arguments": {"answer": action_text}}
+        return normalized, json.dumps(normalized, ensure_ascii=False)
     tag_result = _parse_tag_tool_call(raw_output)
     if tag_result is not None:
         return tag_result
@@ -1016,7 +1041,7 @@ class EpisodeRuntime:
             )
             return None
 
-        if tool_name in {"search", "get_document"} and active.token_ledger is not None:
+        if active.token_ledger is not None and self.scaffold is None:
             try:
                 self.token_renderer.validate_completion_boundary(
                     generated_output.completion_token_ids, generated_output.finish_reason)
@@ -1332,7 +1357,7 @@ class EpisodeRuntime:
         payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
         tool_name = payload["tool_name"]
         arguments = payload["arguments"]
-        if self.scaffold is not None:
+        if active.token_ledger is not None:
             try:
                 self.token_renderer.validate_completion_boundary(
                     generated_output.completion_token_ids, generated_output.finish_reason)
@@ -1341,6 +1366,7 @@ class EpisodeRuntime:
                     prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
                     generation_kind="forced_answer")
                 return
+        if self.scaffold is not None:
             if self.scaffold.is_complete(tool_name, query_id=query_id, forced=True):
                 tool_name, arguments = "finish", {"answer": ""}
         if tool_name != "finish":

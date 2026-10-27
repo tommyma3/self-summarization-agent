@@ -188,29 +188,42 @@ def format_tool_response(tool_result: str) -> str:
     return f"<tool_response>\n{format_tool_result(tool_result)}\n</tool_response>"
 
 
+_FINAL_ANSWER_FORMAT = """Your response should be in the following format:
+Explanation: {{your explanation for your final answer. For this explanation section only, you
+should cite your evidence documents inline by enclosing their docids in square brackets [] at
+the end of sentences. For example, [20].}}
+Exact Answer: {{your succinct, final answer}}
+Confidence: {{your confidence score between 0% and 100% for your answer}}"""
+
+
 def build_system_prompt() -> str:
-    return """You are an expert research agent. Think first, then output exactly one action:
+    return f"""You are an expert research agent. Think first, then output exactly one action:
 (1) Call a search engine using format: <search> your query </search>.
 (2) Call the document tool to retrieve documents using format: <document> docid </document>.
-(3) Provide your final answer within <answer> </answer> tags.
+(3) Provide your final answer using the Explanation, Exact Answer, and Confidence format below.
 (4) When the user prompts a summary request, compact the agent context into a summary for further steps using format: <summary> summary </summary>.
 
 A <summary>...</summary> user message is prior agent state for the original query. On <summary_request>, do not search, retrieve, or answer; after thinking, output only one <summary>...</summary> block.
+
+{_FINAL_ANSWER_FORMAT}
 """
 
 
 def build_native_tool_system_prompt() -> str:
-    return """You are an expert research agent. Normally, use exactly one provided function per turn.
+    return f"""You are an expert research agent. Normally, use exactly one provided function per turn.
 Use search to find relevant passages, get_document to inspect a selected document, and finish only when you can submit the best-supported final answer.
 
 The original user query remains present verbatim after every compaction. A later user message wrapped in <summary>...</summary> is compressed agent history for continuing that original query, not a new task.
 
-The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not call a function or answer the original question. Compact only the accumulated research state, evidence, unresolved work, and next steps without restating the original query, then output exactly one <summary>...</summary> block. Normal function-calling mode resumes afterward."""
+The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not call a function or answer the original question. Compact only the accumulated research state, evidence, unresolved work, and next steps without restating the original query, then output exactly one <summary>...</summary> block. Normal function-calling mode resumes afterward.
+
+For your final answer only, put the following response format in the finish function's answer argument.
+{_FINAL_ANSWER_FORMAT}"""
 
 
 def build_forced_answer_prompt() -> str:
     return """<forced_answer_request>
-The final-answer boundary has been reached. Answer with exactly one action: <answer>best supported answer</answer>.
+The final-answer boundary has been reached. Provide your best-supported final answer using the Explanation:, Exact Answer:, and Confidence: sections specified in the system instructions. Do not search or retrieve more documents.
 </forced_answer_request>"""
 
 

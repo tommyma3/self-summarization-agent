@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 
+import pytest
+
 import main as cli_entrypoint
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.cli import build_smoke_run_record
@@ -645,6 +647,48 @@ def test_parse_model_tool_call_normalizes_document_and_answer_tags() -> None:
     assert document[0] == {"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}
     assert answer is not None
     assert answer[0] == {"tool_name": "finish", "arguments": {"answer": "done"}}
+
+
+@pytest.mark.parametrize("thinking", ["", "<think>Enough evidence.</think>\n", "Enough evidence.</think>\n"])
+@pytest.mark.parametrize("ending", ["", "<|im_end|>"])
+def test_parse_model_tool_call_accepts_unwrapped_final_answer(thinking, ending) -> None:
+    answer = (
+        'Explanation: The evidence gives {"value": 42} and mentions <search> as text. [20]\n'
+        "A second supporting sentence. [21]\n"
+        "Exact Answer: 42\n"
+        "Confidence: 95%"
+    )
+    parsed = parse_model_tool_call(thinking + answer + ending)
+    assert parsed is not None
+    assert parsed[0] == {"tool_name": "finish", "arguments": {"answer": answer}}
+    assert json.loads(parsed[1]) == parsed[0]
+
+
+def test_parse_model_tool_call_accepts_bold_final_answer_labels() -> None:
+    answer = "**Explanation:** Evidence agrees. [20]\n**Exact Answer:** 42\n**Confidence:** 95.5%"
+    parsed = parse_model_tool_call("<think>Done.</think>\n" + answer)
+    assert parsed is not None
+    assert parsed[0] == {"tool_name": "finish", "arguments": {"answer": answer}}
+
+
+@pytest.mark.parametrize(
+    "raw_output",
+    [
+        "Explanation: Evidence. [20]\nExact Answer: 42",
+        "Explanation: Evidence. [20]\nConfidence: 95%",
+        "Explanation: \nExact Answer: 42\nConfidence: 95%",
+        "Explanation: Evidence. [20]\nExact Answer: \nConfidence: 95%",
+        "Explanation: Evidence. [20]\nExact Answer: 42\nConfidence: 101%",
+        "Explanation: Evidence. [20]\nExact Answer: 42\nConfidence: unknown",
+        "Explanation: Evidence. [20]\nExact Answer: 42\nExact Answer: 43\nConfidence: 95%",
+        "Explanation: Evidence. [20]\nExact Answer: 42\nConfidence: 95%\n<search>q</search>",
+        "<think>Explanation: Evidence. [20]\nExact Answer: 42\nConfidence: 95%",
+        "<think>Done.</thinking>\nExplanation: Evidence. [20]\nExact Answer: 42\nConfidence: 95%",
+        "<think>Explanation: Evidence. [20]\nExact Answer: 42\nConfidence: 95%</think>",
+    ],
+)
+def test_parse_model_tool_call_rejects_incomplete_or_ambiguous_final_answer(raw_output) -> None:
+    assert parse_model_tool_call(raw_output) is None
 
 
 def test_parse_model_tool_call_rejects_mixed_or_repeated_tags() -> None:

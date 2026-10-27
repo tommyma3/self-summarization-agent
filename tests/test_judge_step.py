@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from self_summarization_agent.config import (
     DatasetConfig,
     ExperimentConfig,
@@ -26,7 +28,10 @@ class BatchJudgeGenerator:
 
     def generate_batch(self, prompts: list[str]) -> list[str]:
         self.batch_sizes.append(len(prompts))
-        return ["correct: yes" for _ in prompts]
+        return [
+            "extracted_final_answer: done\nreasoning: The answers match.\ncorrect: yes\nconfidence: 100"
+            for _ in prompts
+        ]
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
@@ -115,20 +120,27 @@ def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
     assert judged["trainable_sample_count"] == 1
 
 
-def test_create_judge_prompt_is_minimal() -> None:
+def test_create_judge_prompt_uses_supplied_browsecomp_system_instructions() -> None:
     prompt = create_judge_prompt(
         question="question",
         response="candidate answer",
         correct_answer="gold answer",
     )
 
-    assert "question" in prompt
-    assert "candidate answer" in prompt
-    assert "gold answer" in prompt
-    assert "correct: yes" in prompt
-    assert "correct: no" in prompt
-    assert "reasoning:" not in prompt
-    assert "extracted_final_answer:" not in prompt
+    assert len(prompt.messages) == 2
+    assert prompt.messages[0].role == "system"
+    assert prompt.messages[1].role == "user"
+    content = prompt.messages[0].content
+    assert "[question]: question" in content
+    assert "[response]: candidate answer" in content
+    assert "[correct_answer]: gold answer" in content
+    assert "extracted_final_answer:" in content
+    assert "reasoning:" in content
+    assert any(f"correct: Answer {quoted}" in content for quoted in ("'yes'", "‘yes’"))
+    assert "confidence:" in content
+    assert "do not\nattempt to solve the problem" in content
+    assert "focus only on whether the answers match." in content
+    assert "Output only one line:" not in content
 
 
 def test_build_judge_forwards_judge_gpu_memory_utilization(monkeypatch, tmp_path: Path) -> None:
@@ -255,6 +267,70 @@ def test_judge_rollouts_assigns_rewards_and_sample_counts(tmp_path: Path) -> Non
     assert rows[0]["turn_rewards"] == {"trajectory-1": 1.0}
     assert rows[0]["trainable_sample_count"] == 1
     assert rows[0]["judge"]["outcome"] == "correct_answer"
+
+
+@pytest.mark.parametrize("interval_count", [1, 2])
+@pytest.mark.parametrize(
+    ("judge_response", "parse_error"),
+    [
+        ('<think>Output "correct: yes" or "correct: no".</think>\ncorrect: no', False),
+        ('Thinking Process:\nOutput "correct: yes" or "correct: no".\nWait,', True),
+        (
+            'extracted_final_answer: different answer\nreasoning: Despite the example "correct: yes", the answers differ.\ncorrect: no\nconfidence: 100',
+            False,
+        ),
+        ('extracted_final_answer: answer\nreasoning: Matches.\ncorrect: yes', True),
+    ],
+)
+def test_judge_rollouts_does_not_reward_verdicts_in_reasoning(
+    tmp_path: Path, interval_count: int, judge_response: str, parse_error: bool
+) -> None:
+    raw_path = tmp_path / "raw.jsonl"
+    judged_path = tmp_path / "judged.jsonl"
+    write_raw_rollouts(raw_path)
+    raw_row = json.loads(raw_path.read_text(encoding="utf-8"))
+    if interval_count == 2:
+        first = raw_row["trajectory_records"][0]
+        first["termination_kind"] = "compaction"
+        first["messages"][-1]["content"] = "<summary>gathered evidence</summary>"
+        raw_row["trajectory_records"].append(
+            {
+                "schema_version": 3,
+                "query_id": "q1",
+                "turn_id": "trajectory-2",
+                "kind": "trajectory",
+                "termination_kind": "final_answer",
+                "messages": [
+                    {"role": "system", "content": "instructions"},
+                    {"role": "user", "content": "question"},
+                    {"role": "user", "content": "<summary>gathered evidence</summary>"},
+                    {"role": "assistant", "content": "reasoning and answer"},
+                ],
+            }
+        )
+        raw_path.write_text(json.dumps(raw_row) + "\n", encoding="utf-8")
+    original_raw = raw_path.read_bytes()
+
+    class Generator:
+        def generate(self, prompt: str) -> str:
+            return judge_response
+
+    judge_rollouts(
+        train_config(tmp_path),
+        rollout_path=raw_path,
+        output_path=judged_path,
+        judge=RewardJudge(Generator()),
+        examples_by_query_id={"q1": QueryExample(query_id="q1", query="question", answer="done")},
+    )
+
+    judged = json.loads(judged_path.read_text(encoding="utf-8"))
+    assert judged["judge"]["outcome"] == "wrong_answer"
+    assert judged["judge"]["parse_error"] is parse_error
+    assert judged["judge"]["judge_response"] == judge_response
+    assert judged["turn_rewards"] == {f"trajectory-{i}": -1.0 for i in range(1, interval_count + 1)}
+    assert judged["trainable_sample_count"] == interval_count
+    assert judged["trajectory_records"] == raw_row["trajectory_records"]
+    assert raw_path.read_bytes() == original_raw
 
 
 def test_judge_rollouts_rejects_already_judged_rows(tmp_path: Path) -> None:

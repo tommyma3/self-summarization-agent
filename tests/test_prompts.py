@@ -22,7 +22,10 @@ def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     prompt = build_forced_answer_system_prompt()
     assert "final-answer boundary" in prompt
     assert "Tool Budget Remaining" not in prompt
-    assert "<answer>best supported answer</answer>" in prompt
+    assert "Explanation:" in prompt
+    assert "Exact Answer:" in prompt
+    assert "Confidence:" in prompt
+    assert "<answer>" not in prompt
     assert prompt.startswith("<forced_answer_request>")
     assert prompt.endswith("</forced_answer_request>")
 
@@ -41,7 +44,10 @@ def test_system_prompt_lists_normal_action_formats() -> None:
 
     assert "<search> your query </search>" in prompt
     assert "<document> docid </document>" in prompt
-    assert "<answer> </answer>" in prompt
+    assert "Explanation:" in prompt
+    assert "Exact Answer:" in prompt
+    assert "Confidence:" in prompt
+    assert "<answer>" not in prompt
     assert "<summary_request>" in prompt
     assert "do not search, retrieve, or answer" in prompt
 

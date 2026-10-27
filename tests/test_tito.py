@@ -89,6 +89,8 @@ class TokenModel:
 SEARCH = "</think>\n<search>q</search><|im_end|>"
 SUMMARY = "</think>\n<summary>evidence</summary><|im_end|>"
 FINISH = "</think>\n<answer>done</answer><|im_end|>"
+PLAIN_ANSWER = "Explanation: Evidence supports the answer. [d]\nExact Answer: 42\nConfidence: 95%"
+PLAIN_FINISH = "</think>\n" + PLAIN_ANSWER + "<|im_end|>"
 
 
 def runtime(model, **kwargs):
@@ -116,11 +118,14 @@ def test_ledger_snapshots_and_duplicate_commit():
 
 
 @pytest.mark.parametrize("compactions", [0, 1, 2])
-def test_all_segments_keep_exact_sampled_tokens_and_native_cache(compactions):
-    outputs = [SEARCH, FINISH] if compactions == 0 else [SEARCH, SUMMARY] * compactions + [FINISH]
+@pytest.mark.parametrize("final_output", [FINISH, PLAIN_FINISH])
+def test_all_segments_keep_exact_sampled_tokens_and_native_cache(compactions, final_output):
+    outputs = [SEARCH, final_output] if compactions == 0 else [SEARCH, SUMMARY] * compactions + [final_output]
     model = TokenModel(outputs)
     result = runtime(model, context_threshold_tokens=15000 if compactions == 0 else 1).run("q1", "question")
     assert result.status == "completed"
+    assert result.final_answer == (PLAIN_ANSWER if final_output == PLAIN_FINISH else "done")
+    assert result.turn_records[-1]["completion"] == model.results[-1].text
     assert len(result.trajectory_records) == compactions + 1
     assert model.tokenizer.template_calls == compactions + 1
     samples = extract_trainable_samples(result.trajectory_records, result.turn_rewards, rollout_id="q1:0")
@@ -156,15 +161,39 @@ def test_failed_summary_retains_interval_and_never_creates_new_state(summary, st
     assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == 1
 
 
-def test_forced_answer_appends_control_without_rewriting_or_compacting():
-    model = TokenModel([SEARCH, FINISH])
+@pytest.mark.parametrize("final_output", [FINISH, PLAIN_FINISH])
+def test_forced_answer_appends_control_without_rewriting_or_compacting(final_output):
+    model = TokenModel([SEARCH, final_output])
     result = runtime(model, max_tool_calls=1).run("q", "question")
     assert result.status == "completed"
+    assert result.final_answer == (PLAIN_ANSWER if final_output == PLAIN_FINISH else "done")
     text = model.tokenizer.decode(model.requests[-1].prompt_token_ids)
     assert text.count("<forced_answer_request>") == 1
     assert text.count("<|im_start|>assistant") == 2
     assert model.requests[-1].generation_kind == "forced_answer"
     assert model.tokenizer.template_calls == 1
+
+
+@pytest.mark.parametrize("forced", [False, True])
+@pytest.mark.parametrize("finish_reason", ["length", "stop"])
+def test_unwrapped_final_answer_requires_sampled_end_of_turn(forced, finish_reason):
+    class UnterminatedAnswerModel(TokenModel):
+        def generate_token_batch(self, requests):
+            results = super().generate_token_batch(requests)
+            if len(self.requests) == 2:
+                from dataclasses import replace
+                results[0] = replace(results[0], finish_reason=finish_reason)
+            return results
+
+    # A length-limited generation is malformed even if it sampled an end token;
+    # a stop without the sampled end token is malformed too.
+    final = PLAIN_FINISH if finish_reason == "length" else PLAIN_FINISH.removesuffix("<|im_end|>")
+    model = UnterminatedAnswerModel([SEARCH, final])
+    result = runtime(model, max_tool_calls=1 if forced else None).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert result.final_answer is None
+    assert len(result.trajectory_records) == 1
+    assert result.trajectory_records[0]["termination_kind"] == "malformed"
 
 
 def test_overflow_retains_untrained_tool_tail():
