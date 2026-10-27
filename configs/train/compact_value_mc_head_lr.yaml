@@ -102,7 +102,7 @@ runtime:
 judge:
   enabled: true
   backend: vllm_offline
-  model_path: /124090467/Qwen/Qwen3.5-35B-A3B
+  model_path: /124090467/Qwen/Qwen3.8-27B
   gpu_ids: [0, 1]
   tensor_parallel_size: 2
   # The ~16 GiB retrieval embedding worker stays resident on GPU 0 during
