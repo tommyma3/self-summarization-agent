@@ -642,6 +642,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
             "clip_ratio": training_config.clip_range,
             "clip_ratio_low": training_config.clip_range,
             "clip_ratio_high": training_config.clip_range,
+            "clip_ratio_c": 3.0,
             "ppo_epochs": training_config.update_epochs,
             "shuffle": False,
             "grad_clip": training_config.max_grad_norm,

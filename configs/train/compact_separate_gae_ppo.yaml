@@ -120,7 +120,7 @@ judge:
   batch_timeout_seconds: 600
 
 training:
-  # Freeze pre-fit segment GAE advantages/targets, fit the critic, then update PPO.
+  # Freeze pre-fit segment GAE advantages/targets, fit the critic, then update dual-clip PPO.
   advantage_estimator: compaction_gae_value
   value:
     enabled: true
