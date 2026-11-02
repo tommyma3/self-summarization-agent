@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "fixture_only": true,
+  "repetitions": 2,
+  "bundle_digest": "b00e5cae701cca6aef06c2ea9e92c258d8816dc248b6ec2ffa46994c2185782e",
+  "baseline_validated": true,
+  "oracle_validated": true,
+  "trials": [
+    {
+      "baseline": {
+        "rewards": {
+          "reward": 0
+        },
+        "exception": null,
+        "classification": "candidate_test_failure",
+        "discovery": {
+          "expected": 3,
+          "executed": 3,
+          "passed": 2
+        }
+      },
+      "oracle": {
+        "rewards": {
+          "reward": 1
+        },
+        "exception": null,
+        "classification": "passed",
+        "discovery": {
+          "expected": 3,
+          "executed": 3,
+          "passed": 3
+        }
+      }
+    },
+    {
+      "baseline": {
+        "rewards": {
+          "reward": 0
+        },
+        "exception": null,
+        "classification": "candidate_test_failure",
+        "discovery": {
+          "expected": 3,
+          "executed": 3,
+          "passed": 2
+        }
+      },
+      "oracle": {
+        "rewards": {
+          "reward": 1
+        },
+        "exception": null,
+        "classification": "passed",
+        "discovery": {
+          "expected": 3,
+          "executed": 3,
+          "passed": 3
+        }
+      }
+    }
+  ],
+  "image": null,
+  "verifier_digest": "7f2fe7e4b67b37791af970c24a81fdff1dcf75de12ae47bd6a46eac5eacd2fe8"
+}

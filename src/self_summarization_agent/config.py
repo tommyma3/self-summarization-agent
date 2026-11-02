@@ -28,6 +28,9 @@ class ExperimentConfig:
 @dataclass(slots=True)
 class BenchmarkConfig:
     name: str = "browsecomp"
+    reward_profile: str = "signed_binary"
+    train_manifest_path: str | None = None
+    eval_manifest_path: str | None = None
     dataset: str = "terminal-bench@2.0"
     task_paths: list[str] = field(default_factory=list)
     train_task_paths: list[str] = field(default_factory=list)
@@ -43,8 +46,21 @@ class BenchmarkConfig:
     allow_benchmark_training: bool = False
 
     def __post_init__(self) -> None:
-        if self.name not in {"browsecomp", "terminal-bench"}:
-            raise ValueError("benchmark.name must be browsecomp or terminal-bench")
+        if self.name not in {"browsecomp", "terminal-bench", "swe-dev"}:
+            raise ValueError("benchmark.name must be browsecomp, terminal-bench or swe-dev")
+        from .rewards import reward_bounds
+        reward_bounds(self.reward_profile)
+        if self.name == "swe-dev":
+            if self.reward_profile != "binary_zero_one":
+                raise ValueError("SWE-Dev requires binary_zero_one rewards")
+            if not self.train_manifest_path or not self.eval_manifest_path or not self.dataset_revision:
+                raise ValueError("SWE-Dev requires train/eval manifests and dataset_revision")
+            if self.task_paths or self.train_task_paths or self.task_names or self.allow_benchmark_training:
+                raise ValueError("SWE task selection uses explicit manifests only")
+            if self.image_profile != "text-only" or self.environment not in {"docker", "local-fixture"}:
+                raise ValueError("SWE supports text-only Docker or deterministic local fixtures")
+        elif self.reward_profile != "signed_binary":
+            raise ValueError("Existing benchmarks retain signed_binary rewards")
         if self.image_profile not in {"text-only", "local-vision"}:
             raise ValueError("benchmark.image_profile must be text-only or local-vision")
         if self.image_profile == "local-vision" and not self.vision_model_path:
@@ -260,6 +276,7 @@ class VerlRayConfig:
 
 @dataclass(slots=True)
 class CompactionValueConfig:
+    reward_profile: str = "signed_binary"
     enabled: bool = False
     num_bins: int = 2
     baseline_timing: str = "post_fit"
@@ -296,6 +313,8 @@ class CompactionValueConfig:
         return self.enabled and self.architecture == "shared"
 
     def __post_init__(self) -> None:
+        from .rewards import reward_bounds
+        reward_bounds(self.reward_profile)
         if isinstance(self.num_bins, bool) or not isinstance(self.num_bins, int) or self.num_bins < 2:
             raise ValueError("training.value.num_bins must be an integer >= 2")
         if self.baseline_timing not in {"pre_fit", "post_fit"}:
@@ -479,6 +498,19 @@ class TrainConfig:
     rollout: RolloutConfig = field(default_factory=RolloutConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
+
+    def __post_init__(self):
+        # Resolve once; every trainer/worker receives the same critic contract.
+        if self.training.value.reward_profile not in {"signed_binary", self.benchmark.reward_profile}:
+            raise ValueError("Benchmark and value reward profiles disagree")
+        self.training.value.reward_profile = self.benchmark.reward_profile
+        if self.benchmark.name == "swe-dev":
+            if self.training.backend not in {"transformers", "verl_ray"}:
+                raise ValueError("SWE checkpoint resume supports transformers or verl_ray training")
+            if not self.training.train_compaction_tokens or not self.rollout.require_exact_token_ids:
+                raise ValueError("SWE requires exact IDs and trainable summary tokens")
+            if self.training.value_pretraining.enabled:
+                raise ValueError("Value pretraining currently supports BrowseComp only")
 
 
 def _parse_override_value(raw_value: str) -> Any:

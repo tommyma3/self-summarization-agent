@@ -3859,6 +3859,7 @@ dependencies = [
     { name = "faiss-cpu" },
     { name = "flash-attn" },
     { name = "flash-linear-attention", extra = ["cuda"] },
+    { name = "harbor" },
     { name = "openai" },
     { name = "peft" },
     { name = "pyserini" },
@@ -3876,11 +3877,6 @@ dependencies = [
     { name = "vllm" },
 ]
 
-[package.optional-dependencies]
-terminal-bench = [
-    { name = "harbor" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.13.0" },
@@ -3889,7 +3885,7 @@ requires-dist = [
     { name = "faiss-cpu", specifier = ">=1.13.2" },
     { name = "flash-attn" },
     { name = "flash-linear-attention", extras = ["cuda"] },
-    { name = "harbor", marker = "extra == 'terminal-bench'", specifier = "==0.1.44" },
+    { name = "harbor", specifier = "==0.1.44" },
     { name = "openai", specifier = ">=2.32.0" },
     { name = "peft", specifier = ">=0.19.1" },
     { name = "pyserini", specifier = ">=1.4.0" },
@@ -3906,7 +3902,6 @@ requires-dist = [
     { name = "verl", git = "https://github.com/verl-project/verl.git" },
     { name = "vllm", git = "https://github.com/vllm-project/vllm.git?tag=v0.19.1" },
 ]
-provides-extras = ["terminal-bench"]
 
 [[package]]
 name = "sentencepiece"

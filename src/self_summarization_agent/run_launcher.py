@@ -94,6 +94,8 @@ def run_experiment(
 def main() -> None:
     args = parse_args()
     config = load_run_config(args.config, _merge_launcher_overrides(args))
+    if config.benchmark.name == "swe-dev":
+        raise ValueError("Use rollout_collection for SWE evaluation; run_launcher is BrowseComp-only")
     run_dir = run_experiment(config)
     print(run_dir)
 

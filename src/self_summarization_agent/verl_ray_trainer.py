@@ -24,6 +24,7 @@ from self_summarization_agent.value_model import (
     rollout_value_weights,
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
+from self_summarization_agent.rewards import reward_bounds
 from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
 
@@ -321,7 +322,7 @@ def build_verl_actor_dataproto(
     )
 
 
-def _validate_compaction_value_samples(samples: list[RLSample]) -> None:
+def _validate_compaction_value_samples(samples: list[RLSample], reward_profile="signed_binary") -> None:
     if not samples:
         return
     reward_by_rollout: dict[str, float] = {}
@@ -330,7 +331,7 @@ def _validate_compaction_value_samples(samples: list[RLSample]) -> None:
             raise ValueError(f"Sample {sample.turn_id} is missing training cache")
         if sample.rollout_id is None:
             raise ValueError("Compaction value training requires rollout_id on every interval")
-        if sample.reward not in {-1.0, 1.0}:
+        if sample.reward not in reward_bounds(reward_profile):
             raise ValueError("Compaction value training requires binary -1/+1 rollout rewards")
         if sample.state_prefix_length is None:
             raise ValueError(f"Sample {sample.turn_id} is missing an exact value-state anchor")
@@ -355,11 +356,12 @@ def build_verl_value_probe_dataproto(
     checkpoint_id: str,
     alignment: int = 1,
     max_sequence_length: int | None = None,
+    reward_profile="signed_binary",
 ):
     """Build causal-prefix-only value probes without altering cached intervals."""
 
     np, _ray, DataProto = _require_verl_ray()
-    _validate_compaction_value_samples(samples)
+    _validate_compaction_value_samples(samples, reward_profile)
     if not samples:
         raise ValueError("Compaction value probing requires at least one interval")
     padding = _padding_count(len(samples), alignment)
@@ -427,11 +429,12 @@ def build_verl_value_actor_dataproto(
     checkpoint_id: str,
     alignment: int,
     max_sequence_length: int | None = None,
+    reward_profile="signed_binary",
 ):
     """Build a lossless actor-critic batch, padding only with zero-weight duplicates."""
 
     np, _ray, DataProto = _require_verl_ray()
-    _validate_compaction_value_samples(samples)
+    _validate_compaction_value_samples(samples, reward_profile)
     if len(samples) != len(advantages) or len(samples) != len(value_weights):
         raise ValueError("Compaction value samples, advantages, and weights must align")
     if not samples:
@@ -617,9 +620,12 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
     mini_batch_size = training_config.minibatch_size or training_config.group_size
     micro_batch_size = fsdp_config.ppo_micro_batch_size_per_gpu or training_config.gradient_accumulation_microbatch_size
     save_contents = ["hf_model"] if fsdp_config.save_hf_model else ["model"]
+    if training_config.value.reward_profile == "binary_zero_one":
+        save_contents = list(dict.fromkeys([*save_contents, "model", "optimizer", "extra"]))
     return {
         "compaction_value": {
             "enabled": training_config.value.shared,
+            "reward_profile": training_config.value.reward_profile,
             "loss_coefficient": training_config.value.loss_coefficient,
             "head_learning_rate": training_config.value.head_learning_rate,
             "zero_initialize_head": training_config.value.zero_initialize_head,
@@ -677,7 +683,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
             "checkpoint": {
                 "_target_": "verl.trainer.config.CheckpointConfig",
                 "save_contents": save_contents,
-                "load_contents": ["model"],
+                "load_contents": ["model", "optimizer", "extra"] if training_config.value.reward_profile == "binary_zero_one" else ["model"],
                 "async_save": False,
             },
         },
@@ -849,6 +855,13 @@ class VerlFSDPWorkerGroup:
             name_prefix=f"{training_config.verl.namespace}-actor",
         )
         self.worker_group.init_model()
+        if training_config.value.reward_profile == "binary_zero_one":
+            marker = Path(model_config.model_path) / "swe_actor_optimizer.json"
+            if marker.exists():
+                state = json.loads(marker.read_text())
+                if state != {"version": 1, "reward_profile": "binary_zero_one", "world_size": world_size}:
+                    raise ValueError("Incompatible SWE actor optimizer topology/profile")
+                self.worker_group.load_checkpoint(model_config.model_path)
 
     @property
     def alignment_step(self) -> int:
@@ -914,6 +927,9 @@ class VerlFSDPWorkerGroup:
 
     def save_checkpoint(self, path: str) -> None:
         self.worker_group.save_checkpoint(path, None, 0, None)
+        if self.training_config.value.reward_profile == "binary_zero_one":
+            (Path(path) / "swe_actor_optimizer.json").write_text(json.dumps(dict(
+                version=1, reward_profile="binary_zero_one", world_size=self._world_size)))
 
 
 def _promote_huggingface_checkpoint(output_path: Path) -> None:
@@ -1066,6 +1082,7 @@ class VerlRayPolicyTrainer:
                 samples, checkpoint_id=self.checkpoint_id,
                 alignment=self._worker_group.data_parallel_size,
                 max_sequence_length=self.training_config.max_sequence_length,
+                reward_profile=self.training_config.value.reward_profile,
             )
             return self._worker_group.evaluate_compaction_values(batch)
         return self._ray.get(self._actor.evaluate_compaction_values.remote(samples, microbatch_size))
@@ -1077,7 +1094,7 @@ class VerlRayPolicyTrainer:
         samples = _flatten_grouped_samples(grouped_samples)
         if not samples:
             return UpdateMetrics(sample_count=0, mean_reward=0.0, mean_advantage=0.0, loss=0.0)
-        _validate_compaction_value_samples(samples)
+        _validate_compaction_value_samples(samples, self.training_config.value.reward_profile)
         assert self._worker_group is not None
 
         probe_batch = build_verl_value_probe_dataproto(
@@ -1085,6 +1102,7 @@ class VerlRayPolicyTrainer:
             checkpoint_id=self.checkpoint_id,
             alignment=self._worker_group.data_parallel_size,
             max_sequence_length=self.training_config.max_sequence_length,
+            reward_profile=self.training_config.value.reward_profile,
         )
         print(
             "[train_step] FSDP frozen-value pass: "
@@ -1120,6 +1138,7 @@ class VerlRayPolicyTrainer:
             checkpoint_id=self.checkpoint_id,
             alignment=alignment,
             max_sequence_length=self.training_config.max_sequence_length,
+            reward_profile=self.training_config.value.reward_profile,
         )
         padded_count = int(actor_batch.meta_info["padded_sample_count"])
         actor_batch.meta_info["mini_batch_size"] = mini_batch_size
@@ -1144,7 +1163,7 @@ class VerlRayPolicyTrainer:
         eval_loss_after = normalized_value_evaluation_loss(new_value_losses, value_weights)
         eval_seconds = time.monotonic() - eval_started
 
-        predicted_classes = [1.0 if value >= 0 else -1.0 for value in old_values]
+        predicted_classes = [1.0 if value >= (0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0) else reward_bounds(self.training_config.value.reward_profile)[0] for value in old_values]
         accuracy = sum(
             prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
         ) / len(samples)
@@ -1164,8 +1183,8 @@ class VerlRayPolicyTrainer:
             {
                 "backend": "verl_ray",
                 "verl_ray/worker_backend": "verl_fsdp",
-                **value_diagnostics(samples, old_values, old_value_losses, prefix="value/eval_before"),
-                **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after"),
+                **value_diagnostics(samples, old_values, old_value_losses, prefix="value/eval_before", reward_profile=self.training_config.value.reward_profile),
+                **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after", reward_profile=self.training_config.value.reward_profile),
                 "value/eval_scope": "training_collection",
                 "value/optimizer_step_count": expected_steps,
                 # Retain the historical contribution metric for compatibility;
@@ -1346,8 +1365,8 @@ class VerlRayPolicyTrainer:
     def _step_fixed(self, grouped_samples, fixed_advantages):
         _validate_grpo_training_config(self.training_config)
         samples = _flatten_grouped_samples(grouped_samples)
-        validate_samples(samples, self.training_config.max_sequence_length)
-        advantages = validate_advantages(samples, fixed_advantages)
+        validate_samples(samples, self.training_config.max_sequence_length, self.training_config.value.reward_profile)
+        advantages = validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile)
         if self.training_config.verl.worker_backend != "verl_fsdp":
             return _metrics_from_dict(self._ray.get(self._actor.step_fixed.remote(grouped_samples, fixed_advantages)))
         contributing = [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)]
@@ -1362,6 +1381,7 @@ class VerlRayPolicyTrainer:
                 [s for s, _a in chunk], advantages=[a for _s, a in chunk], value_weights=[0.0] * len(chunk),
                 checkpoint_id=self.checkpoint_id, alignment=self._worker_group.data_parallel_size,
                 max_sequence_length=self.training_config.max_sequence_length,
+                reward_profile=self.training_config.value.reward_profile,
             )
 
         result = self._run_ppo_minibatch_loop(contributing, build_batch=build_batch, query_count=len(grouped_samples))

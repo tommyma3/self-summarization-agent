@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from safetensors.torch import load_file, save_file
+from .rewards import reward_bounds
 
 
 VALUE_HEAD_SUBDIR = "compaction_value"
@@ -15,37 +16,41 @@ VALUE_HEAD_MANIFEST_FILENAME = f"{VALUE_HEAD_SUBDIR}/compaction_value_config.jso
 VALUE_HEAD_VERSION = 1
 
 
-def reward_class_indices(rewards: torch.Tensor) -> torch.Tensor:
-    if not bool(torch.all((rewards == -1) | (rewards == 1))):
-        raise ValueError("Compaction Monte Carlo value targets must be exactly -1 or +1")
+def reward_class_indices(rewards: torch.Tensor, reward_profile="signed_binary") -> torch.Tensor:
+    low, high = reward_bounds(reward_profile)
+    if not bool(torch.all((rewards == low) | (rewards == high))):
+        raise ValueError("Compaction Monte Carlo value targets must match the configured binary reward classes")
     return (rewards > 0).to(torch.long)
 
 
-def expected_binary_value(logits: torch.Tensor) -> torch.Tensor:
+def expected_binary_value(logits: torch.Tensor, reward_profile="signed_binary") -> torch.Tensor:
     probabilities = torch.softmax(logits.float(), dim=-1)
-    return probabilities[..., 1] - probabilities[..., 0]
+    low, high = reward_bounds(reward_profile)
+    return low * probabilities[..., 0] + high * probabilities[..., 1]
 
 
-def value_support(num_bins: int) -> list[float]:
+def value_support(num_bins: int, reward_profile="signed_binary") -> list[float]:
     if isinstance(num_bins, bool) or not isinstance(num_bins, int) or num_bins < 2:
         raise ValueError("Value support requires at least two bins")
-    return [-1.0 + 2.0 * k / (num_bins - 1) for k in range(num_bins)]
+    low, high = reward_bounds(reward_profile)
+    return [low + (high - low) * k / (num_bins - 1) for k in range(num_bins)]
 
 
-def expected_categorical_value(logits: torch.Tensor) -> torch.Tensor:
+def expected_categorical_value(logits: torch.Tensor, reward_profile="signed_binary") -> torch.Tensor:
     if logits.shape[-1] == 2:
-        return expected_binary_value(logits)
-    support = logits.new_tensor(value_support(logits.shape[-1]), dtype=torch.float32)
+        return expected_binary_value(logits, reward_profile)
+    support = logits.new_tensor(value_support(logits.shape[-1], reward_profile), dtype=torch.float32)
     return (logits.float().softmax(-1) * support).sum(-1)
 
 
-def two_hot_targets(targets: torch.Tensor, num_bins: int) -> torch.Tensor:
+def two_hot_targets(targets: torch.Tensor, num_bins: int, reward_profile="signed_binary") -> torch.Tensor:
     """Detached interpolation on [-1, 1]; only roundoff-sized overflow is clamped."""
-    value_support(num_bins)
+    value_support(num_bins, reward_profile)
+    low, high = reward_bounds(reward_profile)
     targets = targets.detach().float()
-    if not bool(torch.isfinite(targets).all()) or bool((targets.abs() > 1 + 1e-6).any()):
-        raise ValueError("Value targets must be finite and in [-1, 1]")
-    positions = ((targets.clamp(-1, 1) + 1) * ((num_bins - 1) / 2)).clamp(0, num_bins - 1)
+    if not bool(torch.isfinite(targets).all()) or bool(((targets < low - 1e-6) | (targets > high + 1e-6)).any()):
+        raise ValueError("Value targets must be finite and within configured support")
+    positions = ((targets.clamp(low, high) - low) * ((num_bins - 1) / (high - low))).clamp(0, num_bins - 1)
     lower = positions.floor().long()
     upper = (lower + 1).clamp(max=num_bins - 1)
     fraction = positions - lower
@@ -55,17 +60,23 @@ def two_hot_targets(targets: torch.Tensor, num_bins: int) -> torch.Tensor:
     return result
 
 
-def outcome_log_losses(logits: torch.Tensor, rewards: torch.Tensor) -> torch.Tensor:
+def outcome_log_losses(logits: torch.Tensor, rewards: torch.Tensor, reward_profile="signed_binary") -> torch.Tensor:
     """Binary outcome log loss implied by the categorical mean, computed stably."""
-    support = logits.new_tensor(value_support(logits.shape[-1]), dtype=torch.float32)
-    success = (support + 1) / 2
+    support = logits.new_tensor(value_support(logits.shape[-1], reward_profile), dtype=torch.float32)
+    reward_class_indices(rewards, reward_profile)
+    low, high = reward_bounds(reward_profile)
+    success = (support - low) / (high - low)
     log_probs = logits.float().log_softmax(-1)
     positive = torch.logsumexp(log_probs + success.log(), dim=-1)
     negative = torch.logsumexp(log_probs + (1 - success).log(), dim=-1)
     return -torch.where(rewards > 0, positive, negative)
 
 
-def value_head_manifest(hidden_size: int, num_bins: int) -> dict:
+def value_head_manifest(hidden_size: int, num_bins: int, reward_profile="signed_binary") -> dict:
+    if reward_profile != "signed_binary":
+        return {"version": 3, "hidden_size": hidden_size, "num_bins": num_bins,
+                "reward_profile": reward_profile, "support": value_support(num_bins, reward_profile),
+                "target_encoding": "two_hot"}
     if num_bins == 2:
         return {"version": 1, "hidden_size": hidden_size, "class_order": [-1, 1]}
     return {"version": 2, "hidden_size": hidden_size, "num_bins": num_bins,
@@ -105,9 +116,10 @@ def rollout_normalized_value_loss(
     logits: torch.Tensor,
     rewards: torch.Tensor,
     rollout_weights: torch.Tensor,
+    reward_profile: str = "signed_binary",
 ) -> torch.Tensor:
     losses = torch.nn.functional.cross_entropy(
-        logits.float(), reward_class_indices(rewards), reduction="none"
+        logits.float(), reward_class_indices(rewards, reward_profile), reduction="none"
     )
     weights = rollout_weights.to(device=losses.device, dtype=losses.dtype)
     if losses.shape != weights.shape:
@@ -116,9 +128,10 @@ def rollout_normalized_value_loss(
 
 
 class CompactionValueHead(torch.nn.Module):
-    def __init__(self, hidden_size: int, *, zero_initialize: bool = True, num_bins: int = 2) -> None:
+    def __init__(self, hidden_size: int, *, zero_initialize: bool = True, num_bins: int = 2, reward_profile="signed_binary") -> None:
         super().__init__()
-        value_support(num_bins)
+        value_support(num_bins, reward_profile)
+        self.reward_profile = reward_profile
         self.projection = torch.nn.Linear(hidden_size, num_bins)
         if zero_initialize:
             torch.nn.init.zeros_(self.projection.weight)
@@ -174,7 +187,7 @@ def save_value_head(head: CompactionValueHead, checkpoint_path: str | Path) -> N
     )
     manifest_path.write_text(
         json.dumps(
-            value_head_manifest(head.projection.in_features, head.projection.out_features),
+            value_head_manifest(head.projection.in_features, head.projection.out_features, head.reward_profile),
             indent=2,
             sort_keys=True,
         )
@@ -189,6 +202,7 @@ def load_value_head(
     hidden_size: int,
     zero_initialize: bool,
     num_bins: int = 2,
+    reward_profile: str = "signed_binary",
 ) -> tuple[CompactionValueHead, bool]:
     path = Path(checkpoint_path)
     weights_path = path / VALUE_HEAD_FILENAME
@@ -203,13 +217,13 @@ def load_value_head(
     if not manifest_path.exists() and legacy_manifest_path.exists():
         manifest_path = legacy_manifest_path
 
-    head = CompactionValueHead(hidden_size, zero_initialize=zero_initialize, num_bins=num_bins)
+    head = CompactionValueHead(hidden_size, zero_initialize=zero_initialize, num_bins=num_bins, reward_profile=reward_profile)
     if not weights_path.exists() and not manifest_path.exists():
         return head, False
     if not weights_path.exists() or not manifest_path.exists():
         raise ValueError(f"Incomplete compaction value-head checkpoint in {path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest != value_head_manifest(hidden_size, num_bins):
+    if manifest != value_head_manifest(hidden_size, num_bins, reward_profile):
         raise ValueError("Compaction value-head manifest does not match the policy model")
     head.load_state_dict(load_file(str(weights_path)))
     return head, True

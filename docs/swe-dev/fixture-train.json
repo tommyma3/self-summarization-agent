@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "split": "train",
+  "split_version": "fixture-only-v1",
+  "split_seed": 0,
+  "dataset_revision": "local-fixture-v1",
+  "tasks": [
+    {
+      "task_id": "local-fixture:trim-name-v1",
+      "leakage_group": "local-fixture:trim-name",
+      "source": {
+        "kind": "deterministic-local-fixture",
+        "origin": "project-fixture",
+        "instance_id": null,
+        "revision": "trim-name-v1",
+        "repository_url": null,
+        "base_commit": null
+      },
+      "bundle_path": "../../tests/fixtures/swe_dev/trim-name",
+      "bundle_digest": "b00e5cae701cca6aef06c2ea9e92c258d8816dc248b6ec2ffa46994c2185782e",
+      "image": null,
+      "build_context_digest": "84cb496d84f12a7a07a03ddbfd9d10af3ecff6a1cfadc0c9ea57dc3ed9d35cee",
+      "instruction_digest": "7693e0048222d1a3e078b287d2d1089edb5729f04fcb4a1969bb54ffccd3f312",
+      "reference_patch_digest": "461ee13d024702e7bf85bef60fdea92a67c3a83a1f7d47b1e074674be732d568",
+      "verifier": {
+        "path": "../../tests/fixtures/swe_dev/trim-name/tests/check.py",
+        "digest": "7f2fe7e4b67b37791af970c24a81fdff1dcf75de12ae47bd6a46eac5eacd2fe8",
+        "version": "fixture-v1",
+        "fail_to_pass": [
+          "strip_edges"
+        ],
+        "pass_to_pass": [
+          "interior_whitespace",
+          "empty"
+        ],
+        "expected_tests": 3,
+        "timeout_seconds": 10,
+        "limits": {
+          "cpus": 1,
+          "memory_mb": 512,
+          "pids": 32,
+          "tmp_mb": 32
+        }
+      },
+      "validation_report": "fixture-validation.json",
+      "validation_digest": "4eba07fa12603f722062ac2d111b994cbe3349a87d1293d3254ba6f1002654c8"
+    }
+  ]
+}

@@ -277,6 +277,8 @@ def train_experiment(
 def main() -> None:
     args = parse_args()
     config = load_train_config(args.config, _merge_launcher_overrides(args))
+    if config.benchmark.name == "swe-dev":
+        raise ValueError("Use iteration_launcher for SWE collection/verification/cache/training")
     train_dir = train_experiment(config)
     print(train_dir)
 

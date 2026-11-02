@@ -1,0 +1,108 @@
+{
+  "repository_revision": "72917b610c3749c9e1236b29effd629f8aca6a99",
+  "dataset_revision": "5888e5864886590ead78a69b6e60490a0d89a594",
+  "aggregate": {
+    "rows": 20147,
+    "origins": {
+      "nebius": 4473,
+      "swe-dev": 15674
+    },
+    "nonblank_origin_instance_pairs": 2276,
+    "blank_instance_ids": 17871,
+    "duplicate_transcripts": 2276,
+    "complete_explicit_specifications": 0,
+    "validated_upstream_tasks": 0,
+    "missing_assets": {
+      "missing_repository_url": 20147,
+      "missing_base_commit": 20147,
+      "missing_instruction": 20147,
+      "missing_setup": 20147,
+      "missing_fail_to_pass": 20147,
+      "missing_pass_to_pass": 20147,
+      "missing_verifier": 20147,
+      "missing_image": 20147,
+      "missing_oracle_validation": 20147
+    },
+    "limitation": "Counts of nonblank IDs are not counts of executable tasks; no transcript inference."
+  },
+  "files": {
+    "rft-00000-of-00001.parquet": {
+      "sha256": "d03c081bb40575fad6489b91cd9d65bc0a210ed54036f27c98d3d5776bc26c61",
+      "schema": "instance_id: string\ninput: list<element: struct<role: string, content: string>>\n  child 0, element: struct<role: string, content: string>\n      child 0, role: string\n      child 1, content: string\nreward: int64\nf2p_count: int64\nf2p_pass: int64\nfrom: string\n-- schema metadata --\nhuggingface: '{\"info\": {\"features\": {\"instance_id\": {\"dtype\": \"string\", \"' + 325",
+      "rows": 2276,
+      "origins": {
+        "nebius": 893,
+        "swe-dev": 1383
+      },
+      "nonblank_origin_instance_pairs": 2276,
+      "blank_instance_ids": 0,
+      "duplicate_transcripts": 0,
+      "complete_explicit_specifications": 0,
+      "validated_upstream_tasks": 0,
+      "missing_assets": {
+        "missing_repository_url": 2276,
+        "missing_base_commit": 2276,
+        "missing_instruction": 2276,
+        "missing_setup": 2276,
+        "missing_fail_to_pass": 2276,
+        "missing_pass_to_pass": 2276,
+        "missing_verifier": 2276,
+        "missing_image": 2276,
+        "missing_oracle_validation": 2276
+      },
+      "limitation": "Counts of nonblank IDs are not counts of executable tasks; no transcript inference."
+    },
+    "sft-00000-of-00002.parquet": {
+      "sha256": "74cbbaef1f64f469a1b26726587dce970319b39bd38e75fbb60ec73da2bd4ea9",
+      "schema": "input: list<element: struct<content: string, role: string>>\n  child 0, element: struct<content: string, role: string>\n      child 0, content: string\n      child 1, role: string\nfrom: string\nf2p_pass: int64\nf2p_count: int64\nreward: int64\ninstance_id: string\n-- schema metadata --\nhuggingface: '{\"info\": {\"features\": {\"input\": [{\"content\": {\"dtype\": \"str' + 325",
+      "rows": 8936,
+      "origins": {
+        "swe-dev": 5988,
+        "nebius": 2948
+      },
+      "nonblank_origin_instance_pairs": 0,
+      "blank_instance_ids": 8936,
+      "duplicate_transcripts": 0,
+      "complete_explicit_specifications": 0,
+      "validated_upstream_tasks": 0,
+      "missing_assets": {
+        "missing_repository_url": 8936,
+        "missing_base_commit": 8936,
+        "missing_instruction": 8936,
+        "missing_setup": 8936,
+        "missing_fail_to_pass": 8936,
+        "missing_pass_to_pass": 8936,
+        "missing_verifier": 8936,
+        "missing_image": 8936,
+        "missing_oracle_validation": 8936
+      },
+      "limitation": "Counts of nonblank IDs are not counts of executable tasks; no transcript inference."
+    },
+    "sft-00001-of-00002.parquet": {
+      "sha256": "c2c748cabfc4ae379b645d7d24a61aac5248a11687c79e0d99f231c12190501a",
+      "schema": "input: list<element: struct<content: string, role: string>>\n  child 0, element: struct<content: string, role: string>\n      child 0, content: string\n      child 1, role: string\nfrom: string\nf2p_pass: int64\nf2p_count: int64\nreward: int64\ninstance_id: string\n-- schema metadata --\nhuggingface: '{\"info\": {\"features\": {\"input\": [{\"content\": {\"dtype\": \"str' + 325",
+      "rows": 8935,
+      "origins": {
+        "nebius": 632,
+        "swe-dev": 8303
+      },
+      "nonblank_origin_instance_pairs": 0,
+      "blank_instance_ids": 8935,
+      "duplicate_transcripts": 0,
+      "complete_explicit_specifications": 0,
+      "validated_upstream_tasks": 0,
+      "missing_assets": {
+        "missing_repository_url": 8935,
+        "missing_base_commit": 8935,
+        "missing_instruction": 8935,
+        "missing_setup": 8935,
+        "missing_fail_to_pass": 8935,
+        "missing_pass_to_pass": 8935,
+        "missing_verifier": 8935,
+        "missing_image": 8935,
+        "missing_oracle_validation": 8935
+      },
+      "limitation": "Counts of nonblank IDs are not counts of executable tasks; no transcript inference."
+    }
+  }
+}

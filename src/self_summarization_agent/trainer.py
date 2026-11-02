@@ -28,6 +28,7 @@ from self_summarization_agent.trajectory import (
     TOKEN_CACHE_VERSION,
     tokenize_interval_messages,
 )
+from self_summarization_agent.rewards import reward_bounds
 from self_summarization_agent.value_model import (
     CompactionValueHead,
     capture_lm_head_input,
@@ -612,6 +613,7 @@ class TransformersPolicyTrainer:
                 self.model_config.model_path,
                 hidden_size=model_hidden_size(self.model),
                 zero_initialize=self.training_config.value.zero_initialize_head,
+                reward_profile=self.training_config.value.reward_profile,
             )
             output_embedding = self.model.get_output_embeddings()
             try:
@@ -626,6 +628,24 @@ class TransformersPolicyTrainer:
                 self.value_head.parameters(),
                 learning_rate=self.training_config.value.head_learning_rate,
             )
+        if self.training_config.value.reward_profile == "binary_zero_one":
+            state_path = Path(self.model_config.model_path) / "actor_training_state.pt"
+            if state_path.is_file():
+                state = torch.load(state_path, map_location="cpu", weights_only=True)
+                if (state.get("version") != 1 or state.get("reward_profile") != "binary_zero_one"
+                        or state.get("estimator") != self.training_config.advantage_estimator):
+                    raise ValueError("Incompatible actor optimizer reward/method checkpoint")
+                self.optimizer.load_state_dict(state["optimizer"])
+                torch.random.set_rng_state(state["rng_state"])
+                for index, rng_state in state.get("cuda_rng_states", {}).items():
+                    if int(index) >= torch.cuda.device_count():
+                        raise ValueError("Actor checkpoint CUDA RNG device is unavailable")
+                    torch.cuda.set_rng_state(rng_state, device=int(index))
+                # Preserve moments, while applying explicitly configured learning rates.
+                self.optimizer.param_groups[0]["lr"] = self.training_config.learning_rate
+                if self.value_head is not None:
+                    self.optimizer.param_groups[self.value_head_optimizer_group]["lr"] = (
+                        self.training_config.value.head_learning_rate or self.training_config.learning_rate)
         self.model.train()
         print("[TransformersPolicyTrainer] Model and optimizer are ready", flush=True)
         _write_training_progress(self.progress_path, "trainer_ready")
@@ -867,12 +887,12 @@ class TransformersPolicyTrainer:
                 started = time.monotonic()
                 for batch_index, (start, end) in enumerate(ranges, start=1):
                     logits = self._value_logits(samples[start:end])
-                    values.extend(expected_binary_value(logits).detach().cpu().tolist())
+                    values.extend(expected_binary_value(logits, self.training_config.value.reward_profile).detach().cpu().tolist())
                     rewards = torch.tensor(
                         [s.reward for s in samples[start:end]], device=logits.device, dtype=torch.float32
                     )
                     losses.extend(torch.nn.functional.cross_entropy(
-                        logits.float(), reward_class_indices(rewards), reduction="none"
+                        logits.float(), reward_class_indices(rewards, self.training_config.value.reward_profile), reduction="none"
                     ).cpu().tolist())
                     if _report_progress(batch_index, len(ranges)):
                         elapsed = time.monotonic() - started
@@ -914,7 +934,7 @@ class TransformersPolicyTrainer:
             raise RuntimeError("Compaction value training is enabled without a value head")
         if any(sample.rollout_id is None for sample in samples):
             raise ValueError("Compaction value training requires rollout_id on every interval")
-        if any(sample.reward not in {-1.0, 1.0} for sample in samples):
+        if any(sample.reward not in reward_bounds(self.training_config.value.reward_profile) for sample in samples):
             raise ValueError("Compaction value training requires binary -1/+1 rollout rewards")
 
         reward_by_rollout: dict[str, float] = {}
@@ -1003,7 +1023,7 @@ class TransformersPolicyTrainer:
                         dtype=torch.float32,
                         device=value_logits.device,
                     )
-                    value_loss = rollout_normalized_value_loss(value_logits, rewards, weights)
+                    value_loss = rollout_normalized_value_loss(value_logits, rewards, weights, self.training_config.value.reward_profile)
                     total_loss = policy_loss + self.training_config.value.loss_coefficient * value_loss.to(
                         device=policy_loss.device
                     )
@@ -1045,11 +1065,11 @@ class TransformersPolicyTrainer:
         new_values, new_value_losses = self.evaluate_compaction_values(samples, microbatch_size=microbatch_size)
         eval_seconds = time.monotonic() - eval_started
         evaluation_metrics = {
-            **value_diagnostics(samples, old_values, self._old_value_losses, prefix="value/eval_before"),
-            **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after"),
+            **value_diagnostics(samples, old_values, self._old_value_losses, prefix="value/eval_before", reward_profile=self.training_config.value.reward_profile),
+            **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after", reward_profile=self.training_config.value.reward_profile),
         }
         minibatches_per_epoch = len(list(_minibatch_ranges(len(samples), minibatch_size)))
-        predicted_classes = [1.0 if value >= 0 else -1.0 for value in old_values]
+        predicted_classes = [1.0 if value >= (0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0) else (0.0 if self.training_config.value.reward_profile == "binary_zero_one" else -1.0) for value in old_values]
         accuracy = sum(
             prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
         ) / len(samples)
@@ -1172,8 +1192,8 @@ class TransformersPolicyTrainer:
             if fixed_advantages is None:
                 raise ValueError("Separate critic actor update requires fitted advantages")
             samples = [s for group in grouped_samples.values() for s in group]
-            validate_samples(samples, self.training_config.max_sequence_length)
-            advantages = validate_advantages(samples, fixed_advantages)
+            validate_samples(samples, self.training_config.max_sequence_length, self.training_config.value.reward_profile)
+            advantages = validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile)
             batch = _PolicyBatch(samples, advantages, [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)])
         else:
             if fixed_advantages is not None:
@@ -1284,6 +1304,13 @@ class TransformersPolicyTrainer:
         _copy_processor_configs(self.model_config.model_path, path)
         if self.value_head is not None:
             save_value_head(self.value_head, path)
+        if self.training_config.value.reward_profile == "binary_zero_one":
+            torch.save(dict(version=1, reward_profile="binary_zero_one",
+                estimator=self.training_config.advantage_estimator,
+                optimizer=self.optimizer.state_dict(), rng_state=torch.random.get_rng_state(),
+                cuda_rng_states={str(device.index): torch.cuda.get_rng_state(device)
+                    for device in {parameter.device for parameter in self.model.parameters()}
+                    if device.type == "cuda"}), Path(path) / "actor_training_state.pt")
 
 
 @dataclass(slots=True)

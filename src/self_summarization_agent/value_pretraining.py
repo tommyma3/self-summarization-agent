@@ -53,6 +53,10 @@ def initialization_binding(config, actor):
     from self_summarization_agent.dataset import default_decrypted_path
 
     actor = Path(actor).resolve()
+    online_value_config = asdict(config.training.value)
+    # Preserve pre-existing signed pretraining bindings across the opt-in SWE field.
+    if online_value_config.get("reward_profile") == "signed_binary":
+        online_value_config.pop("reward_profile")
     dataset_path = Path(config.dataset.decrypted_path or default_decrypted_path(config.experiment.bc_plus_root))
     return {
         "version": 1, "actor_path": str(actor), "actor_id": checkpoint_id_from_path(actor),
@@ -61,7 +65,7 @@ def initialization_binding(config, actor):
         "critic_digest": source_critic_identity(config.training.value.model_path, resume=False),
         "collection_profile_id": collection_profile_id(config, actor),
         "sampling_profile_id": sampling_profile_id(resolved_rollout_sampling_profile(config, split="train")),
-        "pretraining": asdict(config.training.value_pretraining), "online_value_config": asdict(config.training.value),
+        "pretraining": asdict(config.training.value_pretraining), "online_value_config": online_value_config,
         "runtime": asdict(config.runtime), "dataset": asdict(config.dataset),
         "dataset_digest": file_digest(dataset_path) if dataset_path.is_file() else None,
         "retrieval": asdict(config.retrieval), "judge": asdict(config.judge), "model_dtype": config.model.dtype,

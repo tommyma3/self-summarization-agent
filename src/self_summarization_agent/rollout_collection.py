@@ -566,7 +566,7 @@ def collect_rollouts(
     retrieval_worker_url: str | None = None,
     overlap_judge_client: Any | None = None,
 ) -> Path:
-    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") in {"terminal-bench", "swe-dev"}:
         from self_summarization_agent.benchmarks.terminal_bench.collection import collect_terminal_rollouts
         return collect_terminal_rollouts(config, checkpoint_path=checkpoint_path,
             output_path=output_path, generator=generator, resume=resume,

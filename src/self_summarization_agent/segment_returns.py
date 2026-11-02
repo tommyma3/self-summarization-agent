@@ -7,12 +7,13 @@ from __future__ import annotations
 import math
 
 from self_summarization_agent.separate_value import sample_key
+from .rewards import reward_bounds
 
 
 TERMINAL_KINDS = {"final_answer", "forced_answer", "malformed", "context_overflow"}
 
 
-def ordered_rollout_chains(rows, samples):
+def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
     """Require complete authoritative interval chains for every selected rollout."""
     by_key = {sample_key(s): s for s in samples}
     if len(by_key) != len(samples):
@@ -41,7 +42,7 @@ def ordered_rollout_chains(rows, samples):
             sample = by_key[key]
             reward = row.get("turn_rewards", {}).get(key[1])
             if (sample.query_id != row.get("query_id") or record.get("query_id") != sample.query_id
-                    or isinstance(reward, bool) or reward not in (-1, 1) or reward != sample.reward):
+                    or isinstance(reward, bool) or reward not in reward_bounds(reward_profile) or reward != sample.reward):
                 raise ValueError("Inconsistent rollout identity or reward in return chain")
             if "prefix_summary_turn_id" not in record:
                 raise ValueError("Missing compaction linkage metadata")
@@ -71,15 +72,16 @@ def ordered_rollout_chains(rows, samples):
     return chains
 
 
-def segment_gae(chains, old_values, gae_lambda):
+def segment_gae(chains, old_values, gae_lambda, reward_profile="signed_binary"):
     """Return rows keyed by interval; gamma=1 and terminal reward is counted once."""
     if (isinstance(gae_lambda, bool) or not isinstance(gae_lambda, (int, float))
             or not math.isfinite(gae_lambda) or not 0 <= gae_lambda <= 1):
         raise ValueError("GAE lambda must be finite and in [0, 1]")
+    low, high = reward_bounds(reward_profile)
     keys = [tuple(item["key"]) for chain in chains for item in chain]
     if len(set(keys)) != len(keys) or set(keys) != set(old_values):
         raise ValueError("Old values must cover exactly the interval chains")
-    if any(not math.isfinite(v) or not -1 <= v <= 1 for v in old_values.values()):
+    if any(not math.isfinite(v) or not low <= v <= high for v in old_values.values()):
         raise ValueError("Old values must be finite and in [-1, 1]")
     result = {}
     for chain in chains:
@@ -91,9 +93,9 @@ def segment_gae(chains, old_values, gae_lambda):
             delta = reward + next_value - value
             advantage = delta + gae_lambda * next_advantage
             target = value + advantage
-            if not math.isfinite(target) or abs(target) > 1 + 1e-12:
+            if not math.isfinite(target) or (target < low - 1e-12 or target > high + 1e-12):
                 raise ValueError("Invalid lambda-return target")
-            target = min(1.0, max(-1.0, target))  # cancellation roundoff only
+            target = min(high, max(low, target))  # cancellation roundoff only
             result[key] = {"key": list(key), "value": value, "target": target,
                            "advantage": target - value, "transition_reward": reward}
             next_value, next_advantage = value, advantage

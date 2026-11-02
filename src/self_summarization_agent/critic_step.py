@@ -84,7 +84,7 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     values, losses = critic.evaluate(eval_samples)
     inference_seconds = time.monotonic() - started
     started = time.monotonic()
-    metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX)
+    metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX, reward_profile=getattr(getattr(critic, "config", None), "reward_profile", "signed_binary"))
     metrics.update({f"{EVALSET_PREFIX}/eval_scope": "same_policy_eval_collection",
                     f"{EVALSET_PREFIX}/prepare_seconds": prepare_seconds,
                     f"{EVALSET_PREFIX}/inference_seconds": inference_seconds,
@@ -102,11 +102,16 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
     checkpoint, output = Path(checkpoint), Path(output)
     started = time.monotonic()
     rollout_rows = _load_rollout_rows(rollouts)
+    if config.benchmark.name == "swe-dev":
+        from .benchmarks.swe_dev.selection import select_training_rows
+        rollout_rows, selection_report = select_training_rows(rollout_rows, config)
+        if not selection_report["selected_groups"]:
+            raise ValueError("No complete eligible SWE task groups; no critic update")
     samples = samples_from_rollout_rows(rollout_rows, expected_checkpoint_id=checkpoint.name,
                                        retain_critic_only_states=True)
-    validate_samples(samples, config.training.max_sequence_length)
+    validate_samples(samples, config.training.max_sequence_length, config.training.value.reward_profile)
     estimator = config.training.advantage_estimator
-    chains = ordered_rollout_chains(rollout_rows, samples) if estimator == "compaction_gae_value" else []
+    chains = ordered_rollout_chains(rollout_rows, samples, config.training.value.reward_profile) if estimator == "compaction_gae_value" else []
     resume = validate_resume_checkpoint(checkpoint)
     source = checkpoint / CRITIC_DIR if resume else config.training.value.model_path
     phases = {"value/sample_load_seconds": time.monotonic() - started}
@@ -135,7 +140,7 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
             old_values, old_losses = critic.evaluate(samples)
             if samples:
                 prefit_metrics = value_diagnostics(samples, old_values, old_losses, prefix="value/prefit",
-                                                   detailed=critic.detailed_diagnostics)
+                                                   detailed=critic.detailed_diagnostics, reward_profile=config.training.value.reward_profile)
             frozen = frozen_target_artifact(samples, old_values, checkpoint.name, config.training.value,
                                             estimator, chains, source_identity)
             atomic_json(frozen_path, frozen)
@@ -180,7 +185,7 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
                 "rows": frozen["rows"], "metrics": metrics}
         from self_summarization_agent.value_diagnostics import frozen_target_diagnostics
         metrics.update(frozen_target_diagnostics(samples, frozen["rows"], chains,
-                                                config.training.value.num_bins))
+                                                config.training.value.num_bins, config.training.value.reward_profile))
     phases["value/advantage_prepare_seconds"] = time.monotonic() - started
     metrics.update(phases)
     started = time.monotonic()

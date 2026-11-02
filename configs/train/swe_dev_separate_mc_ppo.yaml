@@ -1,0 +1,73 @@
+# Fixture integration preset; scripted fixtures are exercised by the validation tests.
+experiment:
+  name: swe-dev-separate_mc_ppo
+  seed: 0
+  output_root: artifacts/swe-dev/experiment
+benchmark:
+  name: swe-dev
+  dataset: deterministic-local-fixture-v1
+  dataset_revision: local-fixture-v1
+  reward_profile: binary_zero_one
+  environment: local-fixture
+  image_profile: text-only
+  train_manifest_path: docs/swe-dev/fixture-train.json
+  eval_manifest_path: docs/swe-dev/fixture-eval.json
+dataset: {}
+collection:
+  train_task_count: 1
+  eval_task_count: 0
+retrieval: {}
+model:
+  model_path: /124090467/Qwen/Qwen3.5-9B
+  dtype: bfloat16
+  max_new_tokens: 4096
+  enable_thinking: true
+  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
+  temperature: 0.7
+  top_p: 0.95
+  do_sample: true
+rollout:
+  backend: vllm_offline
+  gpu_ids:
+  - 0
+  tensor_parallel_size: 1
+  max_model_len: 32768
+  max_concurrent_episodes: 1
+  require_exact_token_ids: true
+  overlap_judge: false
+evaluation:
+  samples_per_task: 1
+  temperature: 0.0
+  do_sample: false
+runtime:
+  context_threshold_tokens: 16000
+  max_context_tokens: 32768
+  max_summary_tokens: 2048
+  tool_budget: 200
+  generated_token_budget: 64000
+  tool_execution_timeout_seconds: 600
+judge:
+  enabled: false
+training:
+  backend: transformers
+  max_sequence_length: 32768
+  group_size: 4
+  train_compaction_tokens: true
+  advantage_estimator: compaction_mc_value
+  update_epochs: 1
+  minibatch_size: 4
+  gradient_accumulation_microbatch_size: 1
+  learning_rate: 1.0e-06
+  target_kl: null
+  value_pretraining:
+    enabled: false
+  value:
+    enabled: true
+    state_anchor: first_generation_prompt_end
+    architecture: separate
+    model_path: /124090467/Qwen/Qwen3.5-0.8B
+    fitting_epochs: 3
+    rollout_minibatch_size: 4
+    prefix_microbatch_size: 1
+    gpu_id: 0
+    baseline_timing: post_fit

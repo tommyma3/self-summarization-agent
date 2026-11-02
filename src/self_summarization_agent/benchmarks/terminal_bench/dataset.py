@@ -46,7 +46,11 @@ def task_manifest(config, *, split):
 
 def benchmark_identity(config):
     scaffold = TerminusKiraScaffold(None, image_enabled=config.image_profile == "local-vision")
-    identity = dict(config=asdict(config), harbor=HARBOR_VERSION, kira=KIRA_REVISION,
+    config_identity = asdict(config)
+    # Preserve historical Terminal-Bench lineage for unchanged configurations.
+    for key in ("reward_profile", "train_manifest_path", "eval_manifest_path"):
+        config_identity.pop(key, None)
+    identity = dict(config=config_identity, harbor=HARBOR_VERSION, kira=KIRA_REVISION,
                     scaffold=SCAFFOLD_VERSION, scaffold_digest=scaffold.fingerprint,
                     reward_mapping="verifier-binary-plus-runtime-penalties-v1",
                     manifest=MANIFEST)

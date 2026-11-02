@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-02",
+  "conclusion": "The reported packed/separate discrepancy is arithmetic-layout roundoff, not an observed interval-isolation or checkpointing gradient logic error in the tested cases.",
+  "production_training_code_changed": false,
+  "test_reference_changed": true,
+  "existing_test_tolerances_changed": false,
+  "gpu_suite": {"passed": 13},
+  "combined_validation": {"passed": 117, "skipped": 4},
+  "controls": [
+    "checkpointing enabled and disabled",
+    "dense and MoE decoders",
+    "parameter initialization seeds 3 and 9",
+    "independent unpatched mixer per interval",
+    "separate whole-decoder forward reference",
+    "direct CPU FP64 recurrence and finite differences",
+    "Triton IEEE-default precision control",
+    "one real clipped AdamW update"
+  ],
+  "scope": "Tiny numerical reproduction and regression coverage; not a convergence guarantee across all dtypes, models, devices, or sequence-parallel layouts."
+}

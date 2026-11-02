@@ -346,11 +346,19 @@ def run_cache_step(
 ) -> Path:
     checkpoint = Path(checkpoint_path).resolve()
     checkpoint_id = checkpoint_id_from_path(checkpoint)
-    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") in {"terminal-bench", "swe-dev"}:
         from self_summarization_agent.collection_contract import validate_artifact_lineage
         validate_artifact_lineage([Path(rollout_path), Path(output_path) if resume else None],
                                   config=config, checkpoint=checkpoint)
     rows = _load_rollout_rows(rollout_path)
+    if config.benchmark.name == "swe-dev":
+        from .benchmarks.swe_dev.selection import select_training_rows
+        rows, selection_report = select_training_rows(rows, config)
+        report_path = Path(output_path).with_suffix(".selection.json")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(selection_report, indent=2) + "\n")
+        if not selection_report["selected_groups"]:
+            raise ValueError("No complete eligible SWE task groups; no training update")
     for index, row in enumerate(rows, start=1):
         _validate_judged_row(row, index=index, expected_checkpoint_id=checkpoint_id)
 
@@ -364,6 +372,14 @@ def run_cache_step(
             train_compaction_tokens=config.training.train_compaction_tokens,
             retain_critic_only_states=config.training.value.enabled,
         )
+        if config.benchmark.name == "swe-dev":
+            def without_caches(row):
+                return {**row, "trajectory_records": [{k: v for k, v in r.items()
+                    if k != TOKEN_CACHE_FIELD} for r in row["trajectory_records"]]}
+            sources = {_rollout_key(row, index=i): row for i, row in enumerate(rows, 1)}
+            for key, cached in completed_rows.items():
+                if key not in sources or without_caches(cached) != without_caches(sources[key]):
+                    raise ValueError("SWE cached evidence/rewards/selection changed during resume")
         completed_keys = set(completed_rows)
         expected_keys = {_rollout_key(row, index=index) for index, row in enumerate(rows, start=1)}
         unexpected_keys = sorted(completed_keys - expected_keys)

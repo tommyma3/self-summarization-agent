@@ -363,6 +363,7 @@ class EpisodeRuntime:
     # within a single round.  Remaining calls are skipped with an error string
     # so the episode can still complete.  None = no limit.
     tool_execution_timeout_seconds: float | None = 600
+    reward_profile: str = "signed_binary"
     scaffold: AgentScaffold | None = None
     token_renderer: Any = field(init=False, default=None)
 
@@ -760,7 +761,8 @@ class EpisodeRuntime:
             final_answer=None,
             summary_turns=list(active.summary_turns),
             turn_rewards=apply_malformed_tool_penalty(
-                trainable_turn_ids_from_records(active.trajectory_records)
+                trainable_turn_ids_from_records(active.trajectory_records),
+                reward_profile=self.reward_profile,
             ),
             retrieved_docids=list(active.retrieved_docids),
             tool_call_counts=dict(active.tool_call_counts),
@@ -788,6 +790,7 @@ class EpisodeRuntime:
             summary_turns=list(summary_turns),
             turn_rewards=apply_terminal_reward(
                 outcome="budget_exhausted",
+                reward_profile=self.reward_profile,
                 trainable_turn_ids=trainable_turn_ids_from_records(trajectory_records or []),
             ),
             retrieved_docids=list(retrieved_docids),
@@ -912,6 +915,7 @@ class EpisodeRuntime:
             summary_turns=list(active.summary_turns),
             turn_rewards=apply_terminal_reward(
                 outcome="correct_answer",
+                reward_profile=self.reward_profile,
                 trainable_turn_ids=trainable_turn_ids_from_records(active.trajectory_records),
             ),
             retrieved_docids=list(active.retrieved_docids),

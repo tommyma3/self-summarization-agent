@@ -29,11 +29,10 @@ dependencies = [
   "vllm>=0.19.1",
   "tensordict>=0.10",
   "flash-linear-attention[cuda]",
-  "causal-conv1d"
+  "causal-conv1d",
+  "harbor==0.1.44"
 ]
 
-[project.optional-dependencies]
-terminal-bench = ["harbor==0.1.44"]
 
 [tool.uv]
 environments = [

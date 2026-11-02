@@ -74,7 +74,7 @@ def _run(config, actor, output, resume, command_runner, fitter, allowed_queries)
                                     training=replace(config.training, group_size=settings.samples_per_task))
         collection_path = output / "collection_config.yaml"
         content = yaml.safe_dump(config_to_dict(collection_config), sort_keys=False)
-        if collection_path.exists() and collection_path.read_text() != content:
+        if collection_path.exists() and config_to_dict(load_train_config(collection_path)) != config_to_dict(collection_config):
             raise ValueError("Pretraining collection configuration changed")
         collection_path.write_text(content)
         rollouts = output / "rollouts.cached.jsonl"

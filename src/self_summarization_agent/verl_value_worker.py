@@ -91,14 +91,17 @@ class CompactionValueTrainingWorker(TrainingWorker):
         zero_initialize_head: bool,
         policy_loss_fn: Any,
         head_learning_rate: float | None = None,
+        reward_profile: str = "signed_binary",
     ) -> None:
         if getattr(self, "value_head", None) is not None:
             raise RuntimeError("Compaction value worker was configured more than once")
+        self.reward_profile = reward_profile
         hidden_size = _hidden_size_from_worker(self)
         head, loaded = load_value_head(
             checkpoint_path,
             hidden_size=hidden_size,
             zero_initialize=zero_initialize_head,
+            reward_profile=reward_profile,
         )
         device = torch.device(self.device_name)
         model_dtype = getattr(
@@ -233,10 +236,10 @@ class CompactionValueTrainingWorker(TrainingWorker):
             # verl's postprocess builds nested tensors by unbinding along the batch
             # dimension. Keep per-state outputs at least 1-D so they are not treated
             # as zero-dimensional scalars.
-            model_output["compaction_values"] = expected_binary_value(state_logits).unsqueeze(-1)
+            model_output["compaction_values"] = expected_binary_value(state_logits, getattr(self, "reward_profile", "signed_binary")).unsqueeze(-1)
             model_output["compaction_value_losses"] = torch.nn.functional.cross_entropy(
                 state_logits.float(),
-                reward_class_indices(data["rewards"].to(state_logits.device)),
+                reward_class_indices(data["rewards"].to(state_logits.device), getattr(self, "reward_profile", "signed_binary")),
                 reduction="none",
             ).unsqueeze(-1)
             model_output["sample_indices"] = data["sample_indices"].to(state_logits.device).unsqueeze(-1)
@@ -252,11 +255,10 @@ class CompactionValueTrainingWorker(TrainingWorker):
         rewards = data["rewards"].to(device=state_logits.device, dtype=torch.float32)
         value_weights = data["value_weights"].to(device=state_logits.device, dtype=torch.float32)
         valid = data["value_valid_mask"].to(device=state_logits.device, dtype=torch.bool)
-        if not bool(torch.all((rewards[valid] == -1) | (rewards[valid] == 1))):
-            raise ValueError("Compaction Monte Carlo value targets must be exactly -1 or +1")
+        reward_class_indices(rewards[valid], getattr(self, "reward_profile", "signed_binary"))
         per_state_loss = torch.nn.functional.cross_entropy(
             state_logits.float(),
-            reward_class_indices(rewards),
+            reward_class_indices(rewards, getattr(self, "reward_profile", "signed_binary")),
             reduction="none",
         )
         local_value_loss = (per_state_loss * value_weights * valid.to(value_weights.dtype)).sum()
@@ -267,7 +269,7 @@ class CompactionValueTrainingWorker(TrainingWorker):
         value_loss = local_value_loss * dp_size
         total_loss = policy_loss + self.value_loss_coefficient * value_loss.to(policy_loss.device)
 
-        predicted = torch.where(expected_binary_value(state_logits) >= 0, 1.0, -1.0)
+        predicted = torch.where(expected_binary_value(state_logits, getattr(self, "reward_profile", "signed_binary")) >= (0.5 if getattr(self, "reward_profile", "signed_binary") == "binary_zero_one" else 0), 1.0, (0.0 if getattr(self, "reward_profile", "signed_binary") == "binary_zero_one" else -1.0))
         correct_weight = value_weights * valid.to(value_weights.dtype)
         local_accuracy = ((predicted == rewards).to(value_weights.dtype) * correct_weight).sum()
         metrics["value/loss"] = Metric(value=value_loss, aggregation=AggregationType.SUM)
@@ -328,6 +330,7 @@ class CompactionValueActorRolloutRefWorker(ActorRolloutRefWorker):
             zero_initialize_head=bool(value_config.zero_initialize_head),
             policy_loss_fn=self.loss_fn,
             head_learning_rate=value_config.get("head_learning_rate"),
+            reward_profile=value_config.get("reward_profile", "signed_binary"),
         )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

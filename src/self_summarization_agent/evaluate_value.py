@@ -59,7 +59,7 @@ def evaluate_value_checkpoint(
             "generating_checkpoint_id": generating_checkpoint_id, "rollout_path": str(Path(rollout_path).resolve()),
             "query_ids": sorted(queries), "value/eval_scope": "fixed_held_out_records",
             "value/target_policy_may_differ": True,
-            **value_diagnostics(samples, values, losses, prefix="value/held_out")}
+            **value_diagnostics(samples, values, losses, prefix="value/held_out", reward_profile=config.training.value.reward_profile)}
     if not ((checkpoint / VALUE_HEAD_FILENAME).is_file() or
             (checkpoint / "compaction_value_head.safetensors").is_file()):
         raise ValueError("Critic evaluation requires saved value-head weights")
@@ -88,7 +88,7 @@ def evaluate_value_checkpoint(
             "query_ids": sorted(queries),
             "value/eval_scope": "fixed_held_out_records",
             "value/target_policy_may_differ": True,
-            **value_diagnostics(samples, values, losses, prefix="value/held_out"),
+            **value_diagnostics(samples, values, losses, prefix="value/held_out", reward_profile=config.training.value.reward_profile),
         }
     finally:
         if getattr(trainer, "_owns_ray", False) and config.training.verl.shutdown_ray:

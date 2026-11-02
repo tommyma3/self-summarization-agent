@@ -173,6 +173,9 @@ def run_train_step(
     checkpoint = Path(checkpoint_path).resolve()
     migrate_compaction_value_head_sidecar(checkpoint)
     checkpoint_id = checkpoint_id_from_path(checkpoint)
+    if config.benchmark.name == "swe-dev":
+        from .benchmarks.swe_dev.checkpoint import validate_checkpoint
+        validate_checkpoint(checkpoint, config)
     if (
         config.training.value.shared
         and checkpoint_id.startswith("iteration-")
@@ -188,6 +191,13 @@ def run_train_step(
     if config.training.value.separate:
         validate_resume_checkpoint(checkpoint)
     rows = _load_rollout_rows(rollout_path)
+    if config.benchmark.name == "swe-dev":
+        from .collection_contract import validate_artifact_lineage
+        from .benchmarks.swe_dev.selection import select_training_rows
+        validate_artifact_lineage([Path(rollout_path)], config=config, checkpoint=checkpoint)
+        rows, selection_report = select_training_rows(rows, config)
+        if not selection_report["selected_groups"]:
+            raise ValueError("No complete eligible SWE task groups; no training update")
     samples = samples_from_rollout_rows(
         rows,
         expected_checkpoint_id=checkpoint_id,
@@ -195,6 +205,8 @@ def run_train_step(
         retain_critic_only_states=config.training.value.enabled,
     )
     grouped_samples = group_samples_by_query(samples)
+    if config.benchmark.name == "swe-dev" and not samples:
+        raise ValueError("Empty selected SWE batch; refusing to publish a training checkpoint")
     diagnostics = _sample_diagnostics(samples)
     print(
         f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, "
@@ -219,7 +231,7 @@ def run_train_step(
     fixed_advantages = None
     critic_metrics = {}
     if config.training.value.separate:
-        validate_samples(samples, config.training.max_sequence_length)
+        validate_samples(samples, config.training.max_sequence_length, config.training.value.reward_profile)
         if trainer is not None:
             raise ValueError("Separate critic orchestration must run before constructing the actor")
         output = Path(output_checkpoint_path).resolve()
@@ -249,7 +261,7 @@ def run_train_step(
         resumed = validate_resume_checkpoint(checkpoint)
         source_identity = (source_critic_identity(checkpoint / CRITIC_DIR if resumed else
                            config.training.value.model_path, resume=resumed) if prefit else None)
-        chains = (ordered_rollout_chains(rows, samples)
+        chains = (ordered_rollout_chains(rows, samples, config.training.value.reward_profile)
                   if config.training.advantage_estimator == "compaction_gae_value" else [])
         fixed_advantages, critic_metrics = load_advantages(output / ADVANTAGES, samples,
             checkpoint_id, config.training.value, estimator=config.training.advantage_estimator,
@@ -324,6 +336,15 @@ def run_train_step(
         metrics.extra_metrics["actor/update_seconds"] = time.monotonic() - actor_started
     else:
         metrics = trainer.step(grouped_samples)
+    if config.benchmark.name == "swe-dev":
+        reward_groups = {}
+        for sample in samples:
+            reward_groups.setdefault(sample.query_id, {})[sample.rollout_id] = sample.reward
+        zero_groups = sum(len(set(group.values())) == 1 for group in reward_groups.values())
+        metrics.extra_metrics.update({"swe/selection": selection_report,
+            "swe/reward_profile": config.benchmark.reward_profile,
+            "swe/grpo_zero_variance_groups": zero_groups,
+            "swe/grpo_effective_groups": len(reward_groups) - zero_groups})
     _write_training_progress(progress, "update_complete", sample_count=metrics.sample_count)
     print(
         f"[train_step] Done: sample_count={metrics.sample_count}, mean_reward={metrics.mean_reward:.4f}, "
@@ -350,9 +371,12 @@ def run_train_step(
                 "critic_identity": critic_manifest["identity"],
                 **({"method": critic_manifest["method"], "advantages_digest": digest(
                     json.loads((output_checkpoint / ADVANTAGES).read_text()))} if pair_version == 2 else {}),
-                "actor_optimizer": "reset_each_iteration", "critic_optimizer": "persistent"})
+                "actor_optimizer": "persistent" if config.benchmark.name == "swe-dev" else "reset_each_iteration", "critic_optimizer": "persistent"})
             if not separate_checkpoint_complete(output_checkpoint, expected_id=logical_id):
                 raise ValueError("Refusing to publish incomplete actor/critic pair")
+        if config.benchmark.name == "swe-dev":
+            from .benchmarks.swe_dev.checkpoint import save_contract
+            save_contract(output_checkpoint, config)
         mark_checkpoint_complete(output_checkpoint)
         _write_training_progress(progress, "checkpoint_complete", output_checkpoint=str(output_checkpoint))
         print(f"[train_step] Checkpoint complete: {output_checkpoint}", flush=True)

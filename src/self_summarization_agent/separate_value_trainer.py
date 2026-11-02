@@ -85,7 +85,7 @@ class SeparateValueTrainer:
         with torch.random.fork_rng(devices=[]):
             torch.random.default_generator.manual_seed(config.seed)
             self.head, found = load_value_head(source, hidden_size=model_hidden_size(self.model),
-                                               zero_initialize=config.zero_initialize_head, num_bins=config.num_bins)
+                                               zero_initialize=config.zero_initialize_head, num_bins=config.num_bins, reward_profile=config.reward_profile)
         if resume and not found:
             raise ValueError("Resumed critic is missing its value head")
         self.head.to(device=self.device, dtype=torch_dtype)
@@ -138,7 +138,7 @@ class SeparateValueTrainer:
         targets = (rewards if scalar_targets is None else
                    torch.tensor([scalar_targets[sample_key(s)] for s in samples], dtype=torch.float32))
         return _PreparedPrefixes([torch.tensor(p, dtype=torch.long) for p in prefixes],
-            [len(p) for p in prefixes], two_hot_targets(targets, self.config.num_bins), rewards)
+            [len(p) for p in prefixes], two_hot_targets(targets, self.config.num_bins, self.config.reward_profile), rewards)
 
     def _batches(self, prepared, indices, batch_size):
         indices = list(indices)
@@ -181,7 +181,7 @@ class SeparateValueTrainer:
         return self._logits_prepared(prepared, list(range(len(samples))))
 
     def evaluate(self, samples):
-        validate_samples(samples)
+        validate_samples(samples, reward_profile=self.config.reward_profile)
         return self._evaluate_prepared(self._prepare(samples))[:2]
 
     def _evaluate_prepared(self, prepared):
@@ -205,8 +205,8 @@ class SeparateValueTrainer:
                         self.config.eval_prefix_microbatch_size or self.config.prefix_microbatch_size):
                     logits = self._logits_prepared(prepared, indices)
                     rewards = self._to_device(prepared.rewards[indices])
-                    values = expected_categorical_value(logits)
-                    losses = outcome_log_losses(logits, rewards)
+                    values = expected_categorical_value(logits, self.config.reward_profile)
+                    losses = outcome_log_losses(logits, rewards, self.config.reward_profile)
                     predictions[self._to_device(torch.tensor(indices))] = torch.stack((values, losses), dim=1)
                     padded_tokens += len(indices) * max(prepared.lengths[i] for i in indices)
                     completed += len(indices)
@@ -227,7 +227,7 @@ class SeparateValueTrainer:
         started = time.monotonic()
         if self.method["estimator"] == "compaction_gae_value" and scalar_targets is None:
             raise ValueError("GAE fitting requires frozen pre-fit scalar targets")
-        validate_samples(samples, max_sequence_length)
+        validate_samples(samples, max_sequence_length, self.config.reward_profile)
         if not samples:
             return [], {"value/optimizer_step_count": 0}
         if self.device.type == "cuda":
@@ -238,7 +238,7 @@ class SeparateValueTrainer:
         if self.config.eval_before_fit:
             before, before_losses, stats = self._evaluate_prepared(prepared)
             metrics.update(value_diagnostics(samples, before, before_losses, prefix="value/eval_before",
-                                             detailed=self.detailed_diagnostics))
+                                             detailed=self.detailed_diagnostics, reward_profile=self.config.reward_profile))
             metrics["value/eval_before_seconds"] = stats["seconds"]
         else:
             metrics["value/eval_before_skipped"] = "disabled"
@@ -293,7 +293,7 @@ class SeparateValueTrainer:
                     and (epoch + 1) % self.config.eval_every_n_epochs == 0):
                 values, losses, stats = self._evaluate_prepared(prepared)
                 metrics.update(value_diagnostics(samples, values, losses, prefix=prefix,
-                                                 detailed=self.detailed_diagnostics))
+                                                 detailed=self.detailed_diagnostics, reward_profile=self.config.reward_profile))
                 metrics[f"{prefix}/eval_seconds"] = stats["seconds"]
             print(f"[critic] epoch={epoch + 1}/{self.config.fitting_epochs} "
                   f"target_CE={metrics[f'{prefix}/target_ce']:.6f} train_seconds={elapsed:.2f}", flush=True)
@@ -304,7 +304,7 @@ class SeparateValueTrainer:
         metrics.update({f"value/final_predictions/{key}": value for key, value in stats.items()})
         diagnostic_started = time.monotonic()
         metrics.update(value_diagnostics(samples, values, losses, prefix="value/eval_after",
-                                         detailed=self.detailed_diagnostics))
+                                         detailed=self.detailed_diagnostics, reward_profile=self.config.reward_profile))
         metrics["value/final_diagnostics_seconds"] = time.monotonic() - diagnostic_started
         metrics["value/train_seconds"] = train_seconds
         metrics.update({"value/optimizer_step_count": self.update_count - initial_steps,
@@ -325,7 +325,7 @@ class SeparateValueTrainer:
         torch.save({"version": 1, "optimizer": self.optimizer.state_dict(),
                     "update_count": self.update_count}, path / CRITIC_STATE)
         identity = uuid.uuid4().hex
-        version = 1 if self.config.num_bins == 2 and self.config.baseline_timing == "post_fit" else 2
+        version = 1 if self.config.num_bins == 2 and self.config.baseline_timing == "post_fit" and self.config.reward_profile == "signed_binary" else 2
         atomic_json(path / CRITIC_MANIFEST, {"version": version, "identity": identity,
             "checkpoint_id": checkpoint_id,
             **({"class_order": [-1, 1]} if version == 1 else {}),

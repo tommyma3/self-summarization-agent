@@ -76,7 +76,9 @@ def test_padded_rows_keep_native_semantics():
 
 
 @pytest.mark.parametrize("moe", [False, True])
-def test_decoder_patch_preserves_checkpointed_gradients(monkeypatch, moe):
+@pytest.mark.parametrize("checkpointing", [False, True])
+@pytest.mark.parametrize("seed", [3, 9])
+def test_decoder_patch_preserves_checkpointed_gradients(monkeypatch, moe, checkpointing, seed):
     from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
     from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer, Qwen3_5MoeGatedDeltaNet
     from self_summarization_agent.qwen_interval_attention import _patch_pair
@@ -90,7 +92,7 @@ def test_decoder_patch_preserves_checkpointed_gradients(monkeypatch, moe):
     if moe:
         config = Qwen3_5MoeTextConfig(**{**config.to_dict(), "num_experts": 4,
             "num_experts_per_tok": 2, "moe_intermediate_size": 16, "shared_expert_intermediate_size": 16})
-    torch.manual_seed(3)
+    torch.manual_seed(seed)
     layer = decoder_class(config, 0).cuda()
     if moe:
         # Standalone expert modules allocate empty weights; model.post_init()
@@ -102,15 +104,27 @@ def test_decoder_patch_preserves_checkpointed_gradients(monkeypatch, moe):
     a = x.clone().requires_grad_()
     b = x.clone().requires_grad_()
     boundaries = [0, 19, 31, 61, 64]
-    expected = torch.cat([reference(b[:, start:end], position_embeddings=None,
-                         position_ids=pos[:, start:end])
-                         for start, end in zip(boundaries, boundaries[1:])], dim=1)
+    # Keep token-local operations at the packed shape on both paths. Running
+    # the entire decoder separately changes MLP GEMM shapes: FP32 roundoff in
+    # those otherwise identical operations is amplified by the mixer backward.
+    # The reference still resets the ORIGINAL, unpatched mixer independently
+    # at each boundary, so cross-interval recurrent leakage cannot pass here.
+    normalized = reference.input_layernorm(b)
+    mixed = torch.cat([reference.linear_attn(normalized[:, start:end])
+                       for start, end in zip(boundaries, boundaries[1:])], dim=1)
+    residual = b + mixed
+    expected = residual + reference.mlp(reference.post_attention_layernorm(residual))
+    with torch.no_grad():
+        independent = torch.cat([reference(b[:, start:end], position_embeddings=None,
+                                position_ids=pos[:, start:end])
+                                for start, end in zip(boundaries, boundaries[1:])], dim=1)
+    torch.testing.assert_close(expected, independent)
     (expected * weights).sum().backward()
     _patch_pair(decoder_class, mixer_class)
     installed = decoder_class.forward
     _patch_pair(decoder_class, mixer_class)
     assert installed is decoder_class.forward
-    layer.gradient_checkpointing = True
+    layer.gradient_checkpointing = checkpointing
     layer._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
     actual = layer(a, position_embeddings=None, position_ids=pos)
     # Another forward must not replace the first graph's checkpoint metadata.
@@ -120,4 +134,55 @@ def test_decoder_patch_preserves_checkpointed_gradients(monkeypatch, moe):
     torch.testing.assert_close(a.grad, b.grad)
     for left, right in zip(layer.parameters(), reference.parameters()):
         torch.testing.assert_close(left.grad, right.grad)
+
+
+def test_feed_forward_layouts_agree_with_fp64_and_finite_difference():
+    """The downstream GEMM roundoff is bounded without a new tolerance budget."""
+    from pathlib import Path
+    import runpy
+    diagnostic = Path(__file__).resolve().parents[1] / "scripts/diagnose_qwen_interval_gradients.py"
+    reference_feed_forward = runpy.run_path(str(diagnostic))["reference_feed_forward"]
+
+    torch.manual_seed(3)
+    base = Qwen3_5DecoderLayer(tiny_config(), 0).cuda()
+    x, _, weights = packed_inputs()
+    boundaries = [0, 19, 31, 61, 64]
+    with torch.no_grad():
+        normalized = base.input_layernorm(x)
+        hidden = x + torch.cat([base.linear_attn(normalized[:, start:end])
+                               for start, end in zip(boundaries, boundaries[1:])], 1)
+    oracle = deepcopy(base).cpu().double()
+    precise_input = hidden.cpu().double().requires_grad_()
+    precise = reference_feed_forward(oracle, precise_input)
+    (precise * weights.cpu().double()).sum().backward()
+
+    # Keep the original FP32 assert_close defaults for both layouts, including
+    # every MLP/norm parameter gradient and the gradient sent to attention.
+    for segmented in (False, True):
+        model = deepcopy(base)
+        inp = hidden.clone().requires_grad_()
+        def suffix(tensor):
+            return tensor + model.mlp(model.post_attention_layernorm(tensor))
+        actual = (torch.cat([suffix(inp[:, start:end])
+                             for start, end in zip(boundaries, boundaries[1:])], 1)
+                  if segmented else suffix(inp))
+        (actual * weights).sum().backward()
+        torch.testing.assert_close(actual, precise.detach().to(actual))
+        torch.testing.assert_close(inp.grad, precise_input.grad.to(inp.grad))
+        reference_parameters = dict(oracle.named_parameters())
+        for name, parameter in model.named_parameters():
+            if parameter.grad is not None:
+                torch.testing.assert_close(parameter.grad, reference_parameters[name].grad.to(parameter.grad))
+
+    # Validate the analytic FP64 oracle independently by perturbing its input.
+    index = (0, 0, 0)
+    with torch.no_grad():
+        original = precise_input[index].item()
+        step = 1e-5
+        precise_input[index] = original + step
+        plus = (reference_feed_forward(oracle, precise_input) * weights.cpu().double()).sum()
+        precise_input[index] = original - step
+        minus = (reference_feed_forward(oracle, precise_input) * weights.cpu().double()).sum()
+        precise_input[index] = original
+    torch.testing.assert_close((plus - minus) / (2 * step), precise_input.grad[index])
 

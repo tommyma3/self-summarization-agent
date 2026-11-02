@@ -1,0 +1,255 @@
+{
+  "date": "2026-11-02",
+  "scope": "deterministic local fixtures; not full SWE-Dev validation",
+  "upstream_tasks_validated": 0,
+  "local_executable_tasks": 1,
+  "fresh_on_policy_swe_validation": false,
+  "docker_validation": false,
+  "profiles": {
+    "grpo": {
+      "policy": "deterministic fixture completions",
+      "trainer": "tiny GPT2 CPU",
+      "method": {
+        "baseline_timing": "post_fit",
+        "encoding": "two_hot",
+        "estimator": "group_relative",
+        "gamma": 1.0,
+        "lambda": 1.0,
+        "num_bins": 2,
+        "reward_profile": "binary_zero_one",
+        "support": [
+          0.0,
+          1.0
+        ]
+      },
+      "iterations": [
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.1682114310852893,
+          "actor_optimizer_cumulative_min_step": 3.0
+        },
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.16949584499582068,
+          "actor_optimizer_cumulative_min_step": 6.0
+        }
+      ]
+    },
+    "value_mc": {
+      "policy": "deterministic fixture completions",
+      "trainer": "tiny GPT2 CPU",
+      "method": {
+        "baseline_timing": "post_fit",
+        "encoding": "two_hot",
+        "estimator": "compaction_mc_value",
+        "gamma": 1.0,
+        "lambda": 1.0,
+        "num_bins": 2,
+        "reward_profile": "binary_zero_one",
+        "support": [
+          0.0,
+          1.0
+        ]
+      },
+      "iterations": [
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.05253891296104177,
+          "actor_optimizer_cumulative_min_step": 3.0
+        },
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.051316959275440735,
+          "actor_optimizer_cumulative_min_step": 6.0
+        }
+      ]
+    },
+    "separate_mc_ppo": {
+      "policy": "deterministic fixture completions",
+      "trainer": "tiny GPT2 CPU",
+      "method": {
+        "baseline_timing": "post_fit",
+        "encoding": "two_hot",
+        "estimator": "compaction_mc_value",
+        "gamma": 1.0,
+        "lambda": 1.0,
+        "num_bins": 2,
+        "reward_profile": "binary_zero_one",
+        "support": [
+          0.0,
+          1.0
+        ]
+      },
+      "iterations": [
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.08547040955586867,
+          "actor_optimizer_cumulative_min_step": 3.0,
+          "critic_cumulative_updates": 1
+        },
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.08633490235774548,
+          "actor_optimizer_cumulative_min_step": 6.0,
+          "critic_cumulative_updates": 2
+        }
+      ]
+    },
+    "separate_gae_ppo": {
+      "policy": "deterministic fixture completions",
+      "trainer": "tiny GPT2 CPU",
+      "method": {
+        "baseline_timing": "pre_fit",
+        "encoding": "two_hot",
+        "estimator": "compaction_gae_value",
+        "gamma": 1.0,
+        "lambda": 0.95,
+        "num_bins": 51,
+        "reward_profile": "binary_zero_one",
+        "support": [
+          0.0,
+          0.02,
+          0.04,
+          0.06,
+          0.08,
+          0.1,
+          0.12,
+          0.14,
+          0.16,
+          0.18,
+          0.2,
+          0.22,
+          0.24,
+          0.26,
+          0.28,
+          0.3,
+          0.32,
+          0.34,
+          0.36,
+          0.38,
+          0.4,
+          0.42,
+          0.44,
+          0.46,
+          0.48,
+          0.5,
+          0.52,
+          0.54,
+          0.56,
+          0.58,
+          0.6,
+          0.62,
+          0.64,
+          0.66,
+          0.68,
+          0.7,
+          0.72,
+          0.74,
+          0.76,
+          0.78,
+          0.8,
+          0.82,
+          0.84,
+          0.86,
+          0.88,
+          0.9,
+          0.92,
+          0.94,
+          0.96,
+          0.98,
+          1.0
+        ]
+      },
+      "iterations": [
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.07542636468038931,
+          "actor_optimizer_cumulative_min_step": 3.0,
+          "critic_cumulative_updates": 1
+        },
+        {
+          "attempts": 4,
+          "raw_verifier_passes": 2,
+          "intervals": 11,
+          "summaries": 7,
+          "exact_sampled_tokens": 154,
+          "optimizer_steps": 3,
+          "sample_count": 11,
+          "loss": -0.07626493062291827,
+          "actor_optimizer_cumulative_min_step": 6.0,
+          "critic_cumulative_updates": 2
+        }
+      ]
+    }
+  },
+  "tests": {
+    "new_swe_cases": 32,
+    "full_regression": {
+      "passed": 692,
+      "skipped": 4,
+      "deselected": 2
+    },
+    "focused_swe_and_signed_pretraining": {
+      "passed": 79
+    },
+    "isolated_distributed_gpu": "passed",
+    "known_baseline_failure": {
+      "test": "tests/test_qwen_interval_attention.py::test_decoder_patch_preserves_checkpointed_gradients[False]",
+      "original_HEAD_reproduced": true,
+      "max_absolute_difference": 2.5272369384765625e-05,
+      "allowed_absolute_difference": 1e-05
+    }
+  },
+  "preservation": {
+    "AGENTS_sha256": "d2b52b3f27fa70a614cb1e1454a09ef4b6903b1f280adbb1bfc35d1cf7e7ff79",
+    "existing_dependency_diff_unchanged": true
+  },
+  "remaining_gates": [
+    "Recovered independent SWE task specifications and trusted tests/images/oracles",
+    "Real Docker isolation/reset/quota/cancellation/oracle trials",
+    "Fresh on-policy Qwen/vLLM collection and GPU updates/resume for every method",
+    "Real held-out leakage audit, resource measurements, and scale"
+  ]
+}

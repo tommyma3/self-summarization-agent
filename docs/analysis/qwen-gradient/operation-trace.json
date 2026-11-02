@@ -1,0 +1,674 @@
+[
+  {
+    "checkpointing": false,
+    "whole_decoder_segmented": false,
+    "output": {
+      "max_abs": 2.384185791015625e-07,
+      "rms": 1.813955918805732e-08,
+      "bad": 0,
+      "n": 2048
+    },
+    "input_gradient": {
+      "max_abs": 4.291534423828125e-06,
+      "rms": 3.468545060059114e-07,
+      "bad": 0,
+      "n": 2048
+    },
+    "parameter_gradients": {
+      "linear_attn.dt_bias": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2
+      },
+      "linear_attn.A_log": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2
+      },
+      "linear_attn.conv1d.weight": {
+        "max_abs": 2.5272369384765625e-05,
+        "rms": 2.486202674845117e-06,
+        "bad": 2,
+        "n": 192
+      },
+      "linear_attn.norm.weight": {
+        "max_abs": 2.384185791015625e-07,
+        "rms": 9.42432194506182e-08,
+        "bad": 0,
+        "n": 8
+      },
+      "linear_attn.out_proj.weight": {
+        "max_abs": 4.76837158203125e-07,
+        "rms": 8.992930844442526e-08,
+        "bad": 0,
+        "n": 512
+      },
+      "linear_attn.in_proj_qkv.weight": {
+        "max_abs": 4.601478576660156e-05,
+        "rms": 2.971801222884096e-06,
+        "bad": 20,
+        "n": 1536
+      },
+      "linear_attn.in_proj_z.weight": {
+        "max_abs": 9.5367431640625e-07,
+        "rms": 1.7469312751927646e-07,
+        "bad": 0,
+        "n": 512
+      },
+      "linear_attn.in_proj_b.weight": {
+        "max_abs": 1.4722347259521484e-05,
+        "rms": 4.757045644510072e-06,
+        "bad": 4,
+        "n": 64
+      },
+      "linear_attn.in_proj_a.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 64
+      },
+      "mlp.gate_proj.weight": {
+        "max_abs": 9.5367431640625e-07,
+        "rms": 1.2753704936585564e-07,
+        "bad": 0,
+        "n": 2048
+      },
+      "mlp.up_proj.weight": {
+        "max_abs": 7.152557373046875e-07,
+        "rms": 1.2457552145406225e-07,
+        "bad": 0,
+        "n": 2048
+      },
+      "mlp.down_proj.weight": {
+        "max_abs": 9.5367431640625e-07,
+        "rms": 1.8084112696215016e-07,
+        "bad": 0,
+        "n": 2048
+      },
+      "input_layernorm.weight": {
+        "max_abs": 7.152557373046875e-06,
+        "rms": 2.442345021336223e-06,
+        "bad": 0,
+        "n": 32
+      },
+      "post_attention_layernorm.weight": {
+        "max_abs": 4.172325134277344e-07,
+        "rms": 1.4522809976824647e-07,
+        "bad": 0,
+        "n": 32
+      }
+    },
+    "modules": {
+      "linear_attn.norm": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 1024
+        },
+        "output_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 3.0974845799391915e-08,
+          "bad": 0,
+          "n": 1024
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 1024
+        },
+        "input_grad": {
+          "max_abs": 9.1552734375e-05,
+          "rms": 4.615056695911335e-06,
+          "bad": 0,
+          "n": 1024
+        }
+      },
+      "input_layernorm": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "output_grad": {
+          "max_abs": 3.5762786865234375e-06,
+          "rms": 3.1046758408592723e-07,
+          "bad": 0,
+          "n": 2048
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 4.291534423828125e-06,
+          "rms": 3.468545060059114e-07,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "mlp.down_proj": {
+        "output": {
+          "max_abs": 8.940696716308594e-08,
+          "rms": 1.1423344048466788e-08,
+          "bad": 0,
+          "n": 2048
+        },
+        "output_grad": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 1.3886945815499985e-08,
+          "bad": 0,
+          "n": 4096
+        },
+        "input_grad": {
+          "max_abs": 1.1920928955078125e-07,
+          "rms": 7.091144116344594e-09,
+          "bad": 0,
+          "n": 4096
+        }
+      },
+      "post_attention_layernorm": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "output_grad": {
+          "max_abs": 1.4901161193847656e-07,
+          "rms": 1.5146582654779195e-08,
+          "bad": 0,
+          "n": 2048
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 2.109460695010057e-08,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "linear_attn.in_proj_qkv": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 3072
+        },
+        "output_grad": {
+          "max_abs": 2.0897015929222107e-05,
+          "rms": 3.983194574175286e-07,
+          "bad": 1,
+          "n": 3072
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 3.5762786865234375e-06,
+          "rms": 3.1046758408592723e-07,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "mlp.act_fn": {
+        "output": {
+          "max_abs": 3.5762786865234375e-07,
+          "rms": 2.138540011742407e-08,
+          "bad": 0,
+          "n": 4096
+        },
+        "output_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 1.1875770589142576e-08,
+          "bad": 0,
+          "n": 4096
+        },
+        "input": {
+          "max_abs": 3.5762786865234375e-07,
+          "rms": 3.0757625779642694e-08,
+          "bad": 0,
+          "n": 4096
+        },
+        "input_grad": {
+          "max_abs": 1.7881393432617188e-07,
+          "rms": 7.97775001615264e-09,
+          "bad": 0,
+          "n": 4096
+        }
+      },
+      "mlp": {
+        "output": {
+          "max_abs": 8.940696716308594e-08,
+          "rms": 1.1423344048466788e-08,
+          "bad": 0,
+          "n": 2048
+        },
+        "output_grad": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 1.4901161193847656e-07,
+          "rms": 1.5146582654779195e-08,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "linear_attn.in_proj_b": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 128
+        },
+        "output_grad": {
+          "max_abs": 6.720423698425293e-06,
+          "rms": 5.940436267337645e-07,
+          "bad": 0,
+          "n": 128
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 3.5762786865234375e-06,
+          "rms": 3.1046758408592723e-07,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "linear_attn.in_proj_z": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 1024
+        },
+        "output_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 1.4173921591975613e-08,
+          "bad": 0,
+          "n": 1024
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 3.5762786865234375e-06,
+          "rms": 3.1046758408592723e-07,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "linear_attn.in_proj_a": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 128
+        },
+        "output_grad": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 128
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 3.5762786865234375e-06,
+          "rms": 3.1046758408592723e-07,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "mlp.gate_proj": {
+        "output": {
+          "max_abs": 3.5762786865234375e-07,
+          "rms": 3.0757625779642694e-08,
+          "bad": 0,
+          "n": 4096
+        },
+        "output_grad": {
+          "max_abs": 1.7881393432617188e-07,
+          "rms": 7.97775001615264e-09,
+          "bad": 0,
+          "n": 4096
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 1.4901161193847656e-07,
+          "rms": 1.5146582654779195e-08,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "linear_attn": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "output_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 2.109460695010057e-08,
+          "bad": 0,
+          "n": 2048
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 3.5762786865234375e-06,
+          "rms": 3.1046758408592723e-07,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "mlp.up_proj": {
+        "output": {
+          "max_abs": 3.5762786865234375e-07,
+          "rms": 2.8498881476934912e-08,
+          "bad": 0,
+          "n": 4096
+        },
+        "output_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 8.189353195575677e-09,
+          "bad": 0,
+          "n": 4096
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "input_grad": {
+          "max_abs": 1.4901161193847656e-07,
+          "rms": 1.5146582654779195e-08,
+          "bad": 0,
+          "n": 2048
+        }
+      },
+      "linear_attn.out_proj": {
+        "output": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 2048
+        },
+        "output_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 2.109460695010057e-08,
+          "bad": 0,
+          "n": 2048
+        },
+        "input": {
+          "max_abs": 0.0,
+          "rms": 0.0,
+          "bad": 0,
+          "n": 1024
+        },
+        "input_grad": {
+          "max_abs": 2.384185791015625e-07,
+          "rms": 3.0974845799391915e-08,
+          "bad": 0,
+          "n": 1024
+        }
+      }
+    }
+  },
+  {
+    "checkpointing": true,
+    "whole_decoder_segmented": false,
+    "output": {
+      "max_abs": 2.384185791015625e-07,
+      "rms": 1.813955918805732e-08,
+      "bad": 0,
+      "n": 2048
+    },
+    "input_gradient": {
+      "max_abs": 4.291534423828125e-06,
+      "rms": 3.468545060059114e-07,
+      "bad": 0,
+      "n": 2048
+    },
+    "parameter_gradients": {
+      "linear_attn.dt_bias": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2
+      },
+      "linear_attn.A_log": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2
+      },
+      "linear_attn.conv1d.weight": {
+        "max_abs": 2.5272369384765625e-05,
+        "rms": 2.486202674845117e-06,
+        "bad": 2,
+        "n": 192
+      },
+      "linear_attn.norm.weight": {
+        "max_abs": 2.384185791015625e-07,
+        "rms": 9.42432194506182e-08,
+        "bad": 0,
+        "n": 8
+      },
+      "linear_attn.out_proj.weight": {
+        "max_abs": 4.76837158203125e-07,
+        "rms": 8.992930844442526e-08,
+        "bad": 0,
+        "n": 512
+      },
+      "linear_attn.in_proj_qkv.weight": {
+        "max_abs": 4.601478576660156e-05,
+        "rms": 2.971801222884096e-06,
+        "bad": 20,
+        "n": 1536
+      },
+      "linear_attn.in_proj_z.weight": {
+        "max_abs": 9.5367431640625e-07,
+        "rms": 1.7469312751927646e-07,
+        "bad": 0,
+        "n": 512
+      },
+      "linear_attn.in_proj_b.weight": {
+        "max_abs": 1.4722347259521484e-05,
+        "rms": 4.757045644510072e-06,
+        "bad": 4,
+        "n": 64
+      },
+      "linear_attn.in_proj_a.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 64
+      },
+      "mlp.gate_proj.weight": {
+        "max_abs": 9.5367431640625e-07,
+        "rms": 1.2753704936585564e-07,
+        "bad": 0,
+        "n": 2048
+      },
+      "mlp.up_proj.weight": {
+        "max_abs": 7.152557373046875e-07,
+        "rms": 1.2457552145406225e-07,
+        "bad": 0,
+        "n": 2048
+      },
+      "mlp.down_proj.weight": {
+        "max_abs": 9.5367431640625e-07,
+        "rms": 1.8084112696215016e-07,
+        "bad": 0,
+        "n": 2048
+      },
+      "input_layernorm.weight": {
+        "max_abs": 7.152557373046875e-06,
+        "rms": 2.442345021336223e-06,
+        "bad": 0,
+        "n": 32
+      },
+      "post_attention_layernorm.weight": {
+        "max_abs": 4.172325134277344e-07,
+        "rms": 1.4522809976824647e-07,
+        "bad": 0,
+        "n": 32
+      }
+    }
+  },
+  {
+    "checkpointing": true,
+    "whole_decoder_segmented": true,
+    "output": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "bad": 0,
+      "n": 2048
+    },
+    "input_gradient": {
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "bad": 0,
+      "n": 2048
+    },
+    "parameter_gradients": {
+      "linear_attn.dt_bias": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2
+      },
+      "linear_attn.A_log": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2
+      },
+      "linear_attn.conv1d.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 192
+      },
+      "linear_attn.norm.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 8
+      },
+      "linear_attn.out_proj.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 512
+      },
+      "linear_attn.in_proj_qkv.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 1536
+      },
+      "linear_attn.in_proj_z.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 512
+      },
+      "linear_attn.in_proj_b.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 64
+      },
+      "linear_attn.in_proj_a.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 64
+      },
+      "mlp.gate_proj.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2048
+      },
+      "mlp.up_proj.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2048
+      },
+      "mlp.down_proj.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 2048
+      },
+      "input_layernorm.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 32
+      },
+      "post_attention_layernorm.weight": {
+        "max_abs": 0.0,
+        "rms": 0.0,
+        "bad": 0,
+        "n": 32
+      }
+    }
+  }
+]

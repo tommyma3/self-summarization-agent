@@ -195,7 +195,7 @@ def judge_rollouts(
 ) -> Path:
     expected_checkpoint_id = checkpoint_id_from_path(checkpoint_path) if checkpoint_path is not None else None
     rows = _load_rollout_rows(rollout_path)
-    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") in {"terminal-bench", "swe-dev"}:
         from self_summarization_agent.benchmarks.terminal_bench.verification import apply_verifier_reward
         from self_summarization_agent.collection_contract import validate_artifact_lineage
         from self_summarization_agent.trajectory import _extract_collection_tokens
@@ -207,11 +207,17 @@ def judge_rollouts(
             # idempotent conversion of recorded outcomes, with no model judge.
             _validate_raw_row({k: v for k, v in row.items() if k != "turn_rewards"},
                               index=index, expected_checkpoint_id=expected_checkpoint_id)
-            if row.get("benchmark") != "terminal-bench":
+            if row.get("benchmark") != config.benchmark.name:
                 raise ValueError("Expected a Terminal-Bench verifier artifact")
             for record in row["trajectory_records"]:
                 _extract_collection_tokens(record, turn_id=record["turn_id"])
-            judged_rows.append(apply_verifier_reward(row))
+            judged_rows.append(apply_verifier_reward(row, reward_profile=config.benchmark.reward_profile))
+        if config.benchmark.name == "swe-dev" and split == "train":
+            from .benchmarks.swe_dev.selection import select_training_rows
+            judged_rows, selection_report = select_training_rows(judged_rows, config)
+            selection_path = Path(output_path).with_suffix(".selection.json")
+            selection_path.parent.mkdir(parents=True, exist_ok=True)
+            selection_path.write_text(json.dumps(selection_report, indent=2) + "\n")
         output = Path(output_path)
         ensure_dir(output.parent)
         output.write_text("".join(json.dumps(row) + "\n" for row in judged_rows))

@@ -2,6 +2,16 @@ from collections.abc import Iterable, Mapping
 from typing import Literal
 
 
+SIGNED_REWARD = "signed_binary"
+BINARY_REWARD = "binary_zero_one"
+
+
+def reward_bounds(profile=SIGNED_REWARD):
+    if profile not in {SIGNED_REWARD, BINARY_REWARD}:
+        raise ValueError(f"Unknown reward profile: {profile}")
+    return (0.0 if profile == BINARY_REWARD else -1.0), 1.0
+
+
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted"]
 TRAINABLE_TURN_KINDS = {"trajectory"}
 PENALIZED_RUNTIME_STATUSES = frozenset(
@@ -40,10 +50,11 @@ def apply_terminal_reward(
     summary_turn_ids: list[str] | None = None,
     final_answer_turn_id: str | None = None,
     trainable_turn_ids: list[str] | None = None,
+    reward_profile: str = SIGNED_REWARD,
 ) -> dict[str, float]:
     if outcome not in {"correct_answer", "wrong_answer", "budget_exhausted"}:
         raise ValueError(f"Unknown terminal outcome: {outcome}")
-    reward = 1.0 if outcome == "correct_answer" else -1.0
+    reward = 1.0 if outcome == "correct_answer" else reward_bounds(reward_profile)[0]
     if trainable_turn_ids is not None:
         return {turn_id: reward for turn_id in trainable_turn_ids}
     assigned = {turn_id: reward for turn_id in summary_turn_ids or []}
@@ -56,11 +67,12 @@ def apply_malformed_tool_penalty(
     turn_ids: str | list[str] | None = None,
     *,
     turn_id: str | None = None,
+    reward_profile: str = SIGNED_REWARD,
 ) -> dict[str, float]:
     if turn_ids is None:
         if turn_id is None:
             return {}
         turn_ids = turn_id
     if isinstance(turn_ids, str):
-        return {turn_ids: -1.0}
-    return {turn_id: -1.0 for turn_id in turn_ids}
+        return {turn_ids: reward_bounds(reward_profile)[0]}
+    return {turn_id: reward_bounds(reward_profile)[0] for turn_id in turn_ids}

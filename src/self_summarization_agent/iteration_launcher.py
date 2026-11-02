@@ -409,7 +409,14 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _has_eval_tasks(config):
+    return _expected_eval_rollout_count(config) > 0 if config.benchmark.name == "swe-dev" else config.dataset.eval_limit > 0
+
+
 def _expected_train_rollout_count(config) -> int | None:
+    if config.benchmark.name == "swe-dev":
+        from .benchmarks.harbor_common.dataset import selected_tasks
+        return len(selected_tasks(config, split="train")) * config.training.group_size
     if config.collection.train_task_count is not None:
         return config.collection.train_task_count * config.training.group_size
     if config.training.rollout_query_count is not None:
@@ -425,6 +432,9 @@ def _expected_train_rollout_count(config) -> int | None:
 
 
 def _expected_eval_rollout_count(config) -> int:
+    if config.benchmark.name == "swe-dev":
+        from .benchmarks.harbor_common.dataset import selected_tasks
+        return len(selected_tasks(config, split="eval")) * config.evaluation.samples_per_task
     if config.collection.eval_task_count is not None:
         return config.collection.eval_task_count * config.evaluation.samples_per_task
     if config.dataset.train_limit is None:
@@ -446,6 +456,9 @@ def _has_complete_raw_rollouts(
     if not path.exists():
         return False
     rows = _load_jsonl(path)
+    from .benchmarks.swe_dev.selection import validate_attempt_keys
+    if not validate_attempt_keys(rows, complete=True):
+        return False
     if expected_count is not None and len(rows) != expected_count:
         return False
     if expected_count is None and not rows:
@@ -461,7 +474,7 @@ def _has_complete_raw_rollouts(
             and row.get("sampling_profile_id") != expected_sampling_profile_id
         ):
             return False
-        if "turn_rewards" in row:
+        if "turn_rewards" in row and row.get("benchmark") != "swe-dev":
             raise ValueError(f"Cannot resume from {path}: row {index} is already judged")
         if not isinstance(row.get("query_id"), str):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing query_id")
@@ -491,6 +504,9 @@ def _has_complete_judged_rollouts(
     if not path.exists():
         return False
     rows = _load_jsonl(path)
+    from .benchmarks.swe_dev.selection import validate_attempt_keys
+    if not validate_attempt_keys(rows, complete=True):
+        return False
     if expected_count is not None and len(rows) != expected_count:
         return False
     if expected_count is None and not rows:
@@ -534,6 +550,9 @@ def _has_complete_cached_rollouts(
     if not path.exists():
         return False
     rows = _load_jsonl(path)
+    from .benchmarks.swe_dev.selection import validate_attempt_keys
+    if not validate_attempt_keys(rows, complete=True):
+        return False
     if expected_count is not None and len(rows) != expected_count:
         return False
     if expected_count is None and not rows:
@@ -602,6 +621,9 @@ def _has_inline_cached_rollouts(
     if not path.exists():
         return False
     rows = _load_jsonl(path)
+    from .benchmarks.swe_dev.selection import validate_attempt_keys
+    if not validate_attempt_keys(rows, complete=True):
+        return False
     if expected_count is not None and len(rows) != expected_count:
         return False
     if expected_count is None and not rows:
@@ -723,7 +745,7 @@ def run_checkpoint_evaluation(
 ) -> Path:
     if iteration < 0:
         raise ValueError(f"iteration must be non-negative, got {iteration}")
-    if config.dataset.eval_limit <= 0:
+    if not _has_eval_tasks(config):
         raise ValueError("dataset.eval_limit must be positive for checkpoint evaluation")
 
     phase_timeout = config.runtime.phase_timeout_seconds
@@ -809,7 +831,7 @@ def run_checkpoint_evaluation(
     )
     retrieval_worker_process = None
     retrieval_worker_url = None
-    if config.retrieval.persistent_worker and not raw_complete:
+    if config.benchmark.name != "swe-dev" and config.retrieval.persistent_worker and not raw_complete:
         retrieval_worker_process, retrieval_worker_url = _start_retrieval_worker(
             config_path=config_path,
             train_dir=train_dir,
@@ -1006,7 +1028,7 @@ def run_training_iteration(
     # step instead starts the judge worker before collection and streams raw
     # rows to it as they complete; the post-collection judge phase then only
     # catches rows the stream missed.
-    use_merged_judge = config.judge.enabled
+    use_merged_judge = config.judge.enabled or config.benchmark.name == "swe-dev"
 
     # ------------------------------------------------------------------
     # Merged collect command (replaces eval_rollout, train_rollout,
@@ -1029,7 +1051,7 @@ def run_training_iteration(
     ]
     if use_merged_judge:
         merged_collect_command.extend(["--train-judged-output", str(judged_rollout_path)])
-    if config.dataset.eval_limit > 0:
+    if _has_eval_tasks(config):
         merged_collect_command.extend(
             [
                 "--eval-raw-output",
@@ -1052,7 +1074,7 @@ def run_training_iteration(
     if should_resume:
         validate_artifact_lineage([raw_rollout_path, judged_rollout_path, cached_rollout_path],
                                   config=config, checkpoint=current.path)
-        if config.dataset.eval_limit > 0:
+        if _has_eval_tasks(config):
             validate_artifact_lineage([eval_raw_rollout_path, eval_judged_rollout_path],
                                       config=config, checkpoint=current.path)
     expected_eval_count = _expected_eval_rollout_count(config)
@@ -1062,7 +1084,7 @@ def run_training_iteration(
         checkpoint_id=current.checkpoint_id,
         expected_count=expected_train_count,
     )
-    eval_raw_complete = config.dataset.eval_limit <= 0 or (
+    eval_raw_complete = not _has_eval_tasks(config) or (
         should_resume
         and _has_complete_raw_rollouts(
             eval_raw_rollout_path,
@@ -1082,7 +1104,7 @@ def run_training_iteration(
         )
     )
     eval_judged_complete = (
-        config.dataset.eval_limit <= 0
+        not _has_eval_tasks(config)
         or not use_merged_judge
         or (
             should_resume
@@ -1112,7 +1134,7 @@ def run_training_iteration(
             train_compaction_tokens=config.training.train_compaction_tokens,
             retain_critic_only_states=config.training.value.enabled,
         )
-    eval_metrics_complete = config.dataset.eval_limit <= 0 or (
+    eval_metrics_complete = not _has_eval_tasks(config) or (
         should_resume
         and _has_eval_metrics(
             eval_metrics_path,
@@ -1148,7 +1170,7 @@ def run_training_iteration(
     # disabled in the merged phase.
     # ------------------------------------------------------------------
     if not use_merged_judge:
-        if config.dataset.eval_limit > 0:
+        if _has_eval_tasks(config):
             eval_judge_command = [
                 python_executable,
                 "-m",

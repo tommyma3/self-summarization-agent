@@ -19,6 +19,4 @@ vllm>=0.19.1
 tensordict>=0.10
 flash-linear-attention[cuda]
 causal-conv1d
-
-[terminal-bench]
 harbor==0.1.44

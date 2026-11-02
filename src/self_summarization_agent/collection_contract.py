@@ -12,11 +12,22 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
     identity = dict(contract=TITO_CONTRACT, template=load_chat_template(config.model.chat_template_path),
                     thinking=config.model.enable_thinking, backend=config.rollout.backend,
                     checkpoint=str(checkpoint), tokenizer_files={})
-    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") in {"terminal-bench", "swe-dev"}:
         from dataclasses import asdict
-        from self_summarization_agent.benchmarks.terminal_bench.dataset import benchmark_identity
+        from self_summarization_agent.benchmarks.harbor_common.dataset import benchmark_identity
         identity["benchmark"] = benchmark_identity(config.benchmark)
         identity["runtime"] = asdict(config.runtime)
+        if config.benchmark.name == "swe-dev":
+            # Catch local checkpoint replacement before accepting a stale cache.
+            # Checkpoints are immutable once published; metadata avoids repeatedly
+            # streaming multi-GB weights during the staged pipeline.
+            identity["policy_weight_files"] = [[p.name, p.stat().st_size, p.stat().st_mtime_ns]
+                for p in sorted(checkpoint.iterdir()) if p.is_file()
+                and p.suffix in {".safetensors", ".bin"}] if checkpoint.is_dir() else []
+            identity["selection"] = dict(train_task_count=config.collection.train_task_count,
+                eval_task_count=config.collection.eval_task_count, group_size=config.training.group_size,
+                eval_attempts=config.evaluation.samples_per_task, dataset=asdict(config.dataset),
+                seed=config.experiment.seed)
     elif (dataset := getattr(config, "dataset", None)) is not None and dataset.train_limit is not None:
         # Reject resume shortcuts for artifacts collected under a different
         # partition, including the old experiment-seed/shuffle-based split.

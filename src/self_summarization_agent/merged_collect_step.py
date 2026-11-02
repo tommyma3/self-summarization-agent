@@ -666,8 +666,13 @@ def _run_split_collection_worker(
 
     config = load_train_config(config_path, parse_cli_overrides(overrides))
     checkpoint = Path(checkpoint_path).resolve()
-    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") in {"terminal-bench", "swe-dev"}:
         from self_summarization_agent.benchmarks.terminal_bench.collection import collect_terminal_rollouts
+        if config.benchmark.name == "swe-dev":
+            # The collector validates manifests/resume before allocating a model.
+            collect_terminal_rollouts(config, checkpoint_path=checkpoint, output_path=raw_output_path,
+                split=split, sample_seed=sample_seed, resume=resume)
+            return
         generator = _build_rollout_generator(config, checkpoint, split=split)
         try:
             collect_terminal_rollouts(config, checkpoint_path=checkpoint, output_path=raw_output_path,
@@ -958,7 +963,7 @@ def run_merged_collect(
 
     Returns a dict mapping output kind to its file path.
     """
-    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") == "terminal-bench":
+    if getattr(getattr(config, "benchmark", None), "name", "browsecomp") in {"terminal-bench", "swe-dev"}:
         from self_summarization_agent.benchmarks.terminal_bench.collection import run_terminal_merged
         return run_terminal_merged(config, config_path=config_path, checkpoint_path=checkpoint_path,
             train_raw_output=train_raw_output, train_judged_output=train_judged_output,

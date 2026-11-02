@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "split": "eval",
+  "split_version": "fixture-only-v1",
+  "split_seed": 0,
+  "dataset_revision": "local-fixture-v1",
+  "tasks": []
+}

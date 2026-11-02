@@ -76,7 +76,11 @@ class TerminusKiraTito(BaseAgent):
 
     async def setup(self, environment):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.session = TmuxSession(
+        session_class = TmuxSession
+        if self.benchmark_config.environment == "local-fixture":
+            from ..swe_dev.local_fixture import FixtureSession
+            session_class = FixtureSession
+        self.session = session_class(
             session_name="kira", environment=environment,
             logging_path=Path("/logs/agent/terminal.log"),
             local_asciinema_recording_path=None, remote_asciinema_recording_path=None)
@@ -89,6 +93,7 @@ class TerminusKiraTito(BaseAgent):
             max_output_chars=self.benchmark_config.max_output_chars, vision=self.vision)
         scaffold = TerminusKiraScaffold(backend, image_enabled=self.vision is not None)
         rt = EpisodeRuntime(model=self.policy, backend=backend, scaffold=scaffold,
+            reward_profile=self.benchmark_config.reward_profile,
             context_threshold_tokens=self.runtime_config.context_threshold_tokens,
             max_context_tokens=self.runtime_config.max_context_tokens,
             max_summary_tokens=self.runtime_config.max_summary_tokens,
