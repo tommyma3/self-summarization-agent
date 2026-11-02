@@ -8,6 +8,7 @@ Usage:
   scripts/train_iterations.sh --iterations N --latest-root PATH [options]
 
 Run or resume training until checkpoint iteration N is reached.
+Separate value configs pretrain their critic before checkpoint-zero collection.
 
 Required arguments:
   --iterations N       Target checkpoint iteration; must be a positive integer.
@@ -15,7 +16,8 @@ Required arguments:
 
 Options:
   --config PATH        Training config (default: configs/train/default.yaml).
-  --set KEY=VALUE      Config override forwarded to every iteration; repeatable.
+  --set KEY=VALUE      Config override forwarded to startup and every iteration.
+                       Set training.value_pretraining.enabled=false to opt out.
   --current-iteration N
                        Iteration to resume from (default: 0); must be a
                        non-negative integer smaller than --iterations.
@@ -125,12 +127,26 @@ fi
 export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 cd -- "${REPO_ROOT}"
 
+# The launcher reads the fully overridden config. For a separate value method,
+# finish/reuse warmup before any checkpoint-zero evaluation or online rollouts.
+# Advanced actor/critic pairs keep their own optimizer and skip this stage.
+echo "=== Preparing value initialization before the iteration loop ==="
+uv run -m self_summarization_agent.iteration_launcher \
+    --config "${CONFIG_PATH}" \
+    --iteration 0 \
+    --pretrain-only \
+    --auto-value-pretraining \
+    --latest-root "${LATEST_ROOT}" \
+    --resume \
+    "${CONFIG_OVERRIDES[@]}"
+
 for ((iteration = CURRENT_ITERATION + 1; iteration <= TARGET_ITERATIONS; iteration++)); do
     echo
     echo "=== Starting training iteration ${iteration}/${TARGET_ITERATIONS} ==="
     uv run -m self_summarization_agent.iteration_launcher \
         --config "${CONFIG_PATH}" \
         --iteration "${iteration}" \
+        --auto-value-pretraining \
         --latest-root "${LATEST_ROOT}" \
         --resume \
         "${CONFIG_OVERRIDES[@]}"

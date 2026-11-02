@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from contextlib import suppress
 import json
 import os
@@ -877,6 +878,62 @@ def run_checkpoint_evaluation(
     return current.path
 
 
+def _initial_pretrained_critic(config, *, actor, train_dir, config_path, iteration,
+                               command_runner, python_executable, resume, overrides, timeout):
+    settings = config.training.value_pretraining
+    if not settings.enabled:
+        return None
+    from self_summarization_agent.separate_value import atomic_json, digest, validate_resume_checkpoint
+    if validate_resume_checkpoint(actor):
+        return None  # Online pairs always resume their own critic and optimizer.
+    if iteration not in (0, 1) or config.rollout.backend != "vllm_offline":
+        raise ValueError("Automatic value pretraining requires startup or the first iteration and vllm_offline rollouts")
+    if settings.reuse_rollouts_path is not None:
+        reused = Path(settings.reuse_rollouts_path).resolve()
+        if reused in {(train_dir / "rollouts" / f"iteration-00001{suffix}").resolve()
+                      for suffix in (".raw.jsonl", ".judged.jsonl", ".jsonl")}:
+            raise ValueError("Pretraining data must be separate from the first actor-update batch")
+    from self_summarization_agent.value_pretraining import completed_pretraining, MANIFEST
+    output = train_dir / "value_pretraining"
+    completed = completed_pretraining(config, actor, output)
+    command = [python_executable, "-m", "self_summarization_agent.value_pretraining_step",
+               "--config", str(config_path), "--checkpoint", str(actor), "--output", str(output)]
+    _append_cli_overrides(command, overrides)
+    if resume:
+        command.append("--resume")
+    _run_or_skip_phase(phase="value_pretraining", iteration=iteration, command=command,
+                       command_runner=command_runner, timings_path=train_dir / "phase_timings.jsonl",
+                       completed=completed is not None, error_message="Value pretraining subprocess",
+                       timeout_seconds=timeout, progress_path=output / "progress.json")
+    best = completed or completed_pretraining(config, actor, output)
+    if best is None:
+        raise RuntimeError("Value pretraining did not publish a complete selected critic")
+    manifest = json.loads((output / MANIFEST).read_text())
+    atomic_json(train_dir / "value_pretraining_initialization.json", {
+        "actor_id": checkpoint_id_from_path(actor), "initial_critic": str(best),
+        "pretraining_manifest_digest": digest(manifest), "critic_optimizer": "fresh"})
+    return best
+
+
+def run_value_pretraining_startup(
+    config, *, config_path, latest_root=None, command_runner=default_command_runner,
+    python_executable=sys.executable, resume=False, overrides=(),
+):
+    """Finish critic initialization before checkpoint-zero eval or online collection."""
+    if not config.training.value_pretraining.enabled:
+        return None
+    train_dir = ensure_dir(latest_root or _train_dir(config))
+    current = resolve_latest_checkpoint(train_dir)
+    timeout = config.runtime.train_update_timeout_seconds
+    if timeout is None:
+        timeout = config.runtime.phase_timeout_seconds
+    return _initial_pretrained_critic(
+        config, actor=current.path, train_dir=train_dir, config_path=config_path,
+        iteration=0, command_runner=command_runner, python_executable=python_executable,
+        resume=resume, overrides=overrides, timeout=timeout,
+    )
+
+
 def run_training_iteration(
     config,
     *,
@@ -925,6 +982,24 @@ def run_training_iteration(
 
     if training_already_advanced:
         return current.path
+
+    initial_critic = _initial_pretrained_critic(
+        config, actor=current.path, train_dir=train_dir, config_path=config_path, iteration=iteration,
+        command_runner=command_runner, python_executable=python_executable, resume=should_resume,
+        overrides=overrides, timeout=train_update_timeout)
+    if initial_critic is not None:
+        # vLLM's implicit legacy seed is zero. A distinct explicit decoding seed
+        # prevents replaying an imported base-policy batch after fitting to it.
+        sampling_seed = ((config.rollout.sampling_seed or 0) + 1) % (2**32)
+        config = replace(config, rollout=replace(config.rollout, sampling_seed=sampling_seed))
+        overrides = (*overrides, f"rollout.sampling_seed={sampling_seed}")
+        expected_profile = sampling_profile_id(resolved_rollout_sampling_profile(config, split="train"))
+        for path in (raw_rollout_path, judged_rollout_path, cached_rollout_path):
+            if path.is_file():
+                with path.open() as stream:
+                    for line in stream:
+                        if line.strip() and json.loads(line).get("sampling_profile_id") != expected_profile:
+                            raise ValueError("Existing first-update rollouts use the wrong pretraining sampling seed")
 
     # The merged path judges after collection teardown by default.  When
     # rollout.overlap_judge is enabled (and judge.enabled is true), the merged
@@ -1256,6 +1331,8 @@ def run_training_iteration(
         str(train_progress_path),
     ]
     _append_cli_overrides(train_command, overrides)
+    if initial_critic is not None:
+        _append_cli_overrides(train_command, [f"training.value.model_path={json.dumps(str(initial_critic))}"])
     if _has_inline_cached_rollouts(
         judged_rollout_path,
         checkpoint_id=current.checkpoint_id,
@@ -1290,10 +1367,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one process-isolated rollout/train iteration.")
     parser.add_argument("--config", required=True, help="Path to the train YAML config.")
     parser.add_argument("--iteration", type=int, required=True, help="Iteration number.")
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--eval-only",
         action="store_true",
         help="Evaluate the latest checkpoint without collecting training trajectories or updating weights.",
+    )
+    modes.add_argument(
+        "--pretrain-only", action="store_true",
+        help="Prepare the initial critic before iteration zero, without evaluation or policy updates.",
+    )
+    parser.add_argument(
+        "--auto-value-pretraining", action="store_true",
+        help="Enable pretraining for separate value configs unless explicitly overridden with --set.",
     )
     parser.add_argument("--latest-root", default=None, help="Directory containing the latest checkpoint pointer.")
     parser.add_argument("--resume", action="store_true", help="Resume from the first incomplete iteration phase.")
@@ -1303,12 +1389,30 @@ def parse_args() -> argparse.Namespace:
         help="Deprecated alias for --resume.",
     )
     parser.add_argument("--set", dest="overrides", action="append", default=[])
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.pretrain_only and args.iteration != 0:
+        parser.error("--pretrain-only requires --iteration 0")
+    return args
 
 
 def main() -> None:
     args = parse_args()
-    config = load_train_config(args.config, parse_cli_overrides(args.overrides))
+    overrides = parse_cli_overrides(args.overrides)
+    config = load_train_config(args.config, overrides)
+    if (args.auto_value_pretraining and config.training.value.separate
+            and "training.value_pretraining.enabled" not in overrides):
+        args.overrides.append("training.value_pretraining.enabled=true")
+        overrides["training.value_pretraining.enabled"] = True
+        # Revalidate benchmark and value requirements after enabling startup.
+        config = load_train_config(args.config, overrides)
+    if args.pretrain_only:
+        best = run_value_pretraining_startup(
+            config, config_path=args.config, latest_root=args.latest_root,
+            resume=args.resume or args.resume_rollouts, overrides=args.overrides,
+        )
+        print(f"[value_pretraining] selected initial critic: {best}" if best is not None else
+              "[value_pretraining] no initialization needed for this configuration/checkpoint")
+        return
     if args.eval_only:
         next_checkpoint = run_checkpoint_evaluation(
             config,

@@ -1,0 +1,638 @@
+[
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/eval_metrics.jsonl",
+    "size": 44893,
+    "sha256": "15c54ce13c176b8b8ecd9d50cc019c03edf2ee3c76845313967253d7627b5cb9",
+    "mtime_utc": "2026-11-01T03:43:25.098239+00:00"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/step_metrics.jsonl",
+    "size": 500076,
+    "sha256": "a5475e8924af788d88986188afe43a98e48c12ab0b364ca1de96be6f3cbb9cbf",
+    "mtime_utc": "2026-11-01T04:10:38.450091+00:00"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/phase_timings.jsonl",
+    "size": 8642,
+    "sha256": "32934c95ae2b7a9398a56da5e3d6cbc58e8297a663e326a2a2ad07623ceffc73",
+    "mtime_utc": "2026-11-01T04:10:41.266629+00:00"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00000.eval.jsonl",
+    "size": 132109555,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00001.eval.jsonl",
+    "size": 154713678,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00002.eval.jsonl",
+    "size": 177971672,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00003.eval.jsonl",
+    "size": 175461459,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00004.eval.jsonl",
+    "size": 173929636,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00005.eval.jsonl",
+    "size": 181833934,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00006.eval.jsonl",
+    "size": 187971091,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00007.eval.jsonl",
+    "size": 212034198,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00008.eval.jsonl",
+    "size": 213249368,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00009.eval.jsonl",
+    "size": 230491301,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00010.eval.jsonl",
+    "size": 238521808,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00011.eval.jsonl",
+    "size": 234922511,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00012.eval.jsonl",
+    "size": 242062178,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00013.eval.jsonl",
+    "size": 232772558,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00014.eval.jsonl",
+    "size": 251344173,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00015.eval.jsonl",
+    "size": 244469976,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00016.eval.jsonl",
+    "size": 240193335,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00017.eval.jsonl",
+    "size": 230675252,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00018.eval.jsonl",
+    "size": 229727062,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00019.eval.jsonl",
+    "size": 244072743,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00020.eval.jsonl",
+    "size": 242792700,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00021.eval.jsonl",
+    "size": 241654328,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00022.eval.jsonl",
+    "size": 248201965,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00023.eval.jsonl",
+    "size": 252533911,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00024.eval.jsonl",
+    "size": 248891062,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00025.eval.jsonl",
+    "size": 242986007,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00026.eval.jsonl",
+    "size": 248963236,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00027.eval.jsonl",
+    "size": 245410022,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00028.eval.jsonl",
+    "size": 238667982,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00029.eval.jsonl",
+    "size": 241710956,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00001.judged.jsonl",
+    "size": 268446543,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00002.judged.jsonl",
+    "size": 360278870,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00003.judged.jsonl",
+    "size": 403722065,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00004.judged.jsonl",
+    "size": 539852103,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00005.judged.jsonl",
+    "size": 457827849,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00006.judged.jsonl",
+    "size": 484111709,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00007.judged.jsonl",
+    "size": 543219023,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00008.judged.jsonl",
+    "size": 557387418,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00009.judged.jsonl",
+    "size": 600325986,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00010.judged.jsonl",
+    "size": 593912751,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00011.judged.jsonl",
+    "size": 592854434,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00012.judged.jsonl",
+    "size": 614560488,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00013.judged.jsonl",
+    "size": 651579722,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00014.judged.jsonl",
+    "size": 651560888,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00015.judged.jsonl",
+    "size": 584432450,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00016.judged.jsonl",
+    "size": 652193546,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00017.judged.jsonl",
+    "size": 545835573,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00018.judged.jsonl",
+    "size": 626557464,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00019.judged.jsonl",
+    "size": 608692593,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00020.judged.jsonl",
+    "size": 619796697,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00021.judged.jsonl",
+    "size": 620303148,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00022.judged.jsonl",
+    "size": 604746048,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00023.judged.jsonl",
+    "size": 624604506,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00024.judged.jsonl",
+    "size": 658293250,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00025.judged.jsonl",
+    "size": 659373282,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00026.judged.jsonl",
+    "size": 644835740,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00027.judged.jsonl",
+    "size": 631216716,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00028.judged.jsonl",
+    "size": 638959636,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00029.judged.jsonl",
+    "size": 610296940,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/rollouts/iteration-00030.judged.jsonl",
+    "size": 572894221,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/eval_metrics.jsonl",
+    "size": 44897,
+    "sha256": "96f7a5b66746e0f90061d1554b8e8bab7e470e72cf8ff59727e98b0bf27c6f21",
+    "mtime_utc": "2026-10-28T22:58:55.711148+00:00"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/step_metrics.jsonl",
+    "size": 27714,
+    "sha256": "c79ff233421ed3ee5e7e75a3928d86dbd8cee3ce4bfc69d5d1a6fe28b6a08a33",
+    "mtime_utc": "2026-10-28T23:13:25.862525+00:00"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/phase_timings.jsonl",
+    "size": 8496,
+    "sha256": "0e639d27ddc0d0a01e4dfcc9387b8e8b3729d4629974c9b3edb8be97b468f79c",
+    "mtime_utc": "2026-10-28T23:13:28.691028+00:00"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00000.eval.jsonl",
+    "size": 127301874,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00001.eval.jsonl",
+    "size": 168347904,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00002.eval.jsonl",
+    "size": 196697023,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00003.eval.jsonl",
+    "size": 199899189,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00004.eval.jsonl",
+    "size": 234555458,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00005.eval.jsonl",
+    "size": 213869389,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00006.eval.jsonl",
+    "size": 233918181,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00007.eval.jsonl",
+    "size": 228793852,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00008.eval.jsonl",
+    "size": 237072390,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00009.eval.jsonl",
+    "size": 234229680,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00010.eval.jsonl",
+    "size": 230997042,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00011.eval.jsonl",
+    "size": 232327792,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00012.eval.jsonl",
+    "size": 219375511,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00013.eval.jsonl",
+    "size": 218477105,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00014.eval.jsonl",
+    "size": 231290765,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00015.eval.jsonl",
+    "size": 218293635,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00016.eval.jsonl",
+    "size": 227786624,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00017.eval.jsonl",
+    "size": 217690393,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00018.eval.jsonl",
+    "size": 217401498,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00019.eval.jsonl",
+    "size": 216621990,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00020.eval.jsonl",
+    "size": 226434141,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00021.eval.jsonl",
+    "size": 206830078,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00022.eval.jsonl",
+    "size": 187413626,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00023.eval.jsonl",
+    "size": 188333494,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00024.eval.jsonl",
+    "size": 212020269,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00025.eval.jsonl",
+    "size": 222054992,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00026.eval.jsonl",
+    "size": 199183381,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00027.eval.jsonl",
+    "size": 187060957,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00028.eval.jsonl",
+    "size": 184783740,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00029.eval.jsonl",
+    "size": 199933519,
+    "rows": 100
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00001.judged.jsonl",
+    "size": 247872115,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00002.judged.jsonl",
+    "size": 374471305,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00003.judged.jsonl",
+    "size": 419546652,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00004.judged.jsonl",
+    "size": 601532472,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00005.judged.jsonl",
+    "size": 590755446,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00006.judged.jsonl",
+    "size": 600682160,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00007.judged.jsonl",
+    "size": 628645342,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00008.judged.jsonl",
+    "size": 537308302,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00009.judged.jsonl",
+    "size": 604957983,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00010.judged.jsonl",
+    "size": 584542341,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00011.judged.jsonl",
+    "size": 554624099,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00012.judged.jsonl",
+    "size": 616824047,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00013.judged.jsonl",
+    "size": 594445539,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00014.judged.jsonl",
+    "size": 607943709,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00015.judged.jsonl",
+    "size": 551734427,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00016.judged.jsonl",
+    "size": 581974432,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00017.judged.jsonl",
+    "size": 503224049,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00018.judged.jsonl",
+    "size": 530669327,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00019.judged.jsonl",
+    "size": 581834411,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00020.judged.jsonl",
+    "size": 541635331,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00021.judged.jsonl",
+    "size": 536762967,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00022.judged.jsonl",
+    "size": 467465941,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00023.judged.jsonl",
+    "size": 343885945,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00024.judged.jsonl",
+    "size": 371989813,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00025.judged.jsonl",
+    "size": 371941267,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00026.judged.jsonl",
+    "size": 470521788,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00027.judged.jsonl",
+    "size": 403036152,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00028.judged.jsonl",
+    "size": 365932574,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00029.judged.jsonl",
+    "size": 292782775,
+    "rows": 200
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/rollouts/iteration-00030.judged.jsonl",
+    "size": 252691119,
+    "rows": 200
+  }
+]

@@ -327,6 +327,19 @@ For the intended GPU run:
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
 
+The `scripts/train_iterations.sh` wrapper reads the config with all `--set`
+overrides and automatically enables value pretraining for a separate critic
+(GAE or MC). Before entering its iteration loop, it runs a resumable
+`iteration_launcher --iteration 0 --pretrain-only --auto-value-pretraining`
+startup stage. Warmup finishes before checkpoint-zero evaluation or any online
+rollouts; non-value and historical shared-head configs skip this initialization.
+Completed warmup is reused, advanced actor/critic pairs keep their existing
+critic, and startup failures stop the script before the loop. The same effective
+pretraining settings are forwarded to every iteration. For a cold-critic control,
+pass `--set training.value_pretraining.enabled=false` explicitly. Direct
+`iteration_launcher` calls continue to honor the configured enabled flag unless
+`--auto-value-pretraining` is supplied.
+
 ### Segment GAE with a categorical critic
 
 [`configs/train/compact_separate_gae_ppo.yaml`](configs/train/compact_separate_gae_ppo.yaml)
@@ -369,6 +382,80 @@ set `training.advantage_estimator=compaction_mc_value` to use pre-fit MC.
 preset below retains post-fit advantages. Evaluate task success and held-out
 value MSE/Brier/log loss; `target_ce` is encoding-dependent and should not be
 compared directly across bin counts. Bin spread is not calibrated model uncertainty.
+
+### Pretrain the segment critic on 200 traces
+
+The [`compact_separate_gae_ppo_pretrained.yaml`](configs/train/compact_separate_gae_ppo_pretrained.yaml)
+preset explicitly configures the critic-only stage before the first normal
+GAE / dual-clip PPO iteration. The wrapper also enables this stage automatically
+for the original separate GAE and MC presets. Use a fresh run root initialized
+with the same base actor as the control, then launch:
+
+```bash
+scripts/train_iterations.sh --iterations 10 \
+  --latest-root /path/to/separate-gae-pretrained-run \
+  --config configs/train/compact_separate_gae_ppo_pretrained.yaml
+```
+
+Warmup collects exactly 50 training questions with four attempts each. The 200
+traces include failures; 40 questions (160 traces) fit the critic and 10 questions
+(40 traces) select its checkpoint. It requests no extra evaluation rollouts and
+preserves the existing 730/100 benchmark partition. The 10-question holdout is
+temporary warmup validation; its fixed-policy labels are not used to select
+checkpoints once the actor changes. A small number of positive outcomes limits
+how precisely this holdout can assess value quality.
+
+All critic backbone and head parameters train together from the first minibatch,
+with terminal MC rewards on every eligible interval and equal total weight per
+rollout. Warmup uses backbone/head learning rates `1e-5`/`1e-4`, up to 20 full
+epochs, validation every epoch, and patience five. The best rollout-weighted
+validation Brier selects the export; ties retain the earlier checkpoint. Epoch
+zero remains a fallback if training never improves validation. Metrics also
+compare the selected critic with the fitting-set success-rate constant.
+
+To avoid collection, supply an existing judged, exact-token cached batch from
+the same starting actor and sampling profile:
+
+```bash
+scripts/train_iterations.sh --iterations 10 \
+  --latest-root /path/to/separate-gae-pretrained-run \
+  --config configs/train/compact_separate_gae_ppo_pretrained.yaml \
+  --set training.value_pretraining.reuse_rollouts_path=/absolute/path/to/base-policy.cached.jsonl
+```
+
+Reuse validates the complete 50-by-four batch, training-question membership,
+rewards, lineage, and exact token evidence. It does not truncate larger batches
+or replace failures. Invalid records keep their existing exclusion rules and
+eligible counts are reported without collecting replacements.
+
+Artifacts live under `<run>/value_pretraining/`. `dataset_manifest.json` binds
+the immutable source and question split; `metrics.jsonl` records epoch metrics;
+`best/` and `last/` point to private epoch checkpoints. Only the selected and
+latest committed checkpoints are retained. Optimizer and RNG state resume at
+epoch boundaries with `--resume`; mismatched inputs require a fresh output root.
+The completion marker is written after the selected checkpoint and manifest.
+Warmup collection/fitting costs are reported separately in the manifest and
+included in the launcher's phase timings.
+
+The first online update loads only the selected critic weights, resets Adam,
+and uses the existing online learning rates and fitting epochs. It independently
+collects a new batch, freezes pre-fit GAE values/advantages, fits the critic, then
+runs dual-clip PPO. Automatic startup requires `vllm_offline`: a distinct engine
+seed is recorded for this first online training batch, without pinning every
+request to the same seed. Later actor/critic pairs resume their own critic and
+optimizer and skip warmup. Historical presets keep their configured default
+when invoked directly; the training wrapper enables warmup for separate critics
+unless explicitly disabled with `--set`.
+
+The standalone entry point supports inspecting or preparing an initializer
+without launching policy training:
+
+```bash
+.venv/bin/python -m self_summarization_agent.value_pretraining_step \
+  --config configs/train/compact_separate_gae_ppo_pretrained.yaml \
+  --checkpoint /absolute/path/to/base-actor \
+  --output /absolute/path/to/value_pretraining
+```
 
 ### Separate MC critic with PPO updates
 

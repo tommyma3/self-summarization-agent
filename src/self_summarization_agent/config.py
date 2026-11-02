@@ -142,6 +142,7 @@ class RolloutConfig:
     temperature: float | None = None
     top_p: float | None = None
     do_sample: bool | None = None
+    sampling_seed: int | None = None
     api_base_url: str | None = None
     api_model: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -154,6 +155,10 @@ class RolloutConfig:
     per_split_collection_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if self.sampling_seed is not None and (
+                isinstance(self.sampling_seed, bool) or not isinstance(self.sampling_seed, int)
+                or not 0 <= self.sampling_seed < 2**32 or self.backend != "vllm_offline"):
+            raise ValueError("rollout.sampling_seed requires vllm_offline and an integer in [0, 2**32)")
         if self.max_concurrent_episodes < 1:
             raise ValueError("rollout.max_concurrent_episodes must be at least 1")
         if self.overlap_queue_max_batches < 1:
@@ -358,6 +363,41 @@ class CompactionValueConfig:
 
 
 @dataclass(slots=True)
+class ValuePretrainingConfig:
+    enabled: bool = False
+    task_count: int = 50
+    samples_per_task: int = 4
+    validation_task_count: int = 10
+    seed: int = 0
+    max_epochs: int = 20
+    patience: int = 5
+    min_delta: float = 0.0
+    learning_rate: float = 1e-5
+    head_learning_rate: float = 1e-4
+    reuse_rollouts_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("training.value_pretraining.enabled must be a boolean")
+        for name in ("task_count", "samples_per_task", "validation_task_count", "max_epochs", "patience"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"training.value_pretraining.{name} must be a positive integer")
+        if self.validation_task_count >= self.task_count:
+            raise ValueError("Value pretraining requires validation_task_count < task_count")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+            raise ValueError("training.value_pretraining.seed must be a nonnegative integer")
+        for name in ("learning_rate", "head_learning_rate", "min_delta"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                    or (value < 0 if name == "min_delta" else value <= 0)):
+                raise ValueError(f"Invalid training.value_pretraining.{name}")
+        if self.reuse_rollouts_path is not None and (
+                not isinstance(self.reuse_rollouts_path, str) or not self.reuse_rollouts_path.strip()):
+            raise ValueError("training.value_pretraining.reuse_rollouts_path must be a nonempty path or null")
+
+
+@dataclass(slots=True)
 class TrainingConfig:
     backend: str = "transformers"
     gpu_ids: list[int] = field(default_factory=list)
@@ -384,9 +424,13 @@ class TrainingConfig:
     train_compaction_tokens: bool = True
     advantage_estimator: str = "group_relative"
     value: CompactionValueConfig = field(default_factory=CompactionValueConfig)
+    # Keep this outside value: historical target files fingerprint that dataclass.
+    value_pretraining: ValuePretrainingConfig = field(default_factory=ValuePretrainingConfig)
     verl: VerlRayConfig = field(default_factory=VerlRayConfig)
 
     def __post_init__(self) -> None:
+        if self.value_pretraining.enabled and not self.value.separate:
+            raise ValueError("Value pretraining requires an enabled separate critic")
         if self.value.separate:
             if self.backend not in {"transformers", "verl_ray"} or (
                 self.backend == "verl_ray" and self.verl.worker_backend not in {"transformers", "verl_fsdp"}
@@ -521,6 +565,9 @@ def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     value_section = training_section.pop("value", {})
     if not isinstance(value_section, dict):
         raise ValueError("Config section 'training.value' must be a mapping")
+    pretraining_section = training_section.pop("value_pretraining", {})
+    if not isinstance(pretraining_section, dict):
+        raise ValueError("Config section 'training.value_pretraining' must be a mapping")
     verl_section = training_section.pop("verl", {})
     if not isinstance(verl_section, dict):
         raise ValueError("Config section 'training.verl' must be a mapping")
@@ -531,6 +578,7 @@ def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     return TrainingConfig(
         **training_section,
         value=CompactionValueConfig(**value_section),
+        value_pretraining=ValuePretrainingConfig(**pretraining_section),
         verl=VerlRayConfig(**verl_section, fsdp=VerlFSDPConfig(**fsdp_section)),
     )
 
@@ -565,6 +613,8 @@ def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None)
     if overrides:
         raw = apply_overrides(raw, overrides)
     training = _load_training_config(raw)
+    if training.value_pretraining.enabled and raw.get("benchmark", {}).get("name", "browsecomp") != "browsecomp":
+        raise ValueError("Value pretraining currently supports BrowseComp only")
     runtime = RuntimeConfig(**_require_section(raw, "runtime"))
     rollout = _derive_rollout_config(raw, training)
     _validate_exact_token_sequence_ceiling(training, rollout, runtime)
@@ -611,6 +661,8 @@ def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dic
         "api_extra_body": dict(config.rollout.api_extra_body),
         "extra_sampling_params": {},
     }
+    if split == "train" and getattr(config.rollout, "sampling_seed", None) is not None:
+        profile["engine_seed"] = config.rollout.sampling_seed
     if split == "eval":
         evaluation = config.evaluation
         for key in ("max_new_tokens", "temperature", "top_p", "do_sample"):

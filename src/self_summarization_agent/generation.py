@@ -509,6 +509,7 @@ class VLLMGenerator(TokenInputGenerator):
     enable_prefix_caching: bool = False
     require_exact_token_ids: bool = True
     gpu_memory_utilization: float | None = None
+    engine_seed: int | None = None
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
     _sampling_params_cls: Any = field(init=False)
@@ -538,10 +539,13 @@ class VLLMGenerator(TokenInputGenerator):
             "enable_prefix_caching": self.enable_prefix_caching,
             "logprobs_mode": "raw_logprobs",
             "gpu_memory_utilization": self.gpu_memory_utilization,
+            "seed": self.engine_seed,
         }
         sig = inspect.signature(LLM)
         supported_kwargs = set(sig.parameters)
         has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if self.engine_seed is not None and "seed" not in supported_kwargs and not has_var_keyword:
+            raise RuntimeError("The installed vLLM cannot honor the configured rollout engine seed")
         if "logprobs_mode" not in supported_kwargs and not has_var_keyword:
             raise RuntimeError(
                 "The installed vLLM does not expose logprobs_mode; raw rollout "
@@ -913,6 +917,7 @@ def build_generator(
     *,
     judge_config: JudgeConfig | None = None,
     sampling_extra: dict[str, Any] | None = None,
+    engine_seed: int | None = None,
 ) -> TextGenerator:
     sampling_extra = dict(sampling_extra or {})
     max_new_tokens = judge_config.max_new_tokens if judge_config else model_config.max_new_tokens
@@ -961,6 +966,7 @@ def build_generator(
     if backend_name in {"vllm", "vllm_offline"}:
         return VLLMGenerator(
             model_path=model_path,
+            engine_seed=engine_seed,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
