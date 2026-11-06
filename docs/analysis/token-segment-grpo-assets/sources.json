@@ -1,0 +1,47 @@
+[
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-token-mc-ppo/eval_metrics.jsonl",
+    "bytes": 44886,
+    "sha256": "aaaae2feb920171ce59f012e7098d830d5a1eb80091c2b94aa723b60f311b95b"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-token-mc-ppo/step_metrics.jsonl",
+    "bytes": 517038,
+    "sha256": "5800f87e61d328f3a95a7a9fe849799f96bd016c2739d7f1a74a68a41b6a6b25"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-token-mc-ppo/phase_timings.jsonl",
+    "bytes": 8637,
+    "sha256": "01de8619900b6e966944e9028d9ba8a846ab6a3e08096191f8c5c1a2465ac99e"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/eval_metrics.jsonl",
+    "bytes": 44893,
+    "sha256": "15c54ce13c176b8b8ecd9d50cc019c03edf2ee3c76845313967253d7627b5cb9"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/step_metrics.jsonl",
+    "bytes": 500076,
+    "sha256": "a5475e8924af788d88986188afe43a98e48c12ab0b364ca1de96be6f3cbb9cbf"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-compact-separate-gae-ppo/phase_timings.jsonl",
+    "bytes": 8642,
+    "sha256": "32934c95ae2b7a9398a56da5e3d6cbc58e8297a663e326a2a2ad07623ceffc73"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/eval_metrics.jsonl",
+    "bytes": 44897,
+    "sha256": "96f7a5b66746e0f90061d1554b8e8bab7e470e72cf8ff59727e98b0bf27c6f21"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/step_metrics.jsonl",
+    "bytes": 27714,
+    "sha256": "c79ff233421ed3ee5e7e75a3928d86dbd8cee3ce4bfc69d5d1a6fe28b6a08a33"
+  },
+  {
+    "path": "/124090467/self-summarization-agent/artifacts/train/qwen-bcplus-train/phase_timings.jsonl",
+    "bytes": 8496,
+    "sha256": "0e639d27ddc0d0a01e4dfcc9387b8e8b3729d4629974c9b3edb8be97b468f79c"
+  }
+]

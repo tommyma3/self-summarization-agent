@@ -1,0 +1,17 @@
+{
+  "token_update30": {
+    "intervals": 520,
+    "sampled_tokens": 688227,
+    "max_abs_advantage_minus_reward_minus_value": 0.0,
+    "opposite_outcome_advantages": 0
+  },
+  "segment_update30": {
+    "intervals": 507,
+    "recurrence_verified": true,
+    "gamma": 1.0,
+    "lambda": 0.95,
+    "target_vs_mc_mae": 0.01195646109707522,
+    "opposite_outcome_advantages": 1
+  },
+  "scope": "Independent arithmetic checks of final saved frozen artifacts; not a complete collection-integrity audit."
+}
