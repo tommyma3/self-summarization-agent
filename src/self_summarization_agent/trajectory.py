@@ -57,6 +57,10 @@ class RLSample:
     state_prefix_length: int | None = None
     # Diagnostic view of recorded interval metadata; never used to render tokens.
     state_kind: str = "unknown"
+    # Training-only provenance view; cache v7 and collected records are unchanged.
+    reference_logprob_source: str | None = None
+    reference_logprobs_mode: str | None = None
+    collection_token_spans: list[dict[str, Any]] | None = None
 
     @property
     def has_training_cache(self) -> bool:
@@ -774,6 +778,9 @@ def extract_trainable_samples(
                 reference_logprobs=reference_logprobs,
                 state_prefix_length=state_prefix_length,
                 state_kind=_interval_state_kind(record),
+                reference_logprob_source=(record.get(TOKEN_CACHE_FIELD) or {}).get("reference_logprob_source"),
+                reference_logprobs_mode=(record.get(TOKEN_CACHE_FIELD) or {}).get("logprobs_mode"),
+                collection_token_spans=deepcopy((record.get("collection_tokens") or {}).get("spans")),
             )
         )
     unknown_reward_ids = sorted(set(rewards) - seen_record_ids - skipped_history_rewrite_ids)

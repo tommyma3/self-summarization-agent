@@ -6,6 +6,7 @@ from contextlib import suppress
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -372,6 +373,25 @@ def _move_incomplete_checkpoint_aside(path: Path) -> Path | None:
     os.replace(path, stale)
     print(f"[iteration_launcher] moved incomplete checkpoint aside: {path} -> {stale}", flush=True)
     return stale
+
+
+def _restart_staged_checkpoint(path: Path, *, retain_token_frozen: bool = False):
+    """Retire uncommitted weights, retaining only verified immutable token inputs."""
+    from .separate_value import FROZEN_TARGETS
+    frozen_path = path / FROZEN_TARGETS
+    shard = None
+    if retain_token_frozen and frozen_path.is_file():
+        from .token_value_artifacts import read_shard
+        frozen = json.loads(frozen_path.read_text())
+        read_shard(frozen, path)  # Corrupt staged evidence fails closed before moving it.
+        shard = frozen["shard"]["file"]
+    archived = _move_incomplete_checkpoint_aside(path)
+    if shard is not None:
+        (path / shard).parent.mkdir(parents=True)
+        shutil.copy2(archived / shard, path / shard)
+        shutil.copy2(archived / FROZEN_TARGETS, path / FROZEN_TARGETS)
+    # The critic subprocess verifies sample/config/source provenance before reuse.
+    return archived
 
 
 def _promote_staged_checkpoint(
@@ -978,7 +998,15 @@ def run_training_iteration(
     current = resolve_latest_checkpoint(train_dir)
     if config.training.value.separate:
         from self_summarization_agent.separate_value import validate_resume_checkpoint
-        validate_resume_checkpoint(current.path)
+        resumed = validate_resume_checkpoint(current.path)
+        if resumed:
+            from .separate_value import CRITIC_DIR, CRITIC_MANIFEST, method_spec
+            manifest = json.loads((current.path / CRITIC_DIR / CRITIC_MANIFEST).read_text())
+            saved_estimator = manifest.get("method", {}).get("estimator", "compaction_mc_value")
+            if "token_mc_value" in {saved_estimator, config.training.advantage_estimator} and (
+                manifest.get("method") != method_spec(config.training.value, config.training.advantage_estimator)
+            ):
+                raise ValueError("Cannot resume across token/interval critic methods; start a fresh experiment")
     migrate_compaction_value_head_sidecar(current.path)
     should_resume = resume or resume_rollouts
     rollouts_dir = ensure_dir(train_dir / "rollouts")
@@ -1331,7 +1359,8 @@ def run_training_iteration(
         )
         checkpoint_complete = True
     elif not checkpoint_complete and staged_checkpoint.exists():
-        _move_incomplete_checkpoint_aside(staged_checkpoint)
+        _restart_staged_checkpoint(staged_checkpoint, retain_token_frozen=(
+            should_resume and config.training.advantage_estimator == "token_mc_value"))
     if not checkpoint_complete and next_checkpoint.exists():
         _move_incomplete_checkpoint_aside(next_checkpoint)
 

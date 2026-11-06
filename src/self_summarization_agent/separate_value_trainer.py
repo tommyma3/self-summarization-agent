@@ -21,6 +21,7 @@ from self_summarization_agent.value_model import (
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.trainer import _write_training_progress
+from .token_value_trainer import TokenValueTrainerMixin, TokenValueForward
 
 
 def tokenizer_signature(tokenizer):
@@ -37,10 +38,15 @@ class _PreparedPrefixes:
     rewards: torch.Tensor
 
 
-class SeparateValueTrainer:
+class SeparateValueTrainer(TokenValueTrainerMixin):
     def __init__(self, source, actor_path, config, *, dtype="bfloat16", device="cuda:0",
                  activation_checkpointing=True, resume=False, progress_path=None,
                  advantage_estimator="compaction_mc_value"):
+        if advantage_estimator == "token_mc_value" and (
+            not config.separate or config.num_bins != 2 or config.baseline_timing != "pre_fit"
+            or config.reward_profile != "signed_binary"
+        ):
+            raise ValueError("Token MC requires a separate signed two-bin pre_fit critic")
         self.config = config
         self.method = method_spec(config, advantage_estimator)
         self.frozen_digest = None
@@ -51,6 +57,10 @@ class SeparateValueTrainer:
         self._last_progress = float("-inf")
         self.detailed_diagnostics = False
         self.source = str(source)
+        if advantage_estimator == "token_mc_value" and (Path(source) / CRITIC_MANIFEST).exists():
+            initializer = json.loads((Path(source) / CRITIC_MANIFEST).read_text())
+            if initializer.get("method") != self.method:
+                raise ValueError("Token critic initializer has a different method/granularity")
         if resume:
             manifest = json.loads((Path(source) / CRITIC_MANIFEST).read_text())
             legacy_method = {**method_spec(config), "num_bins": 2, "support": [-1.0, 1.0],
@@ -89,6 +99,19 @@ class SeparateValueTrainer:
         if resume and not found:
             raise ValueError("Resumed critic is missing its value head")
         self.head.to(device=self.device, dtype=torch_dtype)
+        self._token_devices = [self.device]
+        if config.gpu_ids and len(config.gpu_ids) > 1:
+            if advantage_estimator != "token_mc_value":
+                raise ValueError("Multi-GPU separate critic currently requires token_mc_value")
+            if self.device.type == "cuda":
+                # Launchers map the requested physical devices to consecutive local IDs.
+                count = len(config.gpu_ids)
+                if self.device.index != 0 or torch.cuda.device_count() < count:
+                    raise ValueError("Multi-GPU critic requires cuda:0 and all configured GPUs visible")
+                self._token_devices = list(range(count))
+                self._token_parallel = torch.nn.DataParallel(
+                    TokenValueForward(self.model, self.head), device_ids=self._token_devices,
+                )
         self.optimizer = torch.optim.AdamW([
             {"params": list(self.model.parameters()), "lr": config.learning_rate},
             {"params": list(self.head.parameters()), "lr": config.head_learning_rate or config.learning_rate},
@@ -177,10 +200,15 @@ class SeparateValueTrainer:
         return self.head(hidden[torch.arange(len(indices), device=self.device), lengths - 1])
 
     def logits(self, samples):
+        if self.method["estimator"] == "token_mc_value":
+            prepared = self._prepare_tokens(samples)
+            return self._token_logits(prepared, list(range(len(samples))))
         prepared = self._prepare(samples)
         return self._logits_prepared(prepared, list(range(len(samples))))
 
     def evaluate(self, samples):
+        if self.method["estimator"] == "token_mc_value":
+            return self.evaluate_tokens(samples)
         validate_samples(samples, reward_profile=self.config.reward_profile)
         return self._evaluate_prepared(self._prepare(samples))[:2]
 
@@ -223,6 +251,10 @@ class SeparateValueTrainer:
             "prefix_tokens_per_second": tokens / elapsed, "padding_fraction": 1 - tokens / padded_tokens}
 
     def fit(self, samples, *, max_sequence_length=None, scalar_targets=None):
+        if self.method["estimator"] == "token_mc_value":
+            if scalar_targets is not None and scalar_targets != {sample_key(s): s.reward for s in samples}:
+                raise ValueError("Token MC only fits terminal rollout classes")
+            return self.fit_tokens(samples, max_sequence_length=max_sequence_length)
         self.synchronize()
         started = time.monotonic()
         if self.method["estimator"] == "compaction_gae_value" and scalar_targets is None:

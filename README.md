@@ -661,3 +661,79 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 - A successful compaction starts a fresh interval with the unchanged system instructions, unchanged original user request, and the latest `<summary>...</summary>`-wrapped compressed agent history; no raw assistant/tool tail is retained.
 - RL training data is produced as one sparse-masked sample per interval: action, tool-call, summary, and final-answer tokens are trainable, while tool results and runtime-control prompts are context-only.
 - Malformed tool calls terminate the rollout immediately and assign negative reward to every interval in that failed rollout.
+
+Token Monte Carlo critic for BrowseComp-Plus
+-------------------------------------------
+
+`configs/train/compact_separate_token_mc_ppo.yaml` adds `token_mc_value` with an
+independent Qwen3.5-0.8B causal critic and the existing Qwen3.5-9B actor/FSDP
+configuration. The benchmark remains `browsecomp`, with the fixed seed-zero
+730/100 question split and 50 training questions with four attempts per update.
+The two classes are ordered `[-1, +1]`; their probability difference predicts the
+final signed rollout reward immediately **before each sampled assistant token**.
+Every sampled token, including reasoning, tool syntax, summaries and sampled
+stop tokens, uses the same rollout outcome. Conditioning tokens have no loss.
+The training view consumes exact cached IDs and masks without changing any
+interval evidence or the token-cache version.
+
+Before critic fitting, the carried critic freezes `A = R - V_old` in float32.
+The actor uses these fixed token arrays for every PPO epoch. Critic cross-entropy
+averages tokens within each nonempty interval, intervals within a rollout, and
+rollouts within each optimizer minibatch. Empty intervals retain their evidence
+but have no critic target. Zero advantages still participate in actor accounting.
+The actor keeps its existing token reduction, clipping and behavior logprobs.
+
+The launcher automatically warms up the token critic using 50 training questions
+and four attempts, with a query-disjoint 40/10 fit/validation split. It selects the
+checkpoint with the best rollout/interval/token-weighted validation Brier score;
+the actor stays unchanged. Set `training.value_pretraining.enabled=false` for a
+cold critic. Interval GAE retains its existing interval-MC warmup.
+
+Token mode derives its anchor from the estimator: `before_each_sampled_token`.
+The legacy `training.value.state_anchor` default belongs to interval estimators;
+it does not select token granularity. Other anchor overrides are rejected.
+Token mode requires signed rewards, two bins, pre-fit timing, exact collection,
+all compaction tokens, and either Transformers or `verl_ray` with the
+Transformers/`verl_fsdp` worker. Token and interval critic checkpoints and warmup
+artifacts cannot be interchanged, even when their heads have the same shape.
+
+Full intervals cost more critic compute than interval-start prefixes. The preset
+starts with fit/eval microbatch one, activation checkpointing, and a 27,000-token
+batching budget. Longer intervals are rejected at the training/model capacity;
+no context is truncated or split into independently conditioned windows.
+Frozen token values and advantages use a digest-checked safetensors shard and a
+version-three JSON manifest. Shards live under `token_values/` so vLLM never
+interprets them as actor weights. They are bound to the source critic, behavior checkpoint,
+tokenizer signature, method, and exact cached evidence. Retries reuse a validated
+frozen shard and restart fitting from the committed input actor/critic pair.
+
+Initialize a fresh run's `latest` pointer to the chosen base actor using the
+existing `write_latest_checkpoint` helper, then launch:
+
+```bash
+/124090467/self-summarization-agent/scripts/train_iterations.sh \
+  --iterations 1 \
+  --latest-root /124090467/self-summarization-agent/experiments/token-mc-bcplus \
+  --config /124090467/self-summarization-agent/configs/train/compact_separate_token_mc_ppo.yaml
+```
+
+The matched control is `configs/train/compact_separate_mc_prefit_control.yaml`:
+pre-fit, two-bin interval MC with the same backbone, optimizer, warmup budget,
+actor objective and data split. Use its separate output root and compare task
+success at matched generated-token budgets, reporting critic compute/memory
+separately. `compact_separate_token_mc_smoke.yaml` uses two training questions and
+shorter budgets solely for integration validation; it is not a benchmark result.
+
+Use the existing explicit `iteration_launcher --eval-only --iteration 1` flow to
+evaluate the final checkpoint with the same config and latest root. The separate
+`evaluate_value` command also supports frozen token predictions and reports
+weighted CE, Brier, calibration, explained variance, token counts and rollout
+counts. Research/tool, summary and final-answer strata use authoritative ledger
+spans and terminal metadata. Strata are marked unavailable when the training view
+has no authoritative token-span metadata. Greedy benchmark evaluation and
+sampling-policy calibration probes answer different questions; keep their query
+sets disjoint from warmup fitting and selection.
+
+Measured feasibility and release status are recorded in
+[`docs/token-mc-validation.md`](docs/token-mc-validation.md). A synthetic critic
+memory probe and CPU tests alone do not establish production actor support.

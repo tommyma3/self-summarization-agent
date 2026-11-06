@@ -50,6 +50,11 @@ def evaluate_value_checkpoint(
         from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
         if not validate_resume_checkpoint(checkpoint):
             raise ValueError("Separate critic evaluation requires a complete saved pair")
+        from .separate_value import CRITIC_MANIFEST, method_spec
+        manifest = json.loads((checkpoint / CRITIC_DIR / CRITIC_MANIFEST).read_text())
+        if manifest.get("method", method_spec(config.training.value)) != method_spec(
+                config.training.value, config.training.advantage_estimator):
+            raise ValueError("Critic evaluation method mismatch")
         trainer = SeparateValueTrainer(checkpoint / CRITIC_DIR, checkpoint, config.training.value,
             dtype=config.model.dtype, device=f"cuda:{config.training.value.gpu_id}",
             resume=False, activation_checkpointing=False,

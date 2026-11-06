@@ -1,0 +1,118 @@
+{
+  "candidates": [],
+  "dataset_revision": "5888e5864886590ead78a69b6e60490a0d89a594",
+  "eligible_specifications": 0,
+  "exclusions": [],
+  "gate": "blocked_missing_independent_task_assets_or_split_conflict",
+  "inventory_digest": "f21b5fe49ab8a729d00c4b62d2b4a5a2f5b8026cd817c7aabff747dcadcbf811",
+  "recovered_specifications": 0,
+  "required_assets": [
+    "origin",
+    "instance_id",
+    "repository_url",
+    "base_commit",
+    "issue_url",
+    "instruction",
+    "setup",
+    "fail_to_pass",
+    "pass_to_pass",
+    "reference_fix",
+    "verifier"
+  ],
+  "sources": [
+    {
+      "access": "public Git HTTPS",
+      "check": "git ls-remote HEAD refs/heads/main",
+      "missing_assets": [
+        "origin",
+        "instance_id",
+        "repository_url",
+        "base_commit",
+        "issue_url",
+        "instruction",
+        "setup",
+        "fail_to_pass",
+        "pass_to_pass",
+        "reference_fix",
+        "verifier"
+      ],
+      "outcome": "unchanged_revision_existing_audit_reused",
+      "prior_audit": "source-audit-2026-11-02.json",
+      "revision": "72917b610c3749c9e1236b29effd629f8aca6a99",
+      "source": "https://github.com/THUDM/SWE-Dev"
+    },
+    {
+      "access": "public HTTPS API",
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "data/rft-00000-of-00001.parquet",
+        "data/sft-00000-of-00002.parquet",
+        "data/sft-00001-of-00002.parquet"
+      ],
+      "missing_assets": [
+        "origin",
+        "instance_id",
+        "repository_url",
+        "base_commit",
+        "issue_url",
+        "instruction",
+        "setup",
+        "fail_to_pass",
+        "pass_to_pass",
+        "reference_fix",
+        "verifier"
+      ],
+      "outcome": "unchanged_revision_no_new_files",
+      "response_sha256": "26c382d365dd1835dd3f4e576d2541d3222fbfe675dc19fc91e353d978d70d2c",
+      "revision": "5888e5864886590ead78a69b6e60490a0d89a594",
+      "source": "https://huggingface.co/datasets/zai-org/SWE-Dev-train"
+    },
+    {
+      "access": "public HTTPS API",
+      "limitation": "No claim about release assets from this endpoint",
+      "outcome": "unresolved_http_403_rate_limit",
+      "revision": null,
+      "source": "https://api.github.com/repos/THUDM/SWE-Dev/releases"
+    },
+    {
+      "access": "local filesystem",
+      "excluded": [
+        {
+          "asset": "tests/fixtures/swe_dev/trim-name",
+          "reason": "deterministic local fixture; not independent upstream task"
+        },
+        {
+          "asset": "released parquets",
+          "reason": "historical conversations/rewards; no executable task assets"
+        }
+      ],
+      "limitation": "Bounded task asset inventory, not a scan of unrelated private directories or services",
+      "outcome": "only_prior_audit_pinned_parquets_and_fixture_assets",
+      "paths": [
+        "/124090467/hf_datasets/swe-dev",
+        "/tmp/swe-dev-audit",
+        "/tmp/swe-dev-pilot",
+        "artifacts/swe-dev",
+        "tests/fixtures/swe_dev"
+      ],
+      "revision": null,
+      "source": "local scoped inventory"
+    }
+  ],
+  "split_proposal": {
+    "conflicts": [],
+    "eval": [],
+    "external_overlaps": [],
+    "limitation": "Exact identity/content checks only; no semantic or full evaluation-disjointness claim.",
+    "seed": 0,
+    "train": [],
+    "unresolved_external_evaluations": [
+      "SWE-bench Verified",
+      "official Terminal-Bench"
+    ],
+    "version": "swe-dev-production-proposal-v1"
+  },
+  "validated_upstream_tasks": 0,
+  "version": 1
+}

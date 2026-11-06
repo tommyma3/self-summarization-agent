@@ -84,6 +84,9 @@ def value_diagnostics(samples, values, losses, *, prefix: str, detailed: bool = 
     Each stratum recomputes rollout weights among its own real eligible states.
     Training-batch evaluations must not be labeled held-out validation.
     """
+    if values and isinstance(values[0], list):
+        from .token_value import token_diagnostics
+        return token_diagnostics(samples, values, losses, prefix=prefix, detailed=detailed)
     if len(samples) != len(values) or len(samples) != len(losses):
         raise ValueError("Critic predictions do not align with samples")
     if any(sample.rollout_id is None for sample in samples):

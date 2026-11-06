@@ -99,7 +99,7 @@ def _run(config, actor, output, resume, command_runner, fitter, allowed_queries)
                 "exit_code": 0 if success else 1})
     # Only now may this process allocate the critic. Collection owns teardown of
     # policy/retrieval/judge workers; no evaluation output paths were requested.
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(config.training.value.gpu_id)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, config.training.value.gpu_ids or [config.training.value.gpu_id]))
     return (fitter or fit_pretraining)(config, actor, rollouts, output, allowed_queries, resume=resume)
 
 

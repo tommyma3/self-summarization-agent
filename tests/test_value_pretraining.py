@@ -137,7 +137,11 @@ def test_real_mc_fit_best_reload_and_fresh_online_optimizer(batch, tmp_path):
         module.completed_pretraining(batch.config, batch.actor, output)
 
 
-def test_interrupted_epoch_resumes_exact_weights_and_optimizer(batch, tmp_path, monkeypatch):
+@pytest.mark.parametrize("estimator", ["compaction_gae_value", "token_mc_value"])
+def test_interrupted_epoch_resumes_exact_weights_and_optimizer(batch, tmp_path, monkeypatch, estimator):
+    batch.config.training.advantage_estimator = estimator
+    if estimator == "token_mc_value":
+        batch.config.training.value = replace(batch.config.training.value, num_bins=2)
     uninterrupted, interrupted = tmp_path / 'uninterrupted', tmp_path / 'interrupted'
     module.fit_pretraining(batch.config, batch.actor, batch.path, uninterrupted, batch.allowed, device='cpu')
     original = module.atomic_json

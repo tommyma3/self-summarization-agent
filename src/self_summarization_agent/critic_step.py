@@ -111,7 +111,7 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
                                        retain_critic_only_states=True)
     validate_samples(samples, config.training.max_sequence_length, config.training.value.reward_profile)
     estimator = config.training.advantage_estimator
-    chains = ordered_rollout_chains(rollout_rows, samples, config.training.value.reward_profile) if estimator == "compaction_gae_value" else []
+    chains = ordered_rollout_chains(rollout_rows, samples, config.training.value.reward_profile) if estimator in {"compaction_gae_value", "token_mc_value"} else []
     resume = validate_resume_checkpoint(checkpoint)
     source = checkpoint / CRITIC_DIR if resume else config.training.value.model_path
     phases = {"value/sample_load_seconds": time.monotonic() - started}
@@ -124,6 +124,9 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
     synchronize()
     phases["value/model_load_seconds"] = time.monotonic() - started
     critic.detailed_diagnostics = scheduled_iteration(config.training.value.diagnostics_interval, output_id)
+    if estimator == "token_mc_value":
+        from .token_value_artifacts import run_token_critic
+        return run_token_critic(config, checkpoint, output, output_id, samples, source, resume, critic, rollouts, phases)
     frozen = None
     prefit_metrics = {}
     if config.training.value.baseline_timing == "pre_fit":

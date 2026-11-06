@@ -1,0 +1,40 @@
+{
+  "updates": [
+    {
+      "checkpoint": "iteration-00001",
+      "complete_pair": true,
+      "frozen_digest": "c90d95c3371c2d47ebe4f6c4f2edc7f74f4637964ba5a1fa85a5fa4923302ba8",
+      "source_critic_identity": "a90affa33996d607251fccdda7c498a401ddf106dbd2bae60dedabfad793ba15",
+      "fitted_critic_identity": "1f0bc23ca81644959d5924ee9910b77b",
+      "token_count": 4096,
+      "old_value_min": 0.0,
+      "old_value_max": 0.0,
+      "advantage_std": 0.0,
+      "root_weight_files": [
+        "model.safetensors"
+      ]
+    },
+    {
+      "checkpoint": "iteration-00002",
+      "complete_pair": true,
+      "frozen_digest": "4d064fbe89423f8bac2f4d1732294d371a29d52c2d2cb0eaa5b147be2263431e",
+      "source_critic_identity": "1f0bc23ca81644959d5924ee9910b77b",
+      "fitted_critic_identity": "af9dd26b6c784d60b65aca6f50de7bb8",
+      "token_count": 3102,
+      "old_value_min": -0.037336111068725586,
+      "old_value_max": 0.00311279296875,
+      "advantage_std": 0.005813044961541891,
+      "root_weight_files": [
+        "model.safetensors"
+      ]
+    }
+  ],
+  "evidence_unchanged": {
+    "value_pretraining/rollouts.cached.jsonl": true,
+    "value_pretraining/rollouts.raw.jsonl": true,
+    "value_pretraining/rollouts.judged.jsonl": true,
+    "rollouts/iteration-00001.jsonl": true,
+    "rollouts/iteration-00001.judged.jsonl": true,
+    "rollouts/iteration-00001.raw.jsonl": true
+  }
+}

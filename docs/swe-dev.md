@@ -244,3 +244,14 @@ tolerances remain unchanged; the expanded GPU suite passes 13 checks. The
 records the operation trace, FP64/finite-difference evidence, kernel-precision
 control, optimizer-step comparison, and the combined 117-passing-test result.
 The earlier validation JSON remains the historical record of that earlier run.
+
+## Production readiness recovery gate
+
+The [2026-11-02 readiness plan](plans/2026-11-02-swe-dev-production-readiness.md)
+now has a reproducible [independent recovery gate](swe-dev/recovery.md), including
+per-field hashed provenance, exclusion reports, connected leakage groups, explicit
+split reservations, and external evaluation overlap checks. The checked scoped
+inventory still yields zero recoverable upstream specifications. Public Git HEAD
+and dataset revisions are unchanged; the GitHub release API check was rate-limited.
+M2–M7 remain pending trusted task assets and Docker validation. The recovery report
+is a proposal and cannot be used as an executable task manifest.

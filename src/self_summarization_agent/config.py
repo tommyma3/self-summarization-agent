@@ -298,6 +298,7 @@ class CompactionValueConfig:
     progress_interval_seconds: float = 30.0
     max_grad_norm: float = 1.0
     gpu_id: int = 0
+    gpu_ids: list[int] = field(default_factory=list)
     seed: int = 0
     loss_coefficient: float = 0.5
     head_learning_rate: float | None = None
@@ -326,6 +327,12 @@ class CompactionValueConfig:
             raise ValueError("Categorical bins and baseline timing overrides require a separate critic")
         if self.architecture not in {"shared", "separate"}:
             raise ValueError("training.value.architecture must be shared or separate")
+        if (not isinstance(self.gpu_ids, list)
+                or any(type(i) is not int or i < 0 for i in self.gpu_ids)
+                or len(set(self.gpu_ids)) != len(self.gpu_ids)):
+            raise ValueError("training.value.gpu_ids must contain unique nonnegative GPU IDs")
+        if self.gpu_ids and not self.separate:
+            raise ValueError("training.value.gpu_ids requires a separate critic")
         if self.architecture == "separate":
             if not self.enabled or not self.model_path:
                 raise ValueError("Separate critic requires value.enabled and value.model_path")
@@ -457,17 +464,22 @@ class TrainingConfig:
                 raise ValueError("Separate critic supports transformers or verl_ray with transformers/verl_fsdp")
             if not self.train_compaction_tokens:
                 raise ValueError("Separate MC preset requires all assistant tokens, including compactions")
-        supported = {"group_relative", "compaction_mc_value", "compaction_gae_value"}
+        supported = {"group_relative", "compaction_mc_value", "compaction_gae_value", "token_mc_value"}
         if self.advantage_estimator not in supported:
             raise ValueError(
                 f"training.advantage_estimator must be one of {sorted(supported)}, "
                 f"got {self.advantage_estimator!r}"
             )
-        if self.value.enabled != (self.advantage_estimator in {"compaction_mc_value", "compaction_gae_value"}):
+        if self.value.enabled != (self.advantage_estimator in {"compaction_mc_value", "compaction_gae_value", "token_mc_value"}):
             raise ValueError(
                 "training.value.enabled must be true exactly when "
-                "training.advantage_estimator is compaction_mc_value or compaction_gae_value"
+                "training.advantage_estimator is compaction_mc_value, compaction_gae_value or token_mc_value"
             )
+        if self.advantage_estimator == "token_mc_value" and (
+            not self.value.separate or self.value.num_bins != 2
+            or self.value.baseline_timing != "pre_fit" or self.value.reward_profile != "signed_binary"
+        ):
+            raise ValueError("Token MC requires a separate, signed two-bin pre_fit critic")
         if self.advantage_estimator == "compaction_gae_value" and (
             not self.value.separate or self.value.baseline_timing != "pre_fit"
         ):
@@ -500,6 +512,11 @@ class TrainConfig:
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
     def __post_init__(self):
+        if self.training.advantage_estimator == "token_mc_value" and (
+            self.benchmark.name != "browsecomp" or self.benchmark.reward_profile != "signed_binary"
+            or not self.rollout.require_exact_token_ids
+        ):
+            raise ValueError("Token MC requires BrowseComp signed rewards and exact collection IDs")
         # Resolve once; every trainer/worker receives the same critic contract.
         if self.training.value.reward_profile not in {"signed_binary", self.benchmark.reward_profile}:
             raise ValueError("Benchmark and value reward profiles disagree")

@@ -59,7 +59,9 @@ def initialization_binding(config, actor):
         online_value_config.pop("reward_profile")
     dataset_path = Path(config.dataset.decrypted_path or default_decrypted_path(config.experiment.bc_plus_root))
     return {
-        "version": 1, "actor_path": str(actor), "actor_id": checkpoint_id_from_path(actor),
+        "version": 1, **({"estimator": "token_mc_value", "state_anchor": "before_each_sampled_token"}
+            if config.training.advantage_estimator == "token_mc_value" else {}),
+        "actor_path": str(actor), "actor_id": checkpoint_id_from_path(actor),
         "actor_digest": source_critic_identity(actor, resume=False),
         "critic_path": str(Path(config.training.value.model_path).resolve()),
         "critic_digest": source_critic_identity(config.training.value.model_path, resume=False),
@@ -112,6 +114,9 @@ def prepare_dataset(config, actor, path, allowed_queries):
         queries.setdefault(query, set()).add(index)
         extracted = samples_from_rollout_rows([row], expected_checkpoint_id=checkpoint_id, retain_critic_only_states=True)
         validate_samples(extracted, config.training.max_sequence_length)
+        if config.training.advantage_estimator == "token_mc_value":
+            from .segment_returns import ordered_rollout_chains
+            ordered_rollout_chains([row], extracted)
         samples.extend(extracted)
     if (len(queries) != settings.task_count
             or any(indices != set(range(settings.samples_per_task)) for indices in queries.values())):
@@ -120,6 +125,10 @@ def prepare_dataset(config, actor, path, allowed_queries):
     random.Random(settings.seed).shuffle(ordered)
     held_out = set(ordered[:settings.validation_task_count])
     train, validation = [s for s in samples if s.query_id not in held_out], [s for s in samples if s.query_id in held_out]
+    if config.training.advantage_estimator == "token_mc_value" and (
+        not any(any(s.completion_mask) for s in train) or not any(any(s.completion_mask) for s in validation)
+    ):
+        raise ValueError("Token pretraining requires eligible tokens in both query splits")
     if not train or not validation:
         raise ValueError("Pretraining requires nonempty eligible fitting and validation states")
     manifest = {
@@ -285,12 +294,14 @@ def fit_pretraining(config, actor, rollout_path, output, allowed_queries, *, res
     critic = (trainer_factory or SeparateValueTrainer)(
         source, actor, value_config, dtype=config.model.dtype, device=device, resume=state is not None,
         activation_checkpointing=config.training.activation_checkpointing,
-        progress_path=str(output / "progress.json"), advantage_estimator="compaction_mc_value")
+        progress_path=str(output / "progress.json"), advantage_estimator=("token_mc_value" if config.training.advantage_estimator == "token_mc_value"
+                             else "compaction_mc_value"))
     if state is not None:
         _restore_rng(Path(source), critic.device)
-    train_rewards = {s.rollout_id: s.reward for s in train}
+    token_mode = config.training.advantage_estimator == "token_mc_value"
+    train_rewards = {s.rollout_id: s.reward for s in train if not token_mode or any(s.completion_mask)}
     prevalence = (sum(train_rewards.values()) / len(train_rewards) + 1) / 2
-    validation_rewards = {s.rollout_id: s.reward for s in validation}
+    validation_rewards = {s.rollout_id: s.reward for s in validation if not token_mode or any(s.completion_mask)}
     constant_brier = sum((prevalence - (r + 1) / 2) ** 2 for r in validation_rewards.values()) / len(validation_rewards)
 
     def evaluate(epoch, train_metrics=None):

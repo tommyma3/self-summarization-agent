@@ -43,6 +43,7 @@ from self_summarization_agent.value_model import (
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.value_optimizer import attach_value_head, value_learning_rate_metrics
+from self_summarization_agent.token_value import validate_token_advantages, advantage_mean, TokenAdvantages
 from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
 
@@ -69,8 +70,8 @@ def _report_progress(completed: int, total: int) -> bool:
 @dataclass(slots=True)
 class _PolicyBatch:
     flat_samples: list[RLSample]
-    advantages: list[float]
-    contributing: list[tuple[RLSample, float]]
+    advantages: list[float | TokenAdvantages]
+    contributing: list[tuple[RLSample, float | TokenAdvantages]]
 
 
 def compute_group_advantages(samples: list[RLSample]) -> list[float]:
@@ -162,7 +163,7 @@ def _metrics_without_update(batch: _PolicyBatch) -> UpdateMetrics:
     return UpdateMetrics(
         sample_count=len(batch.flat_samples),
         mean_reward=sum(sample.reward for sample in batch.flat_samples) / len(batch.flat_samples),
-        mean_advantage=sum(batch.advantages) / len(batch.advantages),
+        mean_advantage=advantage_mean(batch.advantages),
         loss=0.0,
     )
 
@@ -549,7 +550,11 @@ def _clipped_grpo_token_losses(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     reference_logprobs = reference_logprobs.to(device=logprobs.device, dtype=logprobs.dtype)
     reference_logprobs = _fit_reference_logprobs_to_shape(reference_logprobs, logprobs)
-    advantages = advantages.to(device=logprobs.device, dtype=logprobs.dtype).unsqueeze(-1)
+    advantages = advantages.to(device=logprobs.device, dtype=logprobs.dtype)
+    if advantages.ndim == 1:
+        advantages = advantages.unsqueeze(-1)
+    elif advantages.shape != logprobs.shape:
+        raise ValueError("Token advantages must align exactly with shifted logits")
     mask = completion_mask.to(device=logprobs.device, dtype=logprobs.dtype)
     ratio = torch.exp(logprobs - reference_logprobs)
     clipped_ratio = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
@@ -1193,7 +1198,9 @@ class TransformersPolicyTrainer:
                 raise ValueError("Separate critic actor update requires fitted advantages")
             samples = [s for group in grouped_samples.values() for s in group]
             validate_samples(samples, self.training_config.max_sequence_length, self.training_config.value.reward_profile)
-            advantages = validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile)
+            advantages = (validate_token_advantages(samples, fixed_advantages)
+                if self.training_config.advantage_estimator == "token_mc_value" else
+                validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile))
             batch = _PolicyBatch(samples, advantages, [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)])
         else:
             if fixed_advantages is not None:
@@ -1246,11 +1253,12 @@ class TransformersPolicyTrainer:
                     microbatch = batch.contributing[micro_start:micro_end]
                     microbatch_reference_logprobs = reference_token_logprobs[micro_start:micro_end]
                     samples = [sample for sample, _advantage in microbatch]
-                    advantages = torch.tensor(
-                        [advantage for _sample, advantage in microbatch],
-                        dtype=torch.float32,
-                        device=self._model_device(),
-                    )
+                    if self.training_config.advantage_estimator == "token_mc_value":
+                        advantages = _pad_1d_tensors([torch.tensor(a.dense(s), dtype=torch.float32,
+                            device=self._model_device()) for s, a in microbatch], pad_value=0.0)
+                    else:
+                        advantages = torch.tensor([a for _s, a in microbatch],
+                            dtype=torch.float32, device=self._model_device())
                     logprobs, completion_mask = self._sequence_token_logprobs_and_mask(samples)
                     losses, approx_kls, clipped, loss_mask = _clipped_grpo_token_losses(
                         logprobs,
@@ -1290,7 +1298,7 @@ class TransformersPolicyTrainer:
         return UpdateMetrics(
             sample_count=len(batch.flat_samples),
             mean_reward=sum(sample.reward for sample in batch.flat_samples) / len(batch.flat_samples),
-            mean_advantage=sum(batch.advantages) / len(batch.advantages),
+            mean_advantage=advantage_mean(batch.advantages),
             loss=sum(detached_losses) / len(detached_losses),
             optimizer_step_count=optimizer_step_count,
             mean_policy_kl=sum(detached_kls) / len(detached_kls),
@@ -1657,7 +1665,7 @@ class FSDP2ContextParallelPolicyTrainer:
         return UpdateMetrics(
             sample_count=len(batch.flat_samples),
             mean_reward=sum(sample.reward for sample in batch.flat_samples) / len(batch.flat_samples),
-            mean_advantage=sum(batch.advantages) / len(batch.advantages),
+            mean_advantage=advantage_mean(batch.advantages),
             loss=sum(detached_losses) / len(detached_losses),
             optimizer_step_count=optimizer_step_count,
             mean_policy_kl=sum(detached_kls) / len(detached_kls),

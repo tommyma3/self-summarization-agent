@@ -245,7 +245,7 @@ def run_train_step(
             config_path = Path(work) / "config.yaml"
             config_path.write_text(yaml.safe_dump(config_to_dict(config)))
             environment = os.environ.copy()
-            environment["CUDA_VISIBLE_DEVICES"] = str(config.training.value.gpu_id)
+            environment["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, config.training.value.gpu_ids or [config.training.value.gpu_id]))
             command = [sys.executable, "-m", "self_summarization_agent.critic_step",
                 "--config", str(config_path), "--checkpoint", str(checkpoint),
                 "--rollouts", str(Path(rollout_path).resolve()), "--output", str(output),

@@ -1,0 +1,35 @@
+{
+  "workload": {
+    "model": "Qwen3.5-0.8B",
+    "dtype": "bfloat16",
+    "intervals": 12,
+    "tokens_per_interval": 27000,
+    "epochs": 1,
+    "activation_checkpointing": true,
+    "hardware": "A100-SXM4-80GB",
+    "note": "Synthetic capacity probe; GPU 0 concurrently running an unrelated critic. One measurement per configuration, no warmup."
+  },
+  "results": {
+    "1": {
+      "value/sequence_prepare_seconds": 0.11720060277730227,
+      "value/update_seconds": 18.92947190720588,
+      "value/final_evaluation_seconds": 4.06885757856071,
+      "value/fit_seconds": 23.11561761982739,
+      "value/full_interval_tokens_per_second": 14016.49764798365,
+      "value/peak_memory_bytes": 7979206656,
+      "value/last_gradient_norm": 18.875,
+      "finite": true
+    },
+    "3": {
+      "value/sequence_prepare_seconds": 0.11600946169346571,
+      "value/update_seconds": 8.50551225244999,
+      "value/final_evaluation_seconds": 1.4682615576311946,
+      "value/fit_seconds": 10.089856537990272,
+      "value/full_interval_tokens_per_second": 32111.457559389175,
+      "value/peak_memory_bytes": 7980690432,
+      "value/last_gradient_norm": 18.875,
+      "finite": true
+    }
+  },
+  "fit_speedup": 2.2909758461671474
+}

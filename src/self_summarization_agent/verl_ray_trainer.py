@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from dataclasses import asdict, dataclass, field, replace
 import math
 import shutil
@@ -25,6 +27,7 @@ from self_summarization_agent.value_model import (
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.rewards import reward_bounds
+from self_summarization_agent.token_value import validate_token_advantages, advantage_mean, TokenAdvantages
 from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
 
@@ -491,9 +494,9 @@ def build_verl_value_actor_dataproto(
                 dtype=torch.float32,
             )
         old_log_probs.append(references)
-        advantage_tensors.append(
-            torch.full((len(response_tokens),), float(advantage), dtype=torch.float32)
-        )
+        advantage_tensors.append(torch.tensor(advantage.dense(sample), dtype=torch.float32)
+            if isinstance(advantage, TokenAdvantages) else
+            torch.full((len(response_tokens),), float(advantage), dtype=torch.float32))
         prefix_lengths.append(int(sample.state_prefix_length or 0))
         rewards.append(float(sample.reward))
 
@@ -1366,13 +1369,15 @@ class VerlRayPolicyTrainer:
         _validate_grpo_training_config(self.training_config)
         samples = _flatten_grouped_samples(grouped_samples)
         validate_samples(samples, self.training_config.max_sequence_length, self.training_config.value.reward_profile)
-        advantages = validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile)
+        advantages = (validate_token_advantages(samples, fixed_advantages)
+                if self.training_config.advantage_estimator == "token_mc_value" else
+                validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile))
         if self.training_config.verl.worker_backend != "verl_fsdp":
             return _metrics_from_dict(self._ray.get(self._actor.step_fixed.remote(grouped_samples, fixed_advantages)))
         contributing = [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)]
         metrics = UpdateMetrics(sample_count=len(samples),
             mean_reward=sum(s.reward for s in samples) / max(1, len(samples)),
-            mean_advantage=sum(advantages) / max(1, len(samples)), loss=0.0)
+            mean_advantage=advantage_mean(advantages), loss=0.0)
         if not contributing:
             return metrics
 

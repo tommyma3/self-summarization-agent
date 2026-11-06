@@ -26,6 +26,10 @@ FROZEN_TARGETS = "frozen_value_targets.json"
 
 
 def method_spec(config, estimator="compaction_mc_value"):
+    if estimator == "token_mc_value":
+        return {"estimator": estimator, "granularity": "token", "state_anchor": "before_each_sampled_token",
+                "class_order": [-1, 1], "support": [-1.0, 1.0], "num_bins": 2,
+                "baseline_timing": "pre_fit", "weighting": "rollout/interval/token", "gamma": 1.0}
     return {"estimator": estimator, "baseline_timing": config.baseline_timing,
             "num_bins": config.num_bins, "support": value_support(config.num_bins, config.reward_profile),
             **({"reward_profile": config.reward_profile} if config.reward_profile != "signed_binary" else {}),
@@ -129,6 +133,9 @@ def validate_advantages(samples, advantages, reward_profile="signed_binary"):
 
 def load_advantages(path, samples, behavior_id, value_config, *, estimator="compaction_mc_value",
                     chains=None, source_identity=None):
+    if estimator == "token_mc_value":
+        from .token_value_artifacts import load_token_advantages
+        return load_token_advantages(path, samples, behavior_id, value_config, source_identity)
     body = json.loads(Path(path).read_text())
     if body.get("version") == 2:
         frozen = json.loads((Path(path).parent / FROZEN_TARGETS).read_text())
@@ -252,7 +259,11 @@ def separate_checkpoint_complete(path, *, expected_id=None):
             if (pair.get("advantages_digest") != digest(advantages)
                     or advantages.get("critic_identity") != manifest.get("identity")):
                 return False
-            if method["baseline_timing"] == "pre_fit":
+            if method.get("estimator") == "token_mc_value":
+                from .token_value_artifacts import verify_token_pair
+                if not verify_token_pair(path, pair, manifest, advantages):
+                    return False
+            elif method["baseline_timing"] == "pre_fit":
                 frozen = json.loads((path / FROZEN_TARGETS).read_text())
                 if (advantages.get("version") != 2 or frozen.get("version") != 2
                         or frozen.get("digest") != digest({k: v for k, v in frozen.items() if k != "digest"})

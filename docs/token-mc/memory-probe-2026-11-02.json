@@ -1,0 +1,118 @@
+{
+  "value/epoch_1/target_ce": 0.6931475400924683,
+  "value/eval_after/token_count": 26969,
+  "value/eval_after/state_count": 1,
+  "value/eval_after/empty_interval_count": 0,
+  "value/eval_after/rollout_count": 1,
+  "value/eval_after/weight_sum": 1.0,
+  "value/eval_after/bce": 0.6587932000829795,
+  "value/eval_after/ce": 0.6587932000829795,
+  "value/eval_after/brier_score": 0.23282994637561316,
+  "value/eval_after/value_mse": 0.9313197855024526,
+  "value/eval_after/mean_value": 0.03495110219036531,
+  "value/eval_after/mean_reward": 1.0,
+  "value/eval_after/explained_variance": null,
+  "value/eval_after/calibration_bins": [
+    {
+      "lower": 0.0,
+      "upper": 0.1,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.1,
+      "upper": 0.2,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.2,
+      "upper": 0.3,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.3,
+      "upper": 0.4,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.4,
+      "upper": 0.5,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.5,
+      "upper": 0.6,
+      "count": 26969,
+      "weight_mass": 1.0,
+      "predicted_success": 0.5174755510951827,
+      "observed_success": 1.0
+    },
+    {
+      "lower": 0.6,
+      "upper": 0.7,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.7,
+      "upper": 0.8,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.8,
+      "upper": 0.9,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    },
+    {
+      "lower": 0.9,
+      "upper": 1.0,
+      "count": 0,
+      "weight_mass": 0.0,
+      "predicted_success": null,
+      "observed_success": null
+    }
+  ],
+  "value/eval_after/calibration_error": 0.48252444890481727,
+  "value/optimizer_step_count": 1,
+  "value/total_optimizer_steps": 1,
+  "value/fit_seconds": 88.97427535895258,
+  "value/last_gradient_norm": 99.0,
+  "value/effective_weight_mass": 1.0,
+  "value/padded_tokens": 27000,
+  "value/tokens_per_second": 303.1100831245644,
+  "value/peak_memory_bytes": 7976892928,
+  "probe_kind": "synthetic_production_length_critic_only",
+  "total_seconds": 99.06841531395912,
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "finite": true,
+  "value/kernels/model_type": "qwen3_5_text",
+  "value/kernels/attention_backend": "sdpa",
+  "value/activation_checkpointing": true,
+  "value/kernels/fast_path_available": true,
+  "value/kernels/causal_conv1d_fn_available": true,
+  "value/kernels/causal_conv1d_update_available": true,
+  "value/kernels/chunk_gated_delta_rule_available": true,
+  "value/kernels/fused_recurrent_gated_delta_rule_available": true
+}
