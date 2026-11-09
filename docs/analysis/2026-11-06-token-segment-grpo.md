@@ -20,6 +20,10 @@ This report reads the three named runs, current estimator implementations, saved
 | Latest generated tokens / question | 3,959 | **3,212** | 3,838 |
 | Latest budget tokens / question, including tool content | 34,446 | 33,550 | **27,923** |
 
+![Held-out accuracy for token-level critic, segment-level critic, and GRPO](token-segment-grpo-assets/held-out-accuracy.png)
+
+Standalone accuracy figure: [PDF](token-segment-grpo-assets/held-out-accuracy.pdf) · [SVG](token-segment-grpo-assets/held-out-accuracy.svg). Points show the original unsmoothed checkpoint evaluations.
+
 ![Accuracy, malformed rate, and recorded pipeline cost](token-segment-grpo-assets/comparison.png)
 
 The cost sums include critic pretraining, collection, evaluation, judging, and actor/critic updates; they exclude failed attempts and idle restart gaps. They are pipeline durations, not normalized GPU-hours. Token MC costs about 25% more than GAE and 53% more than GRPO in these records. Its online critic subprocess is approximately 11.6 times as expensive as the segment critic. Different batching, offload, collection concurrency, trajectory lengths, and actor step counts prevent attributing every timing difference to estimator choice.
@@ -79,3 +83,5 @@ A staged experiment plan:
 **Evidence and reproduction.** `scripts/analyze_token_segment_grpo.py` verifies 9,000 saved evaluation outcomes against aggregate counts, reads 18,000 training outcomes, checks identical evaluation questions/text and sampling profiles, matching training question sets at every update, and no evaluation overlap with policy training or critic pretraining. It saves metric snapshots and SHA-256 hashes, paired statistics, a per-question CSV, and PNG/SVG/PDF figures in `docs/analysis/token-segment-grpo-assets`. Separately, the final token advantage arithmetic and final segment GAE recurrence were independently checked. This is not a full re-audit of all token ledgers, source versions, or judge semantics. Initial accuracies differ despite the nominally common base model; immutable source/environment fingerprints and fresh matched runs remain necessary for a causal algorithm comparison.
 
 Run `.venv/bin/python scripts/analyze_token_segment_grpo.py` from the repository root to regenerate the numerical comparison. The script reads existing trajectories and writes only derived analysis files.
+
+Regenerate only the figures from saved metric snapshots with `.venv/bin/python scripts/analyze_token_segment_grpo.py --plots-only`.

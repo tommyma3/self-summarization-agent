@@ -1,6 +1,7 @@
 """Compare saved runs without modifying trajectories or loading models.
 Run with .venv/bin/python scripts/analyze_token_segment_grpo.py.
 """
+import argparse
 import hashlib
 import itertools
 import json
@@ -15,9 +16,88 @@ from analyze_gae_ppo_vs_grpo import compact_rows, jsonl, write_csv
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'docs/analysis/token-segment-grpo-assets'
 RUNS = {'token': 'qwen-bcplus-token-mc-ppo', 'gae': 'qwen-bcplus-compact-separate-gae-ppo', 'grpo': 'qwen-bcplus-train'}
-LABELS = {'token':'Token MC PPO', 'gae':'Segment GAE PPO', 'grpo':'GRPO'}
+LABELS = {'token':'token-level critic', 'gae':'segment-level critic', 'grpo':'GRPO'}
+
+def plot_held_out_accuracy(ev):
+    """Export measured checkpoint accuracy without smoothing or interpolation."""
+    colors = {'token': '#7856A5', 'gae': '#D56A32', 'grpo': '#247BA0'}
+    markers = {'token': 'o', 'gae': 's', 'grpo': '^'}
+    with plt.rc_context({
+        'font.family': 'DejaVu Sans', 'font.size': 11,
+        'axes.labelcolor': '#303846', 'text.color': '#202936',
+        'xtick.color': '#556170', 'ytick.color': '#556170',
+        'pdf.fonttype': 42, 'ps.fonttype': 42, 'svg.fonttype': 'none',
+    }):
+        fig, ax = plt.subplots(figsize=(9, 5.8))
+        fig.subplots_adjust(left=.105, right=.97, bottom=.23, top=.76)
+        fig.text(.105, .935, 'Held-out accuracy', fontsize=20, weight='bold')
+        fig.text(.105, .885, '100 shared questions  ·  Greedy decoding',
+                 fontsize=11, color='#556170')
+        for method in RUNS:
+            rows = ev[method]
+            ax.plot(
+                [r['iteration'] for r in rows],
+                [100 * r['eval_accuracy'] for r in rows],
+                label=LABELS[method], color=colors[method],
+                linewidth=2, marker=markers[method], markersize=4.5,
+                markeredgecolor='white', markeredgewidth=.6,
+            )
+        ax.set(xlabel='Evaluated checkpoint', ylabel='Accuracy (%)',
+               xlim=(-.5, 29.5), ylim=(0, 50))
+        ax.set_xticks([0, 5, 10, 15, 20, 25, 29])
+        ax.set_yticks(range(0, 51, 10))
+        ax.set_axisbelow(True)
+        ax.grid(axis='y', color='#E3E7ED', linewidth=.8)
+        ax.spines[['top', 'right']].set_visible(False)
+        for side in ['bottom', 'left']:
+            ax.spines[side].set_color('#C9D0D9')
+        ax.tick_params(length=0, pad=8)
+        ax.xaxis.labelpad = 10
+        ax.yaxis.labelpad = 10
+        ax.legend(loc='lower left', bbox_to_anchor=(0, 1.025),
+                  ncol=3, frameon=False, borderaxespad=0,
+                  handlelength=2.4, columnspacing=1.8)
+        fig.text(.105, .045,
+                 'Points show unsmoothed evaluations. One training seed per method.\n'
+                 'Last saved policy evaluation: checkpoint 29.',
+                 fontsize=9, color='#66717F', linespacing=1.6)
+        for suffix in ['png', 'svg', 'pdf']:
+            fig.savefig(OUT / f'held-out-accuracy.{suffix}', dpi=300,
+                        facecolor='white')
+        plt.close(fig)
+
+
+def plot_comparison(ev):
+    colors={'token':'#8556b5','gae':'#cc6336','grpo':'#2679ad'}
+    fig,axs=plt.subplots(1,3,figsize=(14,4.3))
+    for m,rows in ev.items():
+        x=[r['iteration'] for r in rows]
+        axs[0].plot(x,[100*r['eval_accuracy'] for r in rows],label=LABELS[m],color=colors[m],linewidth=1.7)
+        axs[1].plot(x,[r['eval_malformed'] for r in rows],color=colors[m],linewidth=1.7)
+        ph=jsonl(OUT/f'{m}-phase_timings.jsonl')
+        hours=[sum(p['elapsed_seconds'] for p in ph if p.get('exit_code',0)==0 and (p['phase']=='value_pretraining' or p.get('iteration',999)<=i))/3600 for i in x]
+        axs[2].plot(hours,[100*r['eval_accuracy'] for r in rows],color=colors[m],linewidth=1.7)
+    for ax,title in zip(axs,['Held-out accuracy','Malformed trajectories','Accuracy vs recorded pipeline cost']):
+        ax.set_title(title,loc='left',fontsize=12);ax.grid(alpha=.2);ax.spines[['top','right']].set_visible(False)
+    axs[0].set(ylabel='Correct (%)',xlabel='Evaluated checkpoint',ylim=(0,55))
+    axs[1].set(ylabel='Malformed (%)',xlabel='Evaluated checkpoint',ylim=(0,80))
+    axs[2].set(ylabel='Correct (%)',xlabel='Successful phase hours to produce checkpoint',ylim=(0,55))
+    axs[0].legend(fontsize=9,loc='lower right')
+    fig.text(.02,.015,'Same 100 questions; greedy decoding; one training seed each. Checkpoint 30 has no saved policy evaluation. Cost is not normalized GPU-hours.',fontsize=9)
+    fig.tight_layout(rect=(0,.055,1,1))
+    for suffix in ['png','svg','pdf']: fig.savefig(OUT/f'comparison.{suffix}',dpi=180)
+    plt.close(fig)
+    plot_held_out_accuracy(ev)
+
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--plots-only", action="store_true",
+                        help="Regenerate figures from saved metric snapshots.")
+    args = parser.parse_args()
+    if args.plots_only:
+        plot_comparison({m: jsonl(OUT / f"{m}-eval_metrics.jsonl") for m in RUNS})
+        return
     OUT.mkdir(parents=True, exist_ok=True)
     ev, outcomes, training, summaries, sources, checks = {}, {}, {}, {}, [], {}
     reference = None
@@ -89,25 +169,7 @@ def main():
     (OUT/'summary.json').write_text(json.dumps(body,indent=2)+'\n')
     (OUT/'sources.json').write_text(json.dumps(sources,indent=2)+'\n')
     write_csv(OUT/'per-question.csv',[dict(method=m,checkpoint=i,query_id=q,correct=int(r['outcome']=='correct_answer'),malformed=int(r['outcome']=='malformed_tool_call')) for m in RUNS for i,rs in outcomes[m].items() for q,r in rs.items()])
-    colors={'token':'#8556b5','gae':'#cc6336','grpo':'#2679ad'}
-    fig,axs=plt.subplots(1,3,figsize=(14,4.3))
-    for m,rows in ev.items():
-        x=[r['iteration'] for r in rows]
-        axs[0].plot(x,[100*r['eval_accuracy'] for r in rows],label=LABELS[m],color=colors[m],linewidth=1.7)
-        axs[1].plot(x,[r['eval_malformed'] for r in rows],color=colors[m],linewidth=1.7)
-        ph=jsonl(OUT/f'{m}-phase_timings.jsonl')
-        hours=[sum(p['elapsed_seconds'] for p in ph if p.get('exit_code',0)==0 and (p['phase']=='value_pretraining' or p.get('iteration',999)<=i))/3600 for i in x]
-        axs[2].plot(hours,[100*r['eval_accuracy'] for r in rows],color=colors[m],linewidth=1.7)
-    for ax,title in zip(axs,['Held-out accuracy','Malformed trajectories','Accuracy vs recorded pipeline cost']):
-        ax.set_title(title,loc='left',fontsize=12);ax.grid(alpha=.2);ax.spines[['top','right']].set_visible(False)
-    axs[0].set(ylabel='Correct (%)',xlabel='Evaluated checkpoint',ylim=(0,55))
-    axs[1].set(ylabel='Malformed (%)',xlabel='Evaluated checkpoint',ylim=(0,80))
-    axs[2].set(ylabel='Correct (%)',xlabel='Successful phase hours to produce checkpoint',ylim=(0,55))
-    axs[0].legend(fontsize=9,loc='lower right')
-    fig.text(.02,.015,'Same 100 questions; greedy decoding; one training seed each. Checkpoint 30 has no saved policy evaluation. Cost is not normalized GPU-hours.',fontsize=9)
-    fig.tight_layout(rect=(0,.055,1,1))
-    for suffix in ['png','svg','pdf']: fig.savefig(OUT/f'comparison.{suffix}',dpi=180)
-    plt.close(fig)
+    plot_comparison(ev)
     print(json.dumps({'paired':paired,'checks':checks,'critic_mean_seconds':{m:s['critic_seconds_mean'] for m,s in summaries.items()}},indent=2))
 
 if __name__=='__main__': main()
