@@ -1,0 +1,214 @@
+{
+  "kind": "synthetic_actor_capacity_probe",
+  "full_input_tokens": 65536,
+  "shifted_training_tokens": 65535,
+  "model": "/124090467/Qwen/Qwen3.5-9B",
+  "world_size": 4,
+  "sequence_parallel_size": 4,
+  "dtype": "bfloat16",
+  "activation_checkpointing": true,
+  "param_offload": true,
+  "optimizer_offload": true,
+  "worker_config": {
+    "compaction_value": {
+      "enabled": false,
+      "reward_profile": "signed_binary",
+      "loss_coefficient": 0.5,
+      "head_learning_rate": null,
+      "zero_initialize_head": true,
+      "state_anchor": "first_generation_prompt_end"
+    },
+    "model": {
+      "_target_": "verl.workers.config.HFModelConfig",
+      "path": "/124090467/Qwen/Qwen3.5-9B",
+      "trust_remote_code": false,
+      "enable_gradient_checkpointing": true,
+      "use_remove_padding": true
+    },
+    "actor": {
+      "_target_": "verl.workers.config.FSDPActorConfig",
+      "strategy": "fsdp",
+      "ppo_mini_batch_size": 1,
+      "ppo_micro_batch_size_per_gpu": 1,
+      "use_dynamic_bsz": true,
+      "ppo_max_token_len_per_gpu": 16384,
+      "clip_ratio": 0.2,
+      "clip_ratio_low": 0.2,
+      "clip_ratio_high": 0.2,
+      "clip_ratio_c": 3.0,
+      "ppo_epochs": 1,
+      "shuffle": false,
+      "grad_clip": 1.0,
+      "entropy_coeff": 0.0,
+      "calculate_entropy": false,
+      "use_kl_loss": false,
+      "use_torch_compile": false,
+      "ulysses_sequence_parallel_size": 4,
+      "use_remove_padding": true,
+      "rollout_n": 4,
+      "loss_agg_mode": "token-mean",
+      "optim": {
+        "_target_": "verl.workers.config.FSDPOptimizerConfig",
+        "lr": 1e-06,
+        "clip_grad": 1.0,
+        "total_training_steps": 10,
+        "weight_decay": 0.0,
+        "lr_scheduler_type": "constant"
+      },
+      "fsdp_config": {
+        "_target_": "verl.workers.config.FSDPEngineConfig",
+        "strategy": "fsdp",
+        "dtype": "bfloat16",
+        "model_dtype": "bfloat16",
+        "param_offload": true,
+        "optimizer_offload": true,
+        "fsdp_size": -1,
+        "use_torch_compile": false,
+        "ulysses_sequence_parallel_size": 4,
+        "forward_prefetch": true
+      },
+      "checkpoint": {
+        "_target_": "verl.trainer.config.CheckpointConfig",
+        "save_contents": [
+          "hf_model"
+        ],
+        "load_contents": [
+          "model"
+        ],
+        "async_save": false
+      }
+    },
+    "rollout": {
+      "_target_": "verl.workers.config.RolloutConfig",
+      "name": "hf",
+      "mode": "sync",
+      "n": 4,
+      "log_prob_micro_batch_size_per_gpu": 1,
+      "log_prob_use_dynamic_bsz": true,
+      "log_prob_max_token_len_per_gpu": 16384,
+      "checkpoint_engine": {
+        "_target_": "verl.workers.config.CheckpointEngineConfig",
+        "backend": "naive",
+        "update_weights_bucket_megabytes": 2048,
+        "engine_kwargs": {}
+      }
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "seconds": 44.513994864188135,
+      "metrics": {
+        "actor/pg_clipfrac": 0.18759441375732422,
+        "actor/ppo_kl": 1.1613651514053345,
+        "actor/pg_clipfrac_lower": 0.0,
+        "actor/pg_loss": -0.493926465511322,
+        "loss": -0.493926465511322,
+        "grad_norm": 1720.0,
+        "lr": 1e-06,
+        "perf/max_memory_allocated_gb": 43.58167123794556,
+        "perf/max_memory_reserved_gb": 62.6875,
+        "perf/cpu_memory_used_gb": 86.31396865844727,
+        "mfu": 0.0
+      },
+      "per_rank_memory": [
+        {
+          "rank": 0,
+          "peak_allocated_gib": 43.58167123794556,
+          "peak_reserved_gib": 62.6875,
+          "allocated_gib": 0.017824172973632812
+        },
+        {
+          "rank": 1,
+          "peak_allocated_gib": 43.58167123794556,
+          "peak_reserved_gib": 62.6875,
+          "allocated_gib": 0.017824172973632812
+        },
+        {
+          "rank": 2,
+          "peak_allocated_gib": 43.58167123794556,
+          "peak_reserved_gib": 62.6875,
+          "allocated_gib": 0.017824172973632812
+        },
+        {
+          "rank": 3,
+          "peak_allocated_gib": 43.58167123794556,
+          "peak_reserved_gib": 62.6875,
+          "allocated_gib": 0.017824172973632812
+        }
+      ]
+    },
+    {
+      "step": 2,
+      "seconds": 16.007462942041457,
+      "metrics": {
+        "actor/pg_clipfrac": 0.1893034279346466,
+        "actor/ppo_kl": 1.1470122337341309,
+        "actor/pg_clipfrac_lower": 0.0,
+        "actor/pg_loss": -0.49754565954208374,
+        "loss": -0.49754565954208374,
+        "grad_norm": 11.0,
+        "lr": 1e-06,
+        "perf/max_memory_allocated_gb": 52.35422325134277,
+        "perf/max_memory_reserved_gb": 71.5546875,
+        "perf/cpu_memory_used_gb": 129.07452011108398,
+        "mfu": 0.0
+      },
+      "per_rank_memory": [
+        {
+          "rank": 0,
+          "peak_allocated_gib": 52.35422325134277,
+          "peak_reserved_gib": 71.5546875,
+          "allocated_gib": 0.017824172973632812
+        },
+        {
+          "rank": 1,
+          "peak_allocated_gib": 52.35422325134277,
+          "peak_reserved_gib": 71.59375,
+          "allocated_gib": 0.017824172973632812
+        },
+        {
+          "rank": 2,
+          "peak_allocated_gib": 52.35422325134277,
+          "peak_reserved_gib": 71.59375,
+          "allocated_gib": 0.017824172973632812
+        },
+        {
+          "rank": 3,
+          "peak_allocated_gib": 52.35422325134277,
+          "peak_reserved_gib": 71.49609375,
+          "allocated_gib": 0.017824172973632812
+        }
+      ]
+    }
+  ],
+  "status": "passed",
+  "initialization_seconds": 61.55111570749432,
+  "initial_memory": [
+    {
+      "rank": 0,
+      "peak_allocated_gib": 12.125887393951416,
+      "peak_reserved_gib": 12.892578125,
+      "allocated_gib": 1.430511474609375e-06
+    },
+    {
+      "rank": 1,
+      "peak_allocated_gib": 12.125887393951416,
+      "peak_reserved_gib": 12.228515625,
+      "allocated_gib": 1.430511474609375e-06
+    },
+    {
+      "rank": 2,
+      "peak_allocated_gib": 12.125887393951416,
+      "peak_reserved_gib": 12.228515625,
+      "allocated_gib": 1.430511474609375e-06
+    },
+    {
+      "rank": 3,
+      "peak_allocated_gib": 12.125887393951416,
+      "peak_reserved_gib": 12.228515625,
+      "allocated_gib": 1.430511474609375e-06
+    }
+  ],
+  "total_seconds": 122.2267816606909
+}

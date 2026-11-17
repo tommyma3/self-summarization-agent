@@ -1,0 +1,66 @@
+{
+  "grpo": {
+    "initial_accuracy": 0.15,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.39,
+    "last_malformed": 0.31,
+    "mean_1_24": 0.31958333333333333,
+    "mean_20_29": 0.33
+  },
+  "none": {
+    "initial_accuracy": 0.14,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.36,
+    "last_malformed": 0.32,
+    "mean_1_24": 0.3333333333333333,
+    "mean_20_29": 0.32799999999999996
+  },
+  "6k": {
+    "initial_accuracy": 0.08,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.3,
+    "last_malformed": 0.48,
+    "mean_1_24": 0.2841666666666667,
+    "mean_20_29": 0.31999999999999995
+  },
+  "24k": {
+    "initial_accuracy": 0.18,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.38,
+    "last_malformed": 0.24,
+    "mean_1_24": 0.375,
+    "mean_20_29": 0.354
+  },
+  "no_loss": {
+    "initial_accuracy": 0.16,
+    "last_checkpoint": 24,
+    "last_accuracy": 0.34,
+    "last_malformed": 0.3,
+    "mean_1_24": 0.3333333333333333,
+    "mean_20_29": 0.336
+  },
+  "segment": {
+    "initial_accuracy": 0.14,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.45,
+    "last_malformed": 0.08,
+    "mean_1_24": 0.3154166666666667,
+    "mean_20_29": 0.382
+  },
+  "token": {
+    "initial_accuracy": 0.13,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.41,
+    "last_malformed": 0.1,
+    "mean_1_24": 0.3433333333333333,
+    "mean_20_29": 0.375
+  },
+  "grpo_common50": {
+    "initial_accuracy": 0.16,
+    "last_checkpoint": 29,
+    "last_accuracy": 0.4,
+    "last_malformed": 0.26,
+    "mean_1_24": 0.3425,
+    "mean_20_29": 0.354
+  }
+}
