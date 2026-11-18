@@ -7,10 +7,10 @@ from self_summarization_agent.value_diagnostics import prediction_metrics, value
 
 
 def test_rollout_weighted_diagnostics_and_calibration():
-    m = prediction_metrics([-1, 1, 1, 1], [0] * 4, [math.log(2)] * 4, ["a", "b", "b", "b"])
+    m = prediction_metrics([0, 1, 1, 1], [0.5] * 4, [math.log(2)] * 4, ["a", "b", "b", "b"])
     assert m["bce"] == pytest.approx(math.log(2))
     assert m["brier_score"] == pytest.approx(0.25)
-    assert m["mean_reward"] == pytest.approx(0)
+    assert m["mean_reward"] == pytest.approx(0.5)
     assert m["explained_variance"] == pytest.approx(0)
     assert m["classification_accuracy"] == pytest.approx(0.5)
     assert m["calibration_error"] == pytest.approx(0)
@@ -18,7 +18,7 @@ def test_rollout_weighted_diagnostics_and_calibration():
 
 
 def test_perfect_predictions_and_constant_targets():
-    m = prediction_metrics([-1, 1], [-1, 1], [0, 0], ["a", "b"])
+    m = prediction_metrics([0, 1], [0, 1], [0, 0], ["a", "b"])
     assert m["brier_score"] == 0
     assert m["explained_variance"] == pytest.approx(1)
     assert m["calibration_error"] == 0
@@ -27,14 +27,14 @@ def test_perfect_predictions_and_constant_targets():
 
 
 def test_bce_uses_logits_loss_even_when_value_saturates():
-    m = prediction_metrics([-1], [1], [100], ["a"])
+    m = prediction_metrics([0], [1], [100], ["a"])
     assert m["bce"] == 100
     assert m["brier_score"] == 1
 
 
 def test_state_strata_and_legacy_unknown_are_explicit():
     samples = [
-        SimpleNamespace(rollout_id="a", reward=-1, state_kind="initial"),
+        SimpleNamespace(rollout_id="a", reward=0, state_kind="initial"),
         SimpleNamespace(rollout_id="b", reward=1, state_kind="post_compaction"),
         SimpleNamespace(rollout_id="b", reward=1),
     ]

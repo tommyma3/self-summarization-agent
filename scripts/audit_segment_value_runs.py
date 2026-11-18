@@ -80,6 +80,7 @@ def audit_frozen(run, max_iteration=None):
 
 def audit_judges(run, max_iteration):
     from self_summarization_agent.judge import parse_judge_response
+    from self_summarization_agent.rewards import read_rollout_reward
     stats = Counter()
     mismatches = []
     examples = []
@@ -98,8 +99,8 @@ def audit_judges(run, max_iteration):
             stats['stored_parse_errors'] += bool(judge.get('parse_error'))
             raw = judge.get('judge_response')
             outcome = judge['outcome']
-            expected_reward = 1 if outcome == 'correct_answer' else -1
-            if any(r != expected_reward for r in row['turn_rewards'].values()):
+            expected_reward = 1 if outcome == 'correct_answer' else 0
+            if any(read_rollout_reward(r) != expected_reward for r in row['turn_rewards'].values()):
                 mismatches.append({'file': path.name, 'query': row['query_id'], 'kind': 'reward'})
             stats['intervals'] += len(row['turn_rewards'])
             if not raw:

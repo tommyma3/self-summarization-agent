@@ -15,7 +15,7 @@ from self_summarization_agent.value_model import (
     VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME, value_support, value_head_manifest,
 )
 
-from .rewards import reward_bounds, rollout_reward_values
+from .rewards import BINARY_REWARD, reward_bounds, rollout_reward_values
 
 CRITIC_DIR = "critic"
 CRITIC_STATE = "training_state.pt"
@@ -28,11 +28,12 @@ FROZEN_TARGETS = "frozen_value_targets.json"
 def method_spec(config, estimator="compaction_mc_value"):
     if estimator == "token_mc_value":
         return {"estimator": estimator, "granularity": "token", "state_anchor": "before_each_sampled_token",
-                "class_order": [-1, 1], "support": [-1.0, 1.0], "num_bins": 2,
+                "class_order": [0, 1], "support": value_support(2, config.reward_profile), "num_bins": 2,
+                "reward_profile": config.reward_profile,
                 "baseline_timing": "pre_fit", "weighting": "rollout/interval/token", "gamma": 1.0}
     return {"estimator": estimator, "baseline_timing": config.baseline_timing,
             "num_bins": config.num_bins, "support": value_support(config.num_bins, config.reward_profile),
-            **({"reward_profile": config.reward_profile} if config.reward_profile != "signed_binary" else {}),
+            "reward_profile": config.reward_profile,
             "encoding": "two_hot", "gamma": 1.0,
             "lambda": config.gae_lambda if estimator == "compaction_gae_value" else 1.0}
 
@@ -56,19 +57,6 @@ def source_critic_identity(source, *, resume):
     return result.hexdigest()
 
 
-def _legacy_config_fingerprints(config):
-    current = asdict(config)
-    candidates = {digest(current)}
-    if config.reward_profile == "signed_binary":
-        candidates.add(digest({k: v for k, v in current.items() if k != "reward_profile"}))
-    if config.reward_profile == "signed_binary" and config.num_bins == 2 and config.baseline_timing == "post_fit" and config.gae_lambda == 0.95:
-        candidates.add(digest({k: v for k, v in current.items()
-                               if k not in {"num_bins", "baseline_timing", "gae_lambda"}}))
-        candidates.add(digest({k: v for k, v in current.items()
-                               if k not in {"num_bins", "baseline_timing", "gae_lambda", "reward_profile"}}))
-    return candidates
-
-
 def atomic_json(path, body):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +73,7 @@ def sample_key(sample):
     return (str(sample.rollout_id), sample.turn_id)
 
 
-def validate_samples(samples, max_sequence_length=None, reward_profile="signed_binary"):
+def validate_samples(samples, max_sequence_length=None, reward_profile=BINARY_REWARD):
     seen, rewards = set(), {}
     allowed_rewards = rollout_reward_values(reward_profile)
     for sample in samples:
@@ -93,7 +81,8 @@ def validate_samples(samples, max_sequence_length=None, reward_profile="signed_b
         if sample.rollout_id is None or key in seen:
             raise ValueError("Separate critic requires unique rollout/interval keys")
         seen.add(key)
-        if sample.reward not in allowed_rewards or rewards.setdefault(sample.rollout_id, sample.reward) != sample.reward:
+        if (isinstance(sample.reward, bool) or sample.reward not in allowed_rewards
+                or rewards.setdefault(sample.rollout_id, sample.reward) != sample.reward):
             raise ValueError("Separate critic requires consistent valid rollout rewards")
         if not sample.has_exact_collection_tokens or not sample.has_token_reference_logprobs:
             raise ValueError("Separate critic requires exact collected IDs and cached token log probabilities")
@@ -121,14 +110,14 @@ def sample_fingerprint(samples):
     } for s in samples])
 
 
-def validate_advantages(samples, advantages, reward_profile="signed_binary"):
+def validate_advantages(samples, advantages, reward_profile=BINARY_REWARD):
     keys = [sample_key(s) for s in samples]
     if len(set(keys)) != len(keys) or set(keys) != set(advantages):
         raise ValueError("Fixed advantages must cover exactly the unique interval keys")
     values = [float(advantages[k]) for k in keys]
     low, high = reward_bounds(reward_profile)
     if any(not math.isfinite(x) or abs(x) > high - low for x in values):
-        raise ValueError("MC advantages must be finite and in [-2, 2]")
+        raise ValueError("Value-based advantages must be finite and in [-1, 1]")
     return values
 
 
@@ -152,10 +141,10 @@ def load_advantages(path, samples, behavior_id, value_config, *, estimator="comp
             raise ValueError("Frozen advantages belong to a different critic")
         return {tuple(row["key"]): row["advantage"] for row in frozen["rows"]}, body.get("metrics", {})
     if estimator != "compaction_mc_value" or value_config.baseline_timing != "post_fit":
-        raise ValueError("Legacy fitted advantages cannot supply pre-fit/GAE training")
+        raise ValueError("Post-fit advantages cannot supply pre-fit/GAE training")
     if (body.get("version") != 1 or body.get("behavior_checkpoint_id") != behavior_id
             or body.get("sample_fingerprint") != sample_fingerprint(samples)
-            or body.get("config_fingerprint") not in _legacy_config_fingerprints(value_config)):
+            or body.get("config_fingerprint") != digest(asdict(value_config))):
         raise ValueError("Fitted advantage provenance mismatch")
     rows = body["rows"]
     result = {tuple(row["key"]): row["advantage"] for row in rows}
@@ -202,7 +191,7 @@ def validate_frozen_targets(body, samples, behavior_id, config, estimator, *, ch
             or body.get("behavior_checkpoint_id") != behavior_id
             or body.get("source_critic_identity") != source_identity
             or body.get("sample_fingerprint") != sample_fingerprint(samples)
-            or body.get("config_fingerprint") not in _legacy_config_fingerprints(config)
+            or body.get("config_fingerprint") != digest(asdict(config))
             or body.get("method") != method_spec(config, estimator)
             or body.get("chains") != chains or body.get("chain_fingerprint") != digest(chains)):
         raise ValueError("Frozen target provenance mismatch")
@@ -249,11 +238,11 @@ def separate_checkpoint_complete(path, *, expected_id=None):
             method = manifest["method"]
             bins = method["num_bins"]
             head = json.loads((critic / VALUE_HEAD_MANIFEST_FILENAME).read_text())
-            if (method["support"] != value_support(bins, method.get("reward_profile", "signed_binary"))
-                    or head != value_head_manifest(head["hidden_size"], bins, method.get("reward_profile", "signed_binary"))
+            if (method["support"] != value_support(bins, method.get("reward_profile", BINARY_REWARD))
+                    or head != value_head_manifest(head["hidden_size"], bins, method.get("reward_profile", BINARY_REWARD))
                     or pair.get("method") != method or pair.get("version") != 2):
                 return False
-            if method.get("reward_profile") == "binary_zero_one" and not (
+            if pair.get("actor_optimizer") == "persistent" and not (
                     (path / "actor_training_state.pt").is_file() or (path / "swe_actor_optimizer.json").is_file()):
                 return False
             advantages = json.loads((path / ADVANTAGES).read_text())

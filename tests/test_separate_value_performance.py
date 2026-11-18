@@ -79,7 +79,7 @@ def test_optimized_fit_preserves_runtime_intervals(tiny, tmp_path, compactions, 
     for record in result.trajectory_records:
         record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
     data = extract_training_samples(result.trajectory_records,
-        {r["turn_id"]: -1.0 if malformed else 1.0 for r in result.trajectory_records}, rollout_id="q:0")
+        {r["turn_id"]: 0.0 if malformed else 1.0 for r in result.trajectory_records}, rollout_id="q:0")
     before = deepcopy((data, result.trajectory_records))
     path, _, config = tiny
     # Runtime's sampled-only ID 999999 stays in the full ledger, outside the
@@ -141,8 +141,8 @@ def test_prepares_prefixes_once_per_fit(tiny, monkeypatch):
 
 def test_basic_diagnostics_preserve_scalar_metrics():
     data = samples()
-    full = value_diagnostics(data, [-0.3, 0.5, 0.1], [0.4, 0.2, 0.6], prefix="v")
-    basic = value_diagnostics(data, [-0.3, 0.5, 0.1], [0.4, 0.2, 0.6], prefix="v", detailed=False)
+    full = value_diagnostics(data, [0.35, 0.75, 0.55], [0.4, 0.2, 0.6], prefix="v")
+    basic = value_diagnostics(data, [0.35, 0.75, 0.55], [0.4, 0.2, 0.6], prefix="v", detailed=False)
     assert basic == {k: v for k, v in full.items() if k in basic}
     assert "v/bce" in basic and "v/rollout_count" in basic
     assert "v/calibration_bins" not in basic and "v/initial/state_count" not in basic

@@ -298,7 +298,7 @@ def test_exact_collection_penalizes_action_without_closed_thinking() -> None:
     trajectory = result.trajectory_records[0]
     assert trajectory["termination_kind"] == "malformed"
     assert trajectory["collection_tokens"]["full_token_ids"] == [1, 2, 10, 11]
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
 
 
 def test_exact_collection_terminates_when_provider_rewrites_interval_history() -> None:
@@ -350,7 +350,7 @@ def test_exact_collection_terminates_when_provider_rewrites_interval_history() -
     assert generations[0]["full_token_ids"] == [1, 2, 10, 11]
     assert trajectory["collection_tokens"]["full_token_ids"] == [1, 2, 10, 11]
     assert [message["role"] for message in trajectory["messages"]] == ["system", "user", "assistant", "tool"]
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
     assert any(record.get("history_rewrite") for record in result.turn_records)
 
 
@@ -396,7 +396,7 @@ def test_exact_collection_penalizes_summary_prompt_that_rewrites_interval_histor
     generations = trajectory["collection_tokens"]["generations"]
     assert len(generations) == 1
     assert generations[0]["full_token_ids"] == [1, 2, 10, 11]
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
     assert any(record.get("history_rewrite") for record in result.turn_records)
 
 
@@ -518,7 +518,7 @@ def test_runtime_stops_on_malformed_tool_call() -> None:
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "malformed_tool_call"
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
 
 
 def test_runtime_terminates_episode_when_tool_result_overflows_context() -> None:
@@ -539,7 +539,7 @@ def test_runtime_terminates_episode_when_tool_result_overflows_context() -> None
 
     assert result.status == "context_length_exceeded"
     assert result.final_answer is None
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
     assert result.trajectory_records[0]["termination_kind"] == "context_overflow"
 
 
@@ -561,7 +561,7 @@ def test_runtime_terminates_episode_when_forced_answer_prompt_overflows_context(
 
     assert result.status == "context_length_exceeded"
     assert result.token_usage["forced_answer_reasons"] == ["generated_token_budget"]
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
 
 
 def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
@@ -583,7 +583,7 @@ def test_runtime_stops_and_penalizes_when_summary_exceeds_limit() -> None:
     assert result.final_answer is None
     assert result.summary_turns == []
     assert [record["kind"] for record in result.turn_records] == ["tool", "summary"]
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
     summary_record = result.turn_records[-1]
     assert summary_record["summary_tokens"] == 3
     assert summary_record["max_summary_tokens"] == 2
@@ -840,7 +840,7 @@ def test_runtime_attributes_malformed_penalty_to_second_tool_turn() -> None:
     result = runtime.run(query_id="q1", user_prompt="question")
 
     assert result.status == "malformed_tool_call"
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
 
 
 def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summary() -> None:
@@ -937,7 +937,7 @@ def test_runtime_penalizes_summary_without_complete_wrapper() -> None:
     assert result.summary_turns == []
     assert result.turn_records[-1]["summary"] == ""
     assert result.trajectory_records[-1]["termination_kind"] == "malformed"
-    assert result.turn_rewards == {"trajectory-1": -1.0}
+    assert result.turn_rewards == {"trajectory-1": 0.0}
 
 
 def test_runtime_penalizes_empty_wrapped_summary_as_empty_summary() -> None:

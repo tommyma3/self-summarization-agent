@@ -2,16 +2,16 @@
 from copy import deepcopy
 import math
 
-from self_summarization_agent.rewards import is_penalized_runtime_status, trainable_turn_ids_from_records, reward_bounds
+from self_summarization_agent.rewards import (
+    BINARY_REWARD, is_penalized_runtime_status, reward_bounds, trainable_turn_ids_from_records,
+)
 from self_summarization_agent.trajectory import extract_trainable_samples
 
 
-def apply_verifier_reward(row, *, reward_profile=None):
+def apply_verifier_reward(row, *, reward_profile=BINARY_REWARD):
     row = deepcopy(row)
-    reward_profile = reward_profile or row.get("reward_profile", "signed_binary")
     failure_reward, _ = reward_bounds(reward_profile)
-    if reward_profile != "signed_binary":
-        row["reward_profile"] = reward_profile
+    row["reward_profile"] = reward_profile
     verifier = row.get("benchmark_verifier") or {}
     raw_reward = (verifier.get("rewards") or {}).get("reward")
     valid_reward = (isinstance(raw_reward, (int, float)) and not isinstance(raw_reward, bool)
@@ -25,7 +25,7 @@ def apply_verifier_reward(row, *, reward_profile=None):
     elif infra:
         reward, outcome = None, "infrastructure_error"
     else:
-        reward = 1.0 if raw_reward == 1 else failure_reward
+        reward = float(raw_reward)
         outcome = "correct_answer" if raw_reward == 1 else "wrong_answer"
     row["benchmark_passed"] = valid_reward and raw_reward == 1 and not infra and outcome != "overlong"
     row["training_eligible"] = reward is not None

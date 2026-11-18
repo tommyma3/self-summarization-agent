@@ -14,6 +14,7 @@ from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import JudgeDecision, RewardJudge
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.rewards import (
+    BINARY_REWARD,
     apply_terminal_reward,
     assign_runtime_rewards,
     has_runtime_reward,
@@ -108,7 +109,7 @@ def _validate_raw_row(row: dict[str, Any], *, index: int, expected_checkpoint_id
 
 def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) -> dict[str, Any]:
     status = row.get("status")
-    judged_row = dict(row)
+    judged_row = dict(row, reward_profile=BINARY_REWARD)
     trajectory_records = row["trajectory_records"]
     trainable_turn_ids = trainable_turn_ids_from_records(trajectory_records)
     rollout_id = f"{row.get('query_id')}:{row.get('rollout_index')}"

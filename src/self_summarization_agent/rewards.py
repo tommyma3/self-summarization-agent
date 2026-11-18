@@ -2,18 +2,22 @@ from collections.abc import Iterable, Mapping
 from typing import Literal
 
 
-SIGNED_REWARD = "signed_binary"
 BINARY_REWARD = "binary_zero_one"
 
 
-def reward_bounds(profile=SIGNED_REWARD):
-    if profile not in {SIGNED_REWARD, BINARY_REWARD}:
+def reward_bounds(profile=BINARY_REWARD):
+    if profile != BINARY_REWARD:
         raise ValueError(f"Unknown reward profile: {profile}")
-    return (0.0 if profile == BINARY_REWARD else -1.0), 1.0
+    return 0.0, 1.0
 
 
-def rollout_reward_values(profile=SIGNED_REWARD) -> frozenset[float]:
-    return frozenset((*reward_bounds(profile), 0.0))
+def rollout_reward_values(profile=BINARY_REWARD) -> frozenset[float]:
+    return frozenset(reward_bounds(profile))
+
+
+def read_rollout_reward(reward):
+    """Map historical failures to zero when reading saved reward labels."""
+    return 0.0 if reward == -1.0 else reward
 
 
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted", "overlong"]
@@ -68,16 +72,12 @@ def apply_terminal_reward(
     summary_turn_ids: list[str] | None = None,
     final_answer_turn_id: str | None = None,
     trainable_turn_ids: list[str] | None = None,
-    reward_profile: str = SIGNED_REWARD,
+    reward_profile: str = BINARY_REWARD,
 ) -> dict[str, float]:
     if outcome not in {"correct_answer", "wrong_answer", "budget_exhausted", "overlong"}:
         raise ValueError(f"Unknown terminal outcome: {outcome}")
-    if outcome == "correct_answer":
-        reward = 1.0
-    elif outcome == "overlong":
-        reward = 0.0
-    else:
-        reward = reward_bounds(reward_profile)[0]
+    failure, success = reward_bounds(reward_profile)
+    reward = success if outcome == "correct_answer" else failure
     if trainable_turn_ids is not None:
         return {turn_id: reward for turn_id in trainable_turn_ids}
     assigned = {turn_id: reward for turn_id in summary_turn_ids or []}
@@ -90,12 +90,13 @@ def apply_malformed_tool_penalty(
     turn_ids: str | list[str] | None = None,
     *,
     turn_id: str | None = None,
-    reward_profile: str = SIGNED_REWARD,
+    reward_profile: str = BINARY_REWARD,
 ) -> dict[str, float]:
     if turn_ids is None:
         if turn_id is None:
             return {}
         turn_ids = turn_id
+    failure, _ = reward_bounds(reward_profile)
     if isinstance(turn_ids, str):
-        return {turn_ids: reward_bounds(reward_profile)[0]}
-    return {turn_id: reward_bounds(reward_profile)[0] for turn_id in turn_ids}
+        return {turn_ids: failure}
+    return {turn_id: failure for turn_id in turn_ids}

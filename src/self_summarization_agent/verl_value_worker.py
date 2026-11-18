@@ -6,6 +6,8 @@ from typing import Any
 
 import torch
 
+from self_summarization_agent.rewards import BINARY_REWARD
+
 from self_summarization_agent.value_model import (
     CompactionValueHead,
     expected_binary_value,
@@ -91,7 +93,7 @@ class CompactionValueTrainingWorker(TrainingWorker):
         zero_initialize_head: bool,
         policy_loss_fn: Any,
         head_learning_rate: float | None = None,
-        reward_profile: str = "signed_binary",
+        reward_profile: str = BINARY_REWARD,
     ) -> None:
         if getattr(self, "value_head", None) is not None:
             raise RuntimeError("Compaction value worker was configured more than once")
@@ -230,7 +232,7 @@ class CompactionValueTrainingWorker(TrainingWorker):
         dp_group: Any = None,
     ):
         state_logits = self._pop_state_logits(data)
-        reward_profile = getattr(self, "reward_profile", "signed_binary")
+        reward_profile = getattr(self, "reward_profile", BINARY_REWARD)
         value_probe = data["value_probe_mask"].to(device=state_logits.device, dtype=torch.bool)
         if bool(torch.all(value_probe)):
             model_output.pop("log_probs", None)
@@ -264,7 +266,7 @@ class CompactionValueTrainingWorker(TrainingWorker):
         value_loss = local_value_loss * dp_size
         total_loss = policy_loss + self.value_loss_coefficient * value_loss.to(policy_loss.device)
 
-        success_threshold = 0.5 if reward_profile == "binary_zero_one" else 0.0
+        success_threshold = 0.5
         predicted_success = expected_binary_value(state_logits, reward_profile) >= success_threshold
         correct_weight = value_weights * valid.to(value_weights.dtype)
         local_accuracy = ((predicted_success == (rewards > 0)).to(value_weights.dtype) * correct_weight).sum()
@@ -326,7 +328,7 @@ class CompactionValueActorRolloutRefWorker(ActorRolloutRefWorker):
             zero_initialize_head=bool(value_config.zero_initialize_head),
             policy_loss_fn=self.loss_fn,
             head_learning_rate=value_config.get("head_learning_rate"),
-            reward_profile=value_config.get("reward_profile", "signed_binary"),
+            reward_profile=value_config.get("reward_profile", BINARY_REWARD),
         )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))

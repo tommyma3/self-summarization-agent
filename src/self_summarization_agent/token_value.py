@@ -56,8 +56,8 @@ class TokenAdvantages:
             raise ValueError(
                 "Token advantages must cover exactly the ordered sampled positions"
             )
-        if any(not math.isfinite(v) or abs(v) > 2 for v in self.values):
-            raise ValueError("Token advantages must be finite and in [-2, 2]")
+        if any(not math.isfinite(v) or abs(v) > 1 for v in self.values):
+            raise ValueError("Token advantages must be finite and in [-1, 1]")
         result = [0.0] * len(sample.labels)
         for p, v in zip(self.positions, self.values):
             result[p] = v
@@ -111,10 +111,12 @@ def token_diagnostics(
         vs.extend(v)
         ls.extend(loss)
         ws.extend(weight)
-    if any(not math.isfinite(v) or abs(v) > 1 for v in vs) or any(
+    if any(not math.isfinite(v) or not 0 <= v <= 1 for v in vs) or any(
         not math.isfinite(token_loss) or token_loss < 0 for token_loss in ls
     ):
         raise ValueError("Invalid token value/loss")
+    if any(isinstance(r, bool) or r not in (0, 1) for r in rs):
+        raise ValueError("Token diagnostics require binary rollout rewards")
 
     def mean(xs):
         return math.fsum(w * x for w, x in zip(ws, xs))
@@ -124,8 +126,7 @@ def token_diagnostics(
         return mean([(x - m) ** 2 for x in xs])
 
     residuals = [r - v for r, v in zip(rs, vs)]
-    probs = [(v + 1) / 2 for v in vs]
-    targets = [(r + 1) / 2 for r in rs]
+    mse = mean([e * e for e in residuals])
     result = dict(
         token_count=len(vs),
         state_count=sum(bool(v) for v in values),
@@ -134,8 +135,8 @@ def token_diagnostics(
         weight_sum=math.fsum(ws),
         bce=mean(ls),
         ce=mean(ls),
-        brier_score=mean([(p - y) ** 2 for p, y in zip(probs, targets)]),
-        value_mse=mean([e * e for e in residuals]),
+        brier_score=mse,
+        value_mse=mse,
         mean_value=mean(vs),
         mean_reward=mean(rs),
         explained_variance=1 - var(residuals) / var(rs) if len(set(rs)) > 1 else None,
@@ -146,7 +147,7 @@ def token_diagnostics(
     if detailed:
         bins = []
         for b in range(10):
-            selected = [i for i, p in enumerate(probs) if min(9, int(p * 10)) == b]
+            selected = [i for i, p in enumerate(vs) if min(9, int(p * 10)) == b]
             mass = math.fsum(ws[i] for i in selected)
             bins.append(
                 dict(
@@ -154,11 +155,11 @@ def token_diagnostics(
                     upper=(b + 1) / 10,
                     count=len(selected),
                     weight_mass=mass,
-                    predicted_success=math.fsum(ws[i] * probs[i] for i in selected)
+                    predicted_success=math.fsum(ws[i] * vs[i] for i in selected)
                     / mass
                     if mass
                     else None,
-                    observed_success=math.fsum(ws[i] * targets[i] for i in selected)
+                    observed_success=math.fsum(ws[i] * rs[i] for i in selected)
                     / mass
                     if mass
                     else None,

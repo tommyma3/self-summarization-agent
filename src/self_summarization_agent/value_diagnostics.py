@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Any, Sequence
 
-from .rewards import reward_bounds, rollout_reward_values
+from .rewards import BINARY_REWARD, reward_bounds, rollout_reward_values
 from self_summarization_agent.value_model import normalized_value_evaluation_loss, rollout_value_weights
 
 
@@ -13,7 +13,7 @@ def prediction_metrics(
     values: Sequence[float],
     losses: Sequence[float],
     rollout_ids: Sequence[str],
-    *, detailed: bool = True, reward_profile="signed_binary",
+    *, detailed: bool = True, reward_profile=BINARY_REWARD,
 ) -> dict[str, Any]:
     """Normalize once over real states, with equal total weight per rollout."""
     size = len(rewards)
@@ -21,10 +21,10 @@ def prediction_metrics(
         raise ValueError("Critic diagnostics require nonempty, aligned predictions and labels")
     low, high = reward_bounds(reward_profile)
     allowed_rewards = rollout_reward_values(reward_profile)
-    if any(r not in allowed_rewards for r in rewards):
+    if any(isinstance(r, bool) or r not in allowed_rewards for r in rewards):
         raise ValueError("Critic diagnostics require valid rollout rewards")
     if any(not math.isfinite(v) or not low <= v <= high for v in values):
-        raise ValueError("Critic predictions must be finite expected rewards in [-1, 1]")
+        raise ValueError("Critic predictions must be finite expected rewards in [0, 1]")
     if any(not math.isfinite(loss) or loss < 0 for loss in losses):
         raise ValueError("Critic losses must be finite and nonnegative")
     weights = rollout_value_weights(list(rollout_ids))
@@ -38,35 +38,34 @@ def prediction_metrics(
         avg = mean(xs)
         return mean([(x - avg) ** 2 for x in xs])
 
-    probabilities = [(v - low) / (high - low) for v in values]
-    targets = [(r - low) / (high - low) for r in rewards]
     residuals = [r - v for r, v in zip(rewards, values)]
+    mse = mean([residual ** 2 for residual in residuals])
     reward_variance = variance(rewards)
     bins = []
     for index in range(10 if detailed else 0):
-        selected = [i for i, p in enumerate(probabilities) if min(9, int(p * 10)) == index]
+        selected = [i for i, p in enumerate(values) if min(9, int(p * 10)) == index]
         mass = math.fsum(weights[i] for i in selected)
         bins.append({
             "lower": index / 10, "upper": (index + 1) / 10,
             "count": len(selected), "weight_mass": mass,
-            "predicted_success": math.fsum(weights[i] * probabilities[i] for i in selected) / mass if mass else None,
-            "observed_success": math.fsum(weights[i] * targets[i] for i in selected) / mass if mass else None,
+            "predicted_success": math.fsum(weights[i] * values[i] for i in selected) / mass if mass else None,
+            "observed_success": math.fsum(weights[i] * rewards[i] for i in selected) / mass if mass else None,
         })
     result = {
         "state_count": size,
         "rollout_count": len(set(rollout_ids)),
         "weight_sum": weight_sum,
         "bce": normalized_value_evaluation_loss(list(losses), weights),
-        "brier_score": mean([(p - y) ** 2 for p, y in zip(probabilities, targets)]),
-        "value_mse": mean([residual ** 2 for residual in residuals]),
+        "brier_score": mse,
+        "value_mse": mse,
         "explained_variance": 1 - variance(residuals) / reward_variance if reward_variance > 0 else None,
         "mean_reward": mean(rewards),
         "mean_value": mean(values),
         "value_std": math.sqrt(variance(values)),
         "value_min": min(values),
         "value_max": max(values),
-        "mean_success_probability": mean(probabilities),
-        "classification_accuracy": mean([float((v >= (low + high) / 2) == (r > 0)) for v, r in zip(values, rewards)]),
+        "mean_success_probability": mean(values),
+        "classification_accuracy": mean([float((v >= 0.5) == (r == 1)) for v, r in zip(values, rewards)]),
     }
     if detailed:
         result.update({
@@ -79,7 +78,7 @@ def prediction_metrics(
     return result
 
 
-def value_diagnostics(samples, values, losses, *, prefix: str, detailed: bool = True, reward_profile="signed_binary") -> dict[str, Any]:
+def value_diagnostics(samples, values, losses, *, prefix: str, detailed: bool = True, reward_profile=BINARY_REWARD) -> dict[str, Any]:
     """Include metadata-derived state strata; absent legacy metadata is unknown.
 
     Each stratum recomputes rollout weights among its own real eligible states.
@@ -108,10 +107,10 @@ def value_diagnostics(samples, values, losses, *, prefix: str, detailed: bool = 
     return result
 
 
-def frozen_target_diagnostics(samples, rows, chains, num_bins, reward_profile="signed_binary"):
+def frozen_target_diagnostics(samples, rows, chains, num_bins, reward_profile=BINARY_REWARD):
     """Descriptive, rollout-weighted statistics; bin spread is not uncertainty."""
     from self_summarization_agent.separate_value import sample_key
-    low, high = reward_bounds(reward_profile)
+    reward_bounds(reward_profile)
     keyed = {tuple(row["key"]): row for row in rows}
     depths = {tuple(item["key"]): item["segment_index"] for chain in chains for item in chain}
     groups = {"all": list(samples)}
@@ -144,7 +143,7 @@ def frozen_target_diagnostics(samples, rows, chains, num_bins, reward_profile="s
             w * abs(keyed[sample_key(s)]["target"] - s.reward) for s, w in zip(selected, weights))
         occupancy = [0.0] * num_bins
         for sample, weight in zip(selected, weights):
-            position = (keyed[sample_key(sample)]["target"] - low) * (num_bins - 1) / (high - low)
+            position = keyed[sample_key(sample)]["target"] * (num_bins - 1)
             lower = min(num_bins - 1, max(0, int(position)))
             fraction = position - lower
             occupancy[lower] += weight * (1 - fraction)

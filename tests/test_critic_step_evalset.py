@@ -46,14 +46,14 @@ def write_jsonl(path, rows):
 
 
 class ConstantCritic:
-    """CPU stand-in recording call order; constant zero values, ln(2) per-state loss."""
+    """CPU stand-in recording call order with a constant 50% success probability."""
 
     def __init__(self, *args, **kwargs):
         self.calls = []
 
     def fit(self, samples, *, max_sequence_length=None):
         self.calls.append("fit")
-        return [0.0] * len(samples), {"value/fit_marker": 1.0}
+        return [0.5] * len(samples), {"value/fit_marker": 1.0}
 
     def save(self, path, checkpoint_id):
         self.calls.append("save")
@@ -61,7 +61,7 @@ class ConstantCritic:
 
     def evaluate(self, samples):
         self.calls.append("evaluate")
-        return [0.0] * len(samples), [math.log(2)] * len(samples)
+        return [0.5] * len(samples), [math.log(2)] * len(samples)
 
 
 def separate_config(tmp_path):
@@ -192,4 +192,4 @@ def test_skipped_eval_does_not_load_collection_or_skip_advantages(monkeypatch, t
     body = json.loads((output / ADVANTAGES).read_text())
     assert body["metrics"]["value/evalset_skipped"] == reason
     assert len(body["rows"]) == 3
-    assert all(row["advantage"] == -1.0 for row in body["rows"])
+    assert all(row["advantage"] == -0.5 for row in body["rows"])

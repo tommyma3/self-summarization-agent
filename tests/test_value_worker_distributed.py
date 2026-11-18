@@ -70,7 +70,7 @@ def distributed_worker(rank, init_file, output_dir):
             reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=5e-4, weight_decay=0)
             attach_value_head(reference_optimizer, reference_head.parameters(), learning_rate=1e-2)
             features = torch.tensor([[0.2, 1.], [-0.5, 0.7]], device=rank)
-            rewards = torch.tensor([-1., 1.], device=rank)
+            rewards = torch.tensor([0., 1.], device=rank)
             indices = [rank] if dp_size == 2 else [0, 1]
             for _ in range(2):
                 optimizer.zero_grad(set_to_none=True)

@@ -85,7 +85,7 @@ def test_complete_attempt_keys_rewrites_and_native_cache_resume(tmp_path):
         run_cache_step(cfg, checkpoint_path=base, rollout_path=raw, output_path=cached, resume=True)
 
 
-def test_binary_support_diagnostics_and_resume_rejection(tmp_path):
+def test_binary_support_diagnostics_and_default_resume(tmp_path):
     profile = "binary_zero_one"
     logits = torch.zeros((2, 2))
     torch.testing.assert_close(expected_binary_value(logits, profile), torch.tensor([.5, .5]))
@@ -100,7 +100,7 @@ def test_binary_support_diagnostics_and_resume_rejection(tmp_path):
     head = CompactionValueHead(4, reward_profile=profile)
     save_value_head(head, tmp_path)
     assert load_value_head(tmp_path, hidden_size=4, zero_initialize=True, reward_profile=profile)[1]
-    with pytest.raises(ValueError, match="manifest"): load_value_head(tmp_path, hidden_size=4, zero_initialize=True)
+    assert load_value_head(tmp_path, hidden_size=4, zero_initialize=True)[1]
 
 
 def test_binary_gae_hand_recurrence_mc_and_single_interval():

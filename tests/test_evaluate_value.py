@@ -48,7 +48,7 @@ def test_read_only_evaluation_uses_origin_labels_and_preserves_records(monkeypat
     class Evaluator:
         def evaluate_compaction_values(self, samples, *, microbatch_size):
             calls.append(samples)
-            return [0.5], [0.28768207]
+            return [0.75], [0.28768207]
 
         def step(self, *args):
             pytest.fail("Held-out evaluator must never train")

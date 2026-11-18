@@ -20,7 +20,7 @@ def test_probe_returns_stable_cross_entropy_without_policy_loss() -> None:
         model_output=output,
         data={"logits": torch.tensor([[0.0, 100.0], [0.0, 0.0]]),
               "value_probe_mask": torch.ones(2, dtype=torch.bool),
-              "rewards": torch.tensor([-1.0, 1.0]), "sample_indices": torch.tensor([0, -1])},
+              "rewards": torch.tensor([0.0, 1.0]), "sample_indices": torch.tensor([0, -1])},
     )
     assert loss == 0
     assert metrics == {}
@@ -68,7 +68,7 @@ def test_actor_critic_gradients_match_minibatch_reference(dp_size, microbatch_si
 
     worker.policy_loss_fn = policy_loss_fn
     weights = torch.tensor(rollout_value_weights(["a", "b", "b", "b", "c", "c"])[:3] + [0.0])
-    rewards = torch.tensor([-1.0, 1.0, 1.0, 1.0])
+    rewards = torch.tensor([0.0, 1.0, 1.0, 1.0])
     valid = torch.tensor([True, True, True, False])
     token_mask = torch.tensor([[1, 1], [1, 0], [1, 1], [0, 0]], dtype=torch.float32)
     features = torch.tensor([[1.0, 0.3], [-0.2, 1.2], [0.7, -0.5], [9.0, 9.0]])

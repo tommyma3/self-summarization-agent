@@ -633,7 +633,7 @@ class TransformersPolicyTrainer:
                 self.value_head.parameters(),
                 learning_rate=self.training_config.value.head_learning_rate,
             )
-        if self.training_config.value.reward_profile == "binary_zero_one":
+        if self.training_config.persist_actor_optimizer:
             state_path = Path(self.model_config.model_path) / "actor_training_state.pt"
             if state_path.is_file():
                 state = torch.load(state_path, map_location="cpu", weights_only=True)
@@ -1075,7 +1075,7 @@ class TransformersPolicyTrainer:
             **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after", reward_profile=self.training_config.value.reward_profile),
         }
         minibatches_per_epoch = len(list(_minibatch_ranges(len(samples), minibatch_size)))
-        success_threshold = 0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0.0
+        success_threshold = 0.5
         accuracy = sum(
             (value >= success_threshold) == (sample.reward > 0)
             for value, sample in zip(old_values, samples)
@@ -1314,7 +1314,7 @@ class TransformersPolicyTrainer:
         _copy_processor_configs(self.model_config.model_path, path)
         if self.value_head is not None:
             save_value_head(self.value_head, path)
-        if self.training_config.value.reward_profile == "binary_zero_one":
+        if self.training_config.persist_actor_optimizer:
             torch.save(dict(version=1, reward_profile="binary_zero_one",
                 estimator=self.training_config.advantage_estimator,
                 optimizer=self.optimizer.state_dict(), rng_state=torch.random.get_rng_state(),

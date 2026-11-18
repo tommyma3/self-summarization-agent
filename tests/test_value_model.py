@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -20,13 +21,13 @@ from self_summarization_agent.value_model import (
 )
 
 
-def test_zero_initialized_head_predicts_zero_expected_reward() -> None:
+def test_zero_initialized_head_predicts_even_success_probability() -> None:
     head = CompactionValueHead(3, zero_initialize=True)
 
     logits = head(torch.randn(4, 3))
 
     assert torch.equal(logits, torch.zeros_like(logits))
-    assert torch.equal(expected_binary_value(logits), torch.zeros(4))
+    assert torch.equal(expected_binary_value(logits), torch.full((4,), 0.5))
 
 
 def test_rollout_value_weights_give_each_rollout_equal_total_weight() -> None:
@@ -38,7 +39,7 @@ def test_rollout_value_weights_give_each_rollout_equal_total_weight() -> None:
 
 def test_rollout_normalized_value_loss_uses_binary_targets() -> None:
     logits = torch.zeros((4, 2))
-    rewards = torch.tensor([-1.0, 1.0, 1.0, 1.0])
+    rewards = torch.tensor([0.0, 1.0, 1.0, 1.0])
     weights = torch.tensor(rollout_value_weights(["short", "long", "long", "long"]))
 
     loss = rollout_normalized_value_loss(logits, rewards, weights)
@@ -47,13 +48,11 @@ def test_rollout_normalized_value_loss_uses_binary_targets() -> None:
     assert reward_class_indices(rewards).tolist() == [0, 1, 1, 1]
 
 
-def test_zero_reward_is_a_neutral_target_for_signed_values() -> None:
+def test_zero_reward_is_the_failure_class() -> None:
     logits = torch.tensor([[0.0, 2.0], [0.0, 2.0]])
     rewards = torch.tensor([0.0, 1.0])
     expected = -logits.log_softmax(-1)
     assert torch.allclose(outcome_log_losses(logits, rewards),
-                          torch.stack((expected[0].mean(), expected[1, 1])))
-    assert torch.allclose(outcome_log_losses(logits, rewards, "binary_zero_one"),
                           torch.stack((expected[0, 0], expected[1, 1])))
 
 
@@ -89,6 +88,15 @@ def test_value_head_sidecar_lives_in_vllm_ignored_subdirectory(tmp_path: Path) -
     # Legacy top-level files must not be created.
     assert not (tmp_path / "compaction_value_head.safetensors").exists()
     assert not (tmp_path / "compaction_value_config.json").exists()
+
+
+def test_signed_value_head_cannot_resume_as_binary(tmp_path: Path) -> None:
+    save_value_head(CompactionValueHead(3), tmp_path)
+    (tmp_path / VALUE_HEAD_MANIFEST_FILENAME).write_text(
+        json.dumps({"version": 1, "hidden_size": 3, "class_order": [-1, 1]})
+    )
+    with pytest.raises(ValueError, match="manifest"):
+        load_value_head(tmp_path, hidden_size=3, zero_initialize=True)
 
 
 def test_legacy_top_level_sidecar_is_migrated_and_loadable(tmp_path: Path) -> None:

@@ -215,7 +215,7 @@ grouped = group_samples_by_query(samples)
 What the runtime returns:
 - `turn_records` as generation-level diagnostics for tool-call, summary, and final-answer steps
 - `trajectory_records` as the actual RL samples, one per compaction/final-answer interval
-- `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout
+- `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout. Success earns 1 and failure earns 0, including malformed output, budget exhaustion, and overlong rollouts.
 - `summary_turns`, `retrieved_docids`, and `tool_call_counts`
 
 Each training interval begins with the same system instructions and the same original user request. After the first compaction, the latest compressed agent history is appended as a separate conditioning-only user message wrapped in `<summary>...</summary>`. On the OpenAI-compatible path, `search`, `get_document`, and `finish` are native function tools and tool results are linked `role: tool` messages. Summary boundaries are terminal runtime-control `user` messages, while forced-answer boundaries remain terminal runtime-control `system` messages; both are appended without changing the earlier interval prefix. API `tool_choice` disables tools for a summary or requires `finish` for a forced answer. The generated summary remains a normal assistant message and must contain `<summary>...</summary>`. The runtime stores its extracted body for metrics and diagnostics, then rewraps that body when constructing the next interval after the unchanged task prefix. The runtime preserves the structured assistant reasoning, tool calls, tool-call IDs, and full raw sampled completion.
@@ -364,7 +364,7 @@ pass `--set training.value_pretraining.enabled=false` explicitly. Direct
 ### Segment GAE with a categorical critic
 
 [`configs/train/compact_separate_gae_ppo.yaml`](configs/train/compact_separate_gae_ppo.yaml)
-uses the separate critic with 51 evenly spaced value bins on `[-1, 1]`,
+uses the separate critic with 51 evenly spaced value bins on `[0, 1]`,
 `gae_lambda: 0.95`, and undiscounted returns (`gamma = 1`). Each segment is one
 existing compaction interval. Its value is the probability-weighted mean of the
 bin supports, evaluated at the exact first-generation prompt boundary.
@@ -387,7 +387,9 @@ the updated critic and bind the frozen targets to the ordered collection.
 Retries restart fitting from the committed input critic and reuse verified
 frozen targets. Start a fresh experiment when changing head support, baseline
 timing, or estimator; ordinary resume rejects incompatible method changes.
-Historical two-class MC checkpoints remain supported by the original preset.
+Value checkpoints record their reward support. Start a fresh value run when
+switching from a signed-reward checkpoint. Existing judged token caches can be
+reused. Training reads historical failure labels of `-1` as `0`.
 
 Use the existing launcher with a fresh artifact root and the GAE preset:
 
@@ -682,7 +684,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 - `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template permits a tagged summary user control or forced-answer system control at the end of an interval and preserves all reasoning since the interval's real user query.
 - A successful compaction starts a fresh interval with the unchanged system instructions, unchanged original user request, and the latest `<summary>...</summary>`-wrapped compressed agent history; no raw assistant/tool tail is retained.
 - RL training data is produced as one sparse-masked sample per interval: action, tool-call, summary, and final-answer tokens are trainable, while tool results and runtime-control prompts are context-only.
-- Malformed tool calls terminate the rollout immediately and assign negative reward to every interval in that failed rollout.
+- Malformed tool calls terminate the rollout immediately and assign reward 0 to every interval.
 
 Token Monte Carlo critic for BrowseComp-Plus
 -------------------------------------------
@@ -691,8 +693,8 @@ Token Monte Carlo critic for BrowseComp-Plus
 independent Qwen3.5-0.8B causal critic and the existing Qwen3.5-9B actor/FSDP
 configuration. The benchmark remains `browsecomp`, with the fixed seed-zero
 730/100 question split and 50 training questions with four attempts per update.
-The two classes are ordered `[-1, +1]`; their probability difference predicts the
-final signed rollout reward immediately **before each sampled assistant token**.
+The two classes are ordered `[0, 1]`. The success-class probability estimates the
+final rollout reward immediately **before each sampled assistant token**.
 Every sampled token, including reasoning, tool syntax, summaries and sampled
 stop tokens, uses the same rollout outcome. Conditioning tokens have no loss.
 The training view consumes exact cached IDs and masks without changing any
@@ -714,7 +716,7 @@ cold critic. Interval GAE retains its existing interval-MC warmup.
 Token mode derives its anchor from the estimator: `before_each_sampled_token`.
 The legacy `training.value.state_anchor` default belongs to interval estimators;
 it does not select token granularity. Other anchor overrides are rejected.
-Token mode requires signed rewards, two bins, pre-fit timing, exact collection,
+Token mode requires two bins, pre-fit timing, exact collection,
 all compaction tokens, and either Transformers or `verl_ray` with the
 Transformers/`verl_fsdp` worker. Token and interval critic checkpoints and warmup
 artifacts cannot be interchanged, even when their heads have the same shape.

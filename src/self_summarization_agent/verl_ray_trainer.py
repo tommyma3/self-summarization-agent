@@ -26,7 +26,7 @@ from self_summarization_agent.value_model import (
     rollout_value_weights,
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
-from self_summarization_agent.rewards import rollout_reward_values
+from self_summarization_agent.rewards import BINARY_REWARD, rollout_reward_values
 from self_summarization_agent.token_value import validate_token_advantages, advantage_mean, TokenAdvantages
 from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
@@ -325,7 +325,7 @@ def build_verl_actor_dataproto(
     )
 
 
-def _validate_compaction_value_samples(samples: list[RLSample], reward_profile="signed_binary") -> None:
+def _validate_compaction_value_samples(samples: list[RLSample], reward_profile=BINARY_REWARD) -> None:
     if not samples:
         return
     reward_by_rollout: dict[str, float] = {}
@@ -360,7 +360,7 @@ def build_verl_value_probe_dataproto(
     checkpoint_id: str,
     alignment: int = 1,
     max_sequence_length: int | None = None,
-    reward_profile="signed_binary",
+    reward_profile=BINARY_REWARD,
 ):
     """Build causal-prefix-only value probes without altering cached intervals."""
 
@@ -433,7 +433,7 @@ def build_verl_value_actor_dataproto(
     checkpoint_id: str,
     alignment: int,
     max_sequence_length: int | None = None,
-    reward_profile="signed_binary",
+    reward_profile=BINARY_REWARD,
 ):
     """Build a lossless actor-critic batch, padding only with zero-weight duplicates."""
 
@@ -624,7 +624,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
     mini_batch_size = training_config.minibatch_size or training_config.group_size
     micro_batch_size = fsdp_config.ppo_micro_batch_size_per_gpu or training_config.gradient_accumulation_microbatch_size
     save_contents = ["hf_model"] if fsdp_config.save_hf_model else ["model"]
-    if training_config.value.reward_profile == "binary_zero_one":
+    if training_config.persist_actor_optimizer:
         save_contents = list(dict.fromkeys([*save_contents, "model", "optimizer", "extra"]))
     return {
         "compaction_value": {
@@ -687,7 +687,7 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
             "checkpoint": {
                 "_target_": "verl.trainer.config.CheckpointConfig",
                 "save_contents": save_contents,
-                "load_contents": ["model", "optimizer", "extra"] if training_config.value.reward_profile == "binary_zero_one" else ["model"],
+                "load_contents": ["model", "optimizer", "extra"] if training_config.persist_actor_optimizer else ["model"],
                 "async_save": False,
             },
         },
@@ -859,7 +859,7 @@ class VerlFSDPWorkerGroup:
             name_prefix=f"{training_config.verl.namespace}-actor",
         )
         self.worker_group.init_model()
-        if training_config.value.reward_profile == "binary_zero_one":
+        if training_config.persist_actor_optimizer:
             marker = Path(model_config.model_path) / "swe_actor_optimizer.json"
             if marker.exists():
                 state = json.loads(marker.read_text())
@@ -931,7 +931,7 @@ class VerlFSDPWorkerGroup:
 
     def save_checkpoint(self, path: str) -> None:
         self.worker_group.save_checkpoint(path, None, 0, None)
-        if self.training_config.value.reward_profile == "binary_zero_one":
+        if self.training_config.persist_actor_optimizer:
             (Path(path) / "swe_actor_optimizer.json").write_text(json.dumps(dict(
                 version=1, reward_profile="binary_zero_one", world_size=self._world_size)))
 
@@ -1167,7 +1167,7 @@ class VerlRayPolicyTrainer:
         eval_loss_after = normalized_value_evaluation_loss(new_value_losses, value_weights)
         eval_seconds = time.monotonic() - eval_started
 
-        success_threshold = 0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0.0
+        success_threshold = 0.5
         accuracy = sum(
             (value >= success_threshold) == (sample.reward > 0)
             for value, sample in zip(old_values, samples)

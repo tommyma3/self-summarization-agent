@@ -95,7 +95,7 @@ evaluation:
 runtime:
   context_threshold_tokens: 16000
   max_context_tokens: 28000
-  # Summary-body cap. An overlong summary terminates the rollout with a negative reward.
+  # Summary-body cap. An overlong summary terminates the rollout with reward 0.
   max_summary_tokens: 6400
   # After four successful compactions, another threshold crossing ends the rollout.
   max_compactions: 4

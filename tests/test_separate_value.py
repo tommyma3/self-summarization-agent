@@ -12,7 +12,7 @@ from tokenizers.models import WordLevel
 from self_summarization_agent.config import CompactionValueConfig, TrainingConfig, ModelConfig, load_train_config
 from self_summarization_agent.separate_value import (
     validate_samples, validate_advantages, sample_key, separate_checkpoint_complete,
-    atomic_json, CRITIC_DIR, CRITIC_STATE, PAIR_MANIFEST, CRITIC_MANIFEST,
+    atomic_json, digest, ADVANTAGES, CRITIC_DIR, CRITIC_STATE, PAIR_MANIFEST, CRITIC_MANIFEST,
 )
 from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
 from self_summarization_agent.trajectory import RLSample
@@ -26,7 +26,7 @@ def samples():
         reference_logprob=-2., reference_logprobs=[0., -2., -2.], state_prefix_length=2,
         collection_full_token_ids=[1, 2 if i == 0 else 5, 3, 4], collection_assistant_token_mask=[False, False, True, True],
         state_kind="post_compaction" if i == 2 else "initial")
-        for i, (rollout, reward) in enumerate([("a", -1.), ("b", 1.), ("b", 1.)])]
+        for i, (rollout, reward) in enumerate([("a", 0.), ("b", 1.), ("b", 1.)])]
 
 
 @pytest.fixture
@@ -84,6 +84,14 @@ def test_exact_prefix_and_validation(tiny):
         validate_advantages(before, {})
 
 
+def write_postfit_pair(path, checkpoint_id, critic, identity):
+    advantages = {"version": 1, "critic_identity": identity}
+    atomic_json(path / ADVANTAGES, advantages)
+    atomic_json(path / PAIR_MANIFEST, {"version": 2, "architecture": "separate",
+        "checkpoint_id": checkpoint_id, "critic_identity": identity,
+        "method": critic.method, "advantages_digest": digest(advantages)})
+
+
 def test_fit_epochs_weighting_and_resume(tiny, tmp_path):
     one = critic(tiny)
     two = critic(tiny)
@@ -102,8 +110,7 @@ def test_fit_epochs_weighting_and_resume(tiny, tmp_path):
     output = tmp_path / "iteration-00001"
     identity = one.save(output / CRITIC_DIR, output.name)
     one.model.save_pretrained(output)
-    atomic_json(output / PAIR_MANIFEST, {"version": 1, "architecture": "separate",
-        "checkpoint_id": output.name, "critic_identity": identity})
+    write_postfit_pair(output, output.name, one, identity)
     assert separate_checkpoint_complete(output)
     resumed = SeparateValueTrainer(output / CRITIC_DIR, tiny[0], tiny[2], dtype="float32", device="cpu",
                                    activation_checkpointing=False, resume=True)
@@ -352,8 +359,7 @@ def test_resume_rejects_uncommitted_pair(tiny, tmp_path):
     model = critic(tiny)
     identity = model.save(output / CRITIC_DIR, output.name)
     model.model.save_pretrained(output)
-    atomic_json(output / PAIR_MANIFEST, {"version": 1, "architecture": "separate",
-        "checkpoint_id": output.name, "critic_identity": identity})
+    write_postfit_pair(output, output.name, model, identity)
     assert separate_checkpoint_complete(output)
     with pytest.raises(ValueError, match="complete matching"):
         validate_resume_checkpoint(output)
@@ -371,7 +377,7 @@ def test_runtime_intervals_remain_immutable_during_fixed_update(compactions, mal
     result = runtime(TokenModel(outputs), context_threshold_tokens=1 if compactions else 15000).run("q", "question")
     for record in result.trajectory_records:
         record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
-    rewards = {r["turn_id"]: -1. if malformed else 1. for r in result.trajectory_records}
+    rewards = {r["turn_id"]: 0. if malformed else 1. for r in result.trajectory_records}
     data = extract_training_samples(result.trajectory_records, rewards, rollout_id="q:0")
     assert len(data) == (1 if malformed else compactions + 1)
     before = deepcopy((result.trajectory_records, data))
@@ -399,8 +405,7 @@ def test_publication_requires_actor_weights(tiny, tmp_path):
     model = critic(tiny)
     staged = tmp_path / ".iteration-00001.incomplete"
     identity = model.save(staged / CRITIC_DIR, "iteration-00001")
-    atomic_json(staged / PAIR_MANIFEST, {"version": 1, "architecture": "separate",
-        "checkpoint_id": "iteration-00001", "critic_identity": identity})
+    write_postfit_pair(staged, "iteration-00001", model, identity)
     mark_checkpoint_complete(staged)
     destination = tmp_path / "iteration-00001"
     assert not separate_checkpoint_complete(staged)

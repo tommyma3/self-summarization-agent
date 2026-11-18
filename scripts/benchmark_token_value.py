@@ -66,7 +66,7 @@ def main():
         reference_logprob_source="policy_rescore",
     )
     values, metrics = critic.fit(
-        [replace(sample, rollout_id=f"probe-{i}", reward=1.0 if i % 2 else -1.0,
+        [replace(sample, rollout_id=f"probe-{i}", reward=float(i % 2),
                  collection_full_token_ids=[100 + i] * (args.length + 1),
                  input_ids=[100 + i] * args.length, labels=[100 + i] * args.length)
          for i in range(args.samples)], max_sequence_length=config.training.max_sequence_length

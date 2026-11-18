@@ -10,6 +10,7 @@ import re
 import time
 
 from self_summarization_agent.config import load_train_config
+from self_summarization_agent.rewards import BINARY_REWARD
 from self_summarization_agent.separate_value import (
     ADVANTAGES, CRITIC_DIR, atomic_json, digest, sample_fingerprint, sample_key,
     validate_resume_checkpoint, validate_samples, FROZEN_TARGETS, frozen_target_artifact,
@@ -84,7 +85,7 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     values, losses = critic.evaluate(eval_samples)
     inference_seconds = time.monotonic() - started
     started = time.monotonic()
-    metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX, reward_profile=getattr(getattr(critic, "config", None), "reward_profile", "signed_binary"))
+    metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX, reward_profile=getattr(getattr(critic, "config", None), "reward_profile", BINARY_REWARD))
     metrics.update({f"{EVALSET_PREFIX}/eval_scope": "same_policy_eval_collection",
                     f"{EVALSET_PREFIX}/prepare_seconds": prepare_seconds,
                     f"{EVALSET_PREFIX}/inference_seconds": inference_seconds,

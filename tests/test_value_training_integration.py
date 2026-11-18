@@ -54,7 +54,7 @@ def cached_samples():
                  completion_mask=[False, True, True], reference_logprob=-2.0,
                  reference_logprobs=[0, -2.0, -2.0], state_prefix_length=1,
                  state_kind="post_compaction" if i == 2 else "initial")
-        for i, (rollout, reward) in enumerate([("a", -1.), ("b", 1.), ("b", 1.)])
+        for i, (rollout, reward) in enumerate([("a", 0.), ("b", 1.), ("b", 1.)])
     ]
 
 
@@ -139,7 +139,7 @@ def test_real_worker_configuration_and_joint_loss_metrics(monkeypatch, tmp_path,
     loss, metrics = worker._compaction_actor_critic_loss(
         model_output={"policy_loss": policy_loss},
         data={"value_probe_mask": torch.zeros(2, dtype=torch.bool),
-              "rewards": torch.tensor([1., -1.]), "value_weights": torch.tensor([0.5, 0.5]),
+              "rewards": torch.tensor([1., 0.]), "value_weights": torch.tensor([0.5, 0.5]),
               "value_valid_mask": torch.ones(2, dtype=torch.bool), "dp_size": 1},
     )
     loss.backward()

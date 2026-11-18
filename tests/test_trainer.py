@@ -375,7 +375,7 @@ def test_compaction_value_step_freezes_old_values_across_update_epochs() -> None
         "q1": [
             cached("positive-1", 1.0, "q1:0"),
             cached("positive-2", 1.0, "q1:0"),
-            cached("negative", -1.0, "q1:1"),
+            cached("negative", 0.0, "q1:1"),
         ]
     }
 
@@ -383,7 +383,7 @@ def test_compaction_value_step_freezes_old_values_across_update_epochs() -> None
 
     assert trainer.old_value_calls == 1
     assert metrics.optimizer_step_count == 4
-    assert metrics.mean_advantage == pytest.approx(1 / 3)
+    assert metrics.mean_advantage == pytest.approx(1 / 6)
     assert metrics.extra_metrics["value/rollout_count"] == 2
     assert metrics.extra_metrics["value/state_count"] == 3
     assert any(torch.count_nonzero(parameter) for parameter in trainer.value_head.parameters())
@@ -453,7 +453,7 @@ def test_compaction_value_step_handles_split_policy_value_devices() -> None:
     grouped = {
         "q1": [
             cached("positive", 1.0, "q1:0"),
-            cached("negative", -1.0, "q1:1"),
+            cached("negative", 0.0, "q1:1"),
         ]
     }
 

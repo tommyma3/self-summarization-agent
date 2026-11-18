@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from .token_value import token_diagnostics, token_positions, validate_token_samples
-from .value_model import outcome_log_losses
+from .value_model import expected_binary_value, outcome_log_losses
 
 
 @dataclass
@@ -104,7 +104,7 @@ class TokenValueTrainerMixin:
                                    device=self.device, dtype=torch.float32)
                         for i, chunk in zip(indices, chunks)
                     ])
-                    batch_values = (logits.softmax(-1)[:, 1] * 2 - 1).cpu().tolist()
+                    batch_values = expected_binary_value(logits).cpu().tolist()
                     batch_losses = outcome_log_losses(logits, rewards).cpu().tolist()
                     offset = 0
                     for i, chunk in zip(indices, chunks):

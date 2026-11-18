@@ -290,7 +290,7 @@ def test_grpo_normalization_uses_rollouts_with_unequal_segment_counts():
     one = runtime(TokenModel([FINISH])).run("q", "question")
     samples = extract_trainable_samples(many.trajectory_records, many.turn_rewards, rollout_id="q:0")
     samples += extract_trainable_samples(one.trajectory_records, {"trajectory-1": -1.0}, rollout_id="q:1")
-    assert compute_group_advantages(samples) == pytest.approx([1, 1, -1], abs=2e-6)
+    assert compute_group_advantages(samples) == pytest.approx([1, 1, -1], abs=3e-6)
 
 
 def test_wrongly_closed_thinking_is_malformed_but_retained():
@@ -572,7 +572,7 @@ def test_compaction_limit_still_allows_completion_and_rejects_malformed_summarie
     assert result.token_usage["forced_answer_reasons"] == []
     if case == "malformed_summary":
         assert result.summary_turns == []
-        assert result.turn_rewards == {"trajectory-1": -1.0}
+        assert result.turn_rewards == {"trajectory-1": 0.0}
         assert result.trajectory_records[-1]["completion"].endswith(model.results[-1].text)
     else:
         assert result.final_answer == "done"
@@ -941,7 +941,7 @@ def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
     row = _attach_training_caches(row, cache_payloads=caches, checkpoint_id="tiny")
     samples = extract_trainable_samples(row["trajectory_records"], row["turn_rewards"], rollout_id="q:0")
     negative = deepcopy(samples[0])
-    negative.rollout_id, negative.reward = "q:1", -1.0
+    negative.rollout_id, negative.reward = "q:1", 0.0
     samples.append(negative)
     before = [p.detach().clone() for p in parameters]
     metrics = trainer.step({"q": samples})
@@ -949,6 +949,6 @@ def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
     assert metrics.optimizer_step_count == 1
     assert any(not torch.equal(a, b) for a, b in zip(before, parameters))
     if value_mode:
-        assert metrics.mean_advantage == pytest.approx(1 / 3)
+        assert metrics.mean_advantage == pytest.approx(1 / 6)
         assert metrics.extra_metrics["value/state_count"] == 3
         assert metrics.extra_metrics["value/rollout_count"] == 2

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from self_summarization_agent.models import RuntimeResult
+from self_summarization_agent.rewards import BINARY_REWARD
 from self_summarization_agent.runtime import EpisodeRuntime
 
 
@@ -64,6 +65,7 @@ def serialize_runtime_result(
         "judge": judge,
     }
     if include_rewards:
+        payload["reward_profile"] = BINARY_REWARD
         payload["turn_rewards"] = dict(result.turn_rewards)
     return payload
 

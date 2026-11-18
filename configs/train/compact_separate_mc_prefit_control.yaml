@@ -135,7 +135,7 @@ training:
     zero_initialize_head: true
     num_bins: 2
     baseline_timing: pre_fit
-    reward_profile: signed_binary
+    reward_profile: binary_zero_one
   backend: verl_ray
   gpu_ids:
   - 0

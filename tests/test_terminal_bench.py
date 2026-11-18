@@ -100,7 +100,7 @@ def test_failed_summary_is_retained_never_installed(summary, status):
     assert result.status == status
     assert len(result.trajectory_records) == model.tokenizer.template_calls == 1
     assert result.trajectory_records[0]["completion"].endswith(summary)
-    assert set(result.turn_rewards.values()) == {-1.0}
+    assert set(result.turn_rewards.values()) == {0.0}
 
 
 def test_forced_completion_preempts_summary_and_executes_no_more_commands():
@@ -177,6 +177,11 @@ def test_verifier_rewards_shared_across_intervals_and_infrastructure_excluded():
     judged = apply_verifier_reward(row)
     assert set(judged["turn_rewards"].values()) == {1.0}
     assert judged["trainable_sample_count"] == 3
+    row["benchmark_verifier"]["rewards"]["reward"] = 0
+    failed = apply_verifier_reward(row)
+    assert set(failed["turn_rewards"].values()) == {0.0}
+    assert failed["judge"]["outcome"] == "wrong_answer"
+    row["benchmark_verifier"]["rewards"]["reward"] = 1
     row["status"] = "overlong"
     overlong = apply_verifier_reward(row)
     assert set(overlong["turn_rewards"].values()) == {0.0}
@@ -184,7 +189,7 @@ def test_verifier_rewards_shared_across_intervals_and_infrastructure_excluded():
     assert overlong["trainable_sample_count"] == 3
     assert not overlong["benchmark_passed"]
     row["status"] = "malformed_tool_call"
-    assert set(apply_verifier_reward(row)["turn_rewards"].values()) == {-1.0}
+    assert set(apply_verifier_reward(row)["turn_rewards"].values()) == {0.0}
     row["benchmark_verifier"]["exception"] = {"exception_type": "VerifierTimeout"}
     assert apply_verifier_reward(row)["trainable_sample_count"] == 0
     assert not apply_verifier_reward(row)["training_eligible"]
@@ -465,7 +470,7 @@ def test_terminal_intervals_rescore_and_update_both_rl_objectives(value_mode):
     row = _attach_training_caches(row, cache_payloads=caches, checkpoint_id="tiny")
     samples = extract_trainable_samples(row["trajectory_records"], row["turn_rewards"], rollout_id="task:0")
     negative = deepcopy(samples[0])
-    negative.rollout_id, negative.reward = "task:1", -1.0
+    negative.rollout_id, negative.reward = "task:1", 0.0
     samples.append(negative)
     before = [p.detach().clone() for p in parameters]
     metrics = trainer.step({"task": samples})

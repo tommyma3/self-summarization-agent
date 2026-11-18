@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 import math
 from typing import Any
+from self_summarization_agent.rewards import read_rollout_reward, rollout_reward_values
 from self_summarization_agent.token_stream import TITO_COLLECTION_VERSION, TITO_CONTRACT
 
 
@@ -679,6 +680,7 @@ def extract_trainable_samples(
     rollout_id: str | None = None,
 ) -> list[RLSample]:
     validate_trajectory_schema(records, context="Trainable records")
+    allowed_rewards = rollout_reward_values()
     samples: list[RLSample] = []
     seen_record_ids: set[str] = set()
     skipped_history_rewrite_ids: set[str] = set()
@@ -699,11 +701,13 @@ def extract_trainable_samples(
         messages = _validate_messages(record.get("messages"), record_id=record_id)
         if record_id not in rewards:
             raise ValueError(f"Missing reward for trainable record: {record_id}")
-        reward = rewards[record_id]
+        reward = read_rollout_reward(rewards[record_id])
         if not isinstance(reward, (int, float)) or isinstance(reward, bool):
             raise ValueError(f"Trainable record {record_id} has non-numeric reward")
         if not math.isfinite(float(reward)):
             raise ValueError(f"Trainable record {record_id} has non-finite reward")
+        if reward not in allowed_rewards:
+            raise ValueError(f"Trainable record {record_id} has reward outside [0, 1]")
         (
             input_ids,
             labels,

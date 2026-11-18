@@ -229,8 +229,12 @@ def main():
                     key = f'value/{scope}/{stratum}{metric}'
                     if key in r:c[key]=r[key]
         if 'value/evalset/brier_score' in r:
-            p=(r['value/prefit/mean_reward']+1)/2
-            observed=(r['value/evalset/mean_reward']+1)/2
+            p = r['value/prefit/mean_reward']
+            observed = r['value/evalset/mean_reward']
+            # The original comparison artifacts predate reward profile metadata.
+            if r.get('reward_profile') != 'binary_zero_one':
+                p = (p + 1) / 2
+                observed = (observed + 1) / 2
             c['heldout_train_prior_brier']=observed*(1-p)**2+(1-observed)*p**2
             c['heldout_oracle_brier']=observed*(1-observed)
         critic_csv.append(c)

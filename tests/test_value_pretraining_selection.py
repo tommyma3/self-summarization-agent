@@ -57,7 +57,7 @@ def test_completion_retry_source_binding_and_all_failure_validation(tmp_path, mo
     for row in batch.rows:
         if row['query_id'] in split['validation_query_ids']:
             row['judge']['outcome'] = 'wrong_answer'
-            row['turn_rewards'] = {key: -1. for key in row['turn_rewards']}
+            row['turn_rewards'] = {key: 0. for key in row['turn_rewards']}
     batch.path.write_text(''.join(json.dumps(row) + '\n' for row in batch.rows))
     output = tmp_path / 'warmup'
     original = module.atomic_json

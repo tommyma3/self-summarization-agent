@@ -14,6 +14,7 @@ import time
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
 from self_summarization_agent.config import resolved_rollout_sampling_profile, runtime_config_identity, sampling_profile_id
+from self_summarization_agent.rewards import read_rollout_reward
 from self_summarization_agent.separate_value import (
     CRITIC_MANIFEST, CRITIC_STATE, atomic_json, digest, model_files_complete,
     sample_key, source_critic_identity, validate_samples,
@@ -54,9 +55,6 @@ def initialization_binding(config, actor):
 
     actor = Path(actor).resolve()
     online_value_config = asdict(config.training.value)
-    # Preserve pre-existing signed pretraining bindings across the opt-in SWE field.
-    if online_value_config.get("reward_profile") == "signed_binary":
-        online_value_config.pop("reward_profile")
     dataset_path = Path(config.dataset.decrypted_path or default_decrypted_path(config.experiment.bc_plus_root))
     return {
         "version": 1, **({"estimator": "token_mc_value", "state_anchor": "before_each_sampled_token"}
@@ -106,9 +104,9 @@ def prepare_dataset(config, actor, path, allowed_queries):
         judge, rewards = row.get("judge"), row.get("turn_rewards")
         if not isinstance(judge, dict) or not isinstance(rewards, dict):
             raise ValueError("Pretraining requires judged rollout rewards")
-        expected = 1.0 if judge.get("outcome") == "correct_answer" else -1.0
+        expected = 1.0 if judge.get("outcome") == "correct_answer" else 0.0
         if ((expected > 0 and row.get("status") != "completed")
-                or any(isinstance(r, bool) or r != expected for r in rewards.values())):
+                or any(isinstance(r, bool) or read_rollout_reward(r) != expected for r in rewards.values())):
             raise ValueError("Pretraining rewards disagree with the terminal judge decision")
         keys.add((query, index))
         queries.setdefault(query, set()).add(index)
@@ -300,9 +298,9 @@ def fit_pretraining(config, actor, rollout_path, output, allowed_queries, *, res
         _restore_rng(Path(source), critic.device)
     token_mode = config.training.advantage_estimator == "token_mc_value"
     train_rewards = {s.rollout_id: s.reward for s in train if not token_mode or any(s.completion_mask)}
-    prevalence = (sum(train_rewards.values()) / len(train_rewards) + 1) / 2
+    prevalence = sum(train_rewards.values()) / len(train_rewards)
     validation_rewards = {s.rollout_id: s.reward for s in validation if not token_mode or any(s.completion_mask)}
-    constant_brier = sum((prevalence - (r + 1) / 2) ** 2 for r in validation_rewards.values()) / len(validation_rewards)
+    constant_brier = sum((prevalence - r) ** 2 for r in validation_rewards.values()) / len(validation_rewards)
 
     def evaluate(epoch, train_metrics=None):
         values, losses = critic.evaluate(validation)

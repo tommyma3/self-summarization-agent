@@ -46,10 +46,10 @@ def test_returns_count_reward_once_and_preserve_order(lam):
     chains = ordered_rollout_chains(rows, list(reversed(data)))
     values = {sample_key(s): v for s, v in zip(data, [0.3, 0.2, 0.8])}
     result = segment_gae(chains, values, lam)
-    assert result[sample_key(data[0])]["target"] == -1
+    assert result[sample_key(data[0])]["target"] == 0
     assert result[sample_key(data[2])]["target"] == 1
     assert result[sample_key(data[1])]["target"] == pytest.approx((1 - lam) * 0.8 + lam)
-    assert sum(row["transition_reward"] for row in result.values()) == 0
+    assert sum(row["transition_reward"] for row in result.values()) == 1
     for sample in data:
         row = result[sample_key(sample)]
         assert row["advantage"] == pytest.approx(row["target"] - values[sample_key(sample)])
@@ -64,8 +64,8 @@ def test_terminal_kinds_never_bootstrap(kind):
     rows[0]["trajectory_records"][0]["termination_kind"] = kind
     chain = ordered_rollout_chains(rows[:1], data[:1])
     result = segment_gae(chain, {sample_key(data[0]): 0.8}, 0.0)
-    assert result[sample_key(data[0])]["target"] == -1
-    assert result[sample_key(data[0])]["advantage"] == -1.8
+    assert result[sample_key(data[0])]["target"] == 0
+    assert result[sample_key(data[0])]["advantage"] == -0.8
 
 
 def test_empty_and_critic_only_target_batches(tiny):
@@ -95,7 +95,7 @@ def test_chain_validation_fails_closed(fault):
     elif fault == "summary":
         rows[1]["trajectory_records"][1]["prefix_summary_turn_id"] = "other"
     elif fault == "reward":
-        rows[1]["turn_rewards"][data[-1].turn_id] = -1
+        rows[1]["turn_rewards"][data[-1].turn_id] = 0
     else:
         rows[1]["status"] = "history_rewrite_detected"
     with pytest.raises(ValueError):
@@ -104,7 +104,7 @@ def test_chain_validation_fails_closed(fault):
 
 @pytest.mark.parametrize("bins", [2, 51, 201])
 def test_categorical_targets_preserve_mean_and_gradients(bins, tmp_path):
-    targets = torch.tensor([-1., -0.73, 0., 0.35, 1.], requires_grad=True)
+    targets = torch.tensor([0., 0.135, 0.5, 0.675, 1.], requires_grad=True)
     encoded = two_hot_targets(targets, bins)
     support = torch.tensor(value_support(bins))
     torch.testing.assert_close(encoded.sum(-1), torch.ones(5))
@@ -123,10 +123,10 @@ def test_categorical_targets_preserve_mean_and_gradients(bins, tmp_path):
     with pytest.raises(ValueError, match="manifest"):
         load_value_head(tmp_path, hidden_size=3, num_bins=bins + 1, zero_initialize=True)
     if bins == 2:
-        torch.testing.assert_close(encoded[:, 1], (targets + 1) / 2)
+        torch.testing.assert_close(encoded[:, 1], targets)
 
 
-@pytest.mark.parametrize("target", [float("nan"), float("inf"), 1.1, -1.1])
+@pytest.mark.parametrize("target", [float("nan"), float("inf"), 1.1, -0.1])
 def test_bad_categorical_target_rejected(target):
     with pytest.raises(ValueError, match="finite"):
         two_hot_targets(torch.tensor([target]), 51)
@@ -134,13 +134,19 @@ def test_bad_categorical_target_rejected(target):
 
 def test_categorical_outcome_loss_is_binary_mean_loss():
     logits = torch.tensor([[0., 3., 1.], [1., 4., 0.]])
-    rewards = torch.tensor([-1., 1.])
-    success = (expected_categorical_value(logits) + 1) / 2
-    expected = torch.nn.functional.binary_cross_entropy(success, (rewards + 1) / 2, reduction="none")
+    rewards = torch.tensor([0., 1.])
+    success = expected_categorical_value(logits)
+    expected = torch.nn.functional.binary_cross_entropy(success, rewards, reduction="none")
     torch.testing.assert_close(outcome_log_losses(logits, rewards), expected)
     # Stable even when the expected value rounds to an endpoint.
     extreme = torch.tensor([[-1000., -1000., 1000.]])
-    assert torch.isfinite(outcome_log_losses(extreme, torch.tensor([-1.]))).all()
+    assert torch.isfinite(outcome_log_losses(extreme, torch.tensor([0.]))).all()
+
+
+def test_categorical_prediction_stays_on_support_after_roundoff():
+    logits = torch.full((1, 51), -1000.0)
+    logits[0, [50, 40, 49]] = torch.tensor([0.0, -15.6, -16.68])
+    assert 0 <= expected_categorical_value(logits).item() <= 1
 
 
 def test_gae_config_and_invalid_combinations(tiny):
@@ -199,7 +205,7 @@ def test_gae_fit_preserves_runtime_tokens(tiny, compactions, malformed):
     records = result.trajectory_records
     for record in records:
         record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
-    rewards = {r["turn_id"]: -1. if malformed else 1. for r in records}
+    rewards = {r["turn_id"]: 0. if malformed else 1. for r in records}
     data = extract_training_samples(records, rewards, rollout_id="q:0")
     rows = [{"query_id": "q", "rollout_index": 0, "trajectory_records": records, "turn_rewards": rewards}]
     before = deepcopy((rows, data))
@@ -216,7 +222,7 @@ def test_gae_fit_preserves_runtime_tokens(tiny, compactions, malformed):
     assert (rows, data) == before
     assert len(targets) == (compactions if malformed else compactions + 1)
     if malformed:
-        assert targets[sample_key(data[-1])]["target"] == -1
+        assert targets[sample_key(data[-1])]["target"] == 0
 
 
 @pytest.mark.parametrize("failure,estimator,bins", [
@@ -332,17 +338,14 @@ def test_two_iterations_use_prefit_values_and_retry_immutable_targets(tiny, tmp_
     assert not separate_checkpoint_complete(path)
 
 
-def test_historical_mc_fingerprint_remains_loadable(tiny, tmp_path):
+def test_historical_mc_fingerprint_cannot_resume_with_binary_rewards(tiny, tmp_path):
     data = samples()
     cfg = tiny[2]
-    old_config = {key: val for key, val in asdict(cfg).items()
-                  if key not in {"num_bins", "baseline_timing", "gae_lambda"}}
+    old_config = {**asdict(cfg), "reward_profile": "signed_binary"}
     atomic_json(tmp_path / CRITIC_DIR / CRITIC_MANIFEST, {"identity": "historical"})
     body = {"version": 1, "behavior_checkpoint_id": "base", "critic_identity": "historical",
             "sample_fingerprint": sample_fingerprint(data), "config_fingerprint": digest(old_config),
             "rows": [{"key": sample_key(s), "value": 0.2, "advantage": s.reward - 0.2} for s in data]}
     atomic_json(tmp_path / ADVANTAGES, body)
-    fixed, _ = load_advantages(tmp_path / ADVANTAGES, data, "base", cfg)
-    assert fixed == {sample_key(s): s.reward - 0.2 for s in data}
-    with pytest.raises(ValueError):
-        load_advantages(tmp_path / ADVANTAGES, data, "base", replace(cfg, num_bins=51))
+    with pytest.raises(ValueError, match="provenance"):
+        load_advantages(tmp_path / ADVANTAGES, data, "base", cfg)

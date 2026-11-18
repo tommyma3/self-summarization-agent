@@ -137,10 +137,10 @@ def test_presets_and_invalid_modes():
 def test_sparse_shifted_positions_and_weights():
     data = [
         sample(),
-        sample("b", "0", -1),
-        sample("b", "1", -1, [False, False, True, False, False, False, False]),
-        sample("b", "2", -1, [False] * 7),
-        sample("empty", "0", -1, [False] * 7),
+        sample("b", "0", 0),
+        sample("b", "1", 0, [False, False, True, False, False, False, False]),
+        sample("b", "2", 0, [False] * 7),
+        sample("empty", "0", 0, [False] * 7),
     ]
     assert token_positions(data[0]) == (1, 4, 5)
     weights = token_weights(data)
@@ -190,9 +190,9 @@ def test_real_causal_model_pre_token_alignment(critic):
 def test_fit_microbatch_partition_and_empty_intervals(critic):
     data = [
         sample(),
-        sample("b", "0", -1),
-        sample("b", "1", -1, [False, False, True, False, False, False, False]),
-        sample("empty", "0", -1, [False] * 7),
+        sample("b", "0", 0),
+        sample("b", "1", 0, [False, False, True, False, False, False, False]),
+        sample("empty", "0", 0, [False] * 7),
     ]
     before = deepcopy(data)
     with torch.no_grad():
@@ -250,8 +250,8 @@ def test_frozen_shard_retry_and_corruption(critic, tmp_path):
     result = validate_token_frozen(
         body, output, data, "behavior", critic.config, "source", critic.tokenizer_hash
     )
-    assert result[sample_key(data[0])].dense(data[0]) == [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
-    assert result[sample_key(data[1])].dense(data[1]) == [0.0] * 6
+    assert result[sample_key(data[0])].dense(data[0]) == [0.0, 0.5, 0.0, 0.0, 0.5, 0.5]
+    assert result[sample_key(data[1])].dense(data[1]) == [0.0, -0.5, 0.0, 0.0, -0.5, -0.5]
     again = freeze_tokens(
         output, data, values, "behavior", critic.config, "source", critic.tokenizer_hash
     )
@@ -278,14 +278,14 @@ def test_frozen_shard_retry_and_corruption(critic, tmp_path):
 
 
 def test_explicit_advantages_and_diagnostics():
-    data = [sample(), sample("b", "0", -1)]
+    data = [sample(), sample("b", "0", 0)]
     advantages = {
         sample_key(s): TokenAdvantages(token_positions(s), (0.0,) * 3) for s in data
     }
     assert len(validate_token_advantages(data, advantages)) == 2
     with pytest.raises(ValueError):
         validate_token_advantages(data, {sample_key(s): 0.0 for s in data})
-    values = [[0.5] * 3, [-0.5] * 3]
+    values = [[0.75] * 3, [0.25] * 3]
     losses = [[0.3] * 3, [0.3] * 3]
     m = token_diagnostics(data, values, losses, prefix="v")
     assert m["v/brier_score"] == pytest.approx(0.0625)
@@ -324,7 +324,7 @@ def test_transformers_actor_token_update_and_resume(critic, monkeypatch, tmp_pat
         ModelConfig(model_path=critic.source, dtype="float32", device_map=None),
         replace(cfg, gradient_accumulation_microbatch_size=2),
     )
-    data = [sample(), sample("b", "0", -1)]
+    data = [sample(), sample("b", "0", 0)]
     fixed = {
         sample_key(s): TokenAdvantages(token_positions(s), (1.0, -1.0, 0.0))
         for s in data
@@ -356,7 +356,7 @@ def test_real_verl_dataproto_alignment():
         build_verl_value_actor_dataproto,
     )
 
-    data = [sample(), sample("b", "0", -1)]
+    data = [sample(), sample("b", "0", 0)]
     batch = build_verl_value_actor_dataproto(
         data,
         advantages=[
@@ -392,7 +392,7 @@ def test_compaction_extraction_and_token_warmup(tmp_path):
     )
     assert batch.rows == before
     assert any(s.state_kind == "post_compaction" for s in train + validation)
-    assert all(s.reward in (-1.0, 1.0) for s in train + validation)
+    assert all(s.reward in (0.0, 1.0) for s in train + validation)
     assert all(not s.collection_assistant_token_mask[0] for s in train + validation)
     output = tmp_path / "warmup"
     best = fit_pretraining(
@@ -425,7 +425,7 @@ def test_token_pair_retry_reload_and_second_update(critic, tmp_path):
         run_token_critic,
     )
 
-    data = [sample(), sample("b", "0", -1)]
+    data = [sample(), sample("b", "0", 0)]
     cfg = SimpleNamespace(
         training=SimpleNamespace(
             value=replace(critic.config, evalset_interval=0), max_sequence_length=32
@@ -457,7 +457,7 @@ def test_token_pair_retry_reload_and_second_update(critic, tmp_path):
     fixed, _ = load_token_advantages(
         output / ADVANTAGES, data, checkpoint.name, cfg.training.value, source_id
     )
-    assert fixed[sample_key(data[0])].values == (1.0, 1.0, 1.0)
+    assert fixed[sample_key(data[0])].values == (0.5, 0.5, 0.5)
     retry.model.save_pretrained(output)
     cm = json.loads((output / CRITIC_DIR / CRITIC_MANIFEST).read_text())
     atomic_json(
@@ -503,7 +503,7 @@ def test_token_pair_retry_reload_and_second_update(critic, tmp_path):
 
 
 def test_hand_weighted_token_ce_gradient(critic):
-    data = [sample(), sample("b", "0", -1), sample("b", "1", -1)]
+    data = [sample(), sample("b", "0", 0), sample("b", "1", 0)]
     shortened = data[-1]
     shortened.collection_full_token_ids = shortened.collection_full_token_ids[:4]
     shortened.collection_assistant_token_mask = (
@@ -595,14 +595,14 @@ def test_all_interval_boundaries_preserve_raw_token_coverage(case):
             record["collection_tokens"]
         )
     data = extract_trainable_samples(
-        records, {r["turn_id"]: -1.0 for r in records}, rollout_id="q:0"
+        records, {r["turn_id"]: 0.0 for r in records}, rollout_id="q:0"
     )
     validate_token_samples(data)
     assert len(data) == expected_intervals
     assert sum(len(token_positions(s)) for s in data) == sum(
         len(g.completion_token_ids) for g in model.results
     )
-    assert all(s.reward == -1.0 for s in data)
+    assert all(s.reward == 0.0 for s in data)
     assert evidence_hash() == before
     if case in {"bad", "empty", "overlimit"}:
         assert result.trajectory_records[-1]["termination_kind"] == "malformed"
@@ -640,7 +640,7 @@ def test_launcher_retry_preserves_only_verified_token_inputs(critic, tmp_path):
 def test_final_short_rollout_minibatch_has_unit_weight(critic):
     import math
 
-    data = [sample("a"), sample("b", reward=-1.0), sample("c")]
+    data = [sample("a"), sample("b", reward=0.0), sample("c")]
     critic.optimizer = torch.optim.SGD(
         [*critic.model.parameters(), *critic.head.parameters()], lr=0.0
     )
@@ -675,7 +675,7 @@ def test_authoritative_span_strata_do_not_train_copied_context():
 
 
 def test_token_diagnostic_schedule_preserves_training_rng_and_weights(critic):
-    data = [sample(), sample("b", reward=-1.0)]
+    data = [sample(), sample("b", reward=0.0)]
     critic.config = replace(critic.config, fitting_epochs=2)
     for module in critic.model.modules():
         if isinstance(module, torch.nn.Dropout):
@@ -723,8 +723,8 @@ def test_parallel_token_update_matches_single_gpu(critic):
             p.normal_(std=0.1)
     parallel.head.load_state_dict(single.head.state_dict())
     # Uneven rollout interval counts, sparse masks and a short final microbatch.
-    data = [sample('a'), sample('a', '1'), sample('b', reward=-1),
-            sample('c'), sample('d', reward=-1)]
+    data = [sample('a'), sample('a', '1'), sample('b', reward=0),
+            sample('c'), sample('d', reward=0)]
     data[-1].collection_assistant_token_mask[-1] = False
     data[-1].completion_mask[-1] = False
     for trainer in (single, parallel):

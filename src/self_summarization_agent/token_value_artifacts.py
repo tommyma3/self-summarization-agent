@@ -163,8 +163,8 @@ def read_shard(body, output):
     if (
         not torch.isfinite(v).all()
         or not torch.isfinite(a).all()
-        or (v.abs() > 1).any()
-        or (a.abs() > 2).any()
+        or ((v < 0) | (v > 1)).any()
+        or (a.abs() > 1).any()
     ):
         raise ValueError("Invalid frozen token ranges")
     expected_rollouts = {str(row["key"][0]) for row in body["rows"]}

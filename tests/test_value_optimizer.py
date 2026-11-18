@@ -15,7 +15,7 @@ def joint_update(head_lr):
     optimizer = torch.optim.AdamW(backbone.parameters(), lr=1e-3, weight_decay=0.01)
     group = attach_value_head(optimizer, head.parameters(), learning_rate=head_lr)
     hidden = backbone(torch.tensor([[1.0, -0.3], [-0.4, 0.8]]))
-    value_loss = rollout_normalized_value_loss(head(hidden), torch.tensor([1., -1.]), torch.tensor([0.5, 0.5]))
+    value_loss = rollout_normalized_value_loss(head(hidden), torch.tensor([1., 0.]), torch.tensor([0.5, 0.5]))
     loss = hidden.square().mean() + 0.1 * value_loss
     loss.backward()
     torch.nn.utils.clip_grad_norm_([*backbone.parameters(), *head.parameters()], 1.0)

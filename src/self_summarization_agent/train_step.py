@@ -371,7 +371,7 @@ def run_train_step(
                 "critic_identity": critic_manifest["identity"],
                 **({"method": critic_manifest["method"], "advantages_digest": digest(
                     json.loads((output_checkpoint / ADVANTAGES).read_text()))} if pair_version == 2 else {}),
-                "actor_optimizer": "persistent" if config.benchmark.name == "swe-dev" else "reset_each_iteration", "critic_optimizer": "persistent"})
+                "actor_optimizer": "persistent" if config.training.persist_actor_optimizer else "reset_each_iteration", "critic_optimizer": "persistent"})
             if not separate_checkpoint_complete(output_checkpoint, expected_id=logical_id):
                 raise ValueError("Refusing to publish incomplete actor/critic pair")
         if config.benchmark.name == "swe-dev":
@@ -387,6 +387,7 @@ def run_train_step(
             "next_checkpoint_id": output_checkpoint_id or checkpoint_id_from_path(output_checkpoint),
             "training_backend": config.training.backend,
             "sample_count": metrics.sample_count,
+            "reward_profile": config.benchmark.reward_profile,
             "mean_reward": metrics.mean_reward,
             "mean_advantage": metrics.mean_advantage,
             "loss": metrics.loss,

@@ -39,7 +39,7 @@ def test_terminal_reward_trains_all_interval_records() -> None:
 def test_malformed_penalty_marks_all_completed_intervals() -> None:
     rewards = apply_malformed_tool_penalty(["trajectory-1", "trajectory-2"])
 
-    assert rewards == {"trajectory-1": -1.0, "trajectory-2": -1.0}
+    assert rewards == {"trajectory-1": 0.0, "trajectory-2": 0.0}
 
 
 def test_only_trajectory_records_are_reward_targets() -> None:
@@ -61,14 +61,14 @@ def test_extract_trainable_samples_returns_one_sample_per_interval() -> None:
     )
 
     assert [sample.turn_id for sample in samples] == ["trajectory-1", "trajectory-2"]
-    assert [sample.reward for sample in samples] == [1.0, -1.0]
+    assert [sample.reward for sample in samples] == [1.0, 0.0]
     assert all(sample.rollout_id == "q1:0" for sample in samples)
     assert samples[0].completion == "reasoning and action\nreasoning and summary"
 
 
 def test_extract_trainable_samples_preserves_query_grouping() -> None:
     records = [trajectory_record("trajectory-1", "q1"), trajectory_record("trajectory-2", "q2")]
-    rewards = {"trajectory-1": 1.0, "trajectory-2": -1.0}
+    rewards = {"trajectory-1": 1.0, "trajectory-2": 0.0}
 
     grouped = group_samples_by_query(extract_trainable_samples(records, rewards))
 

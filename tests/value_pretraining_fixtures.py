@@ -68,7 +68,7 @@ def make_batch(tmp_path, *, task_count=4, samples_per_task=4):
             if i == 3 and index == 1:
                 outputs, compactions = [SEARCH, "</think>bad summary<|im_end|>"], 1
             result = runtime(CompactModel(outputs, vocab), context_threshold_tokens=1 if compactions else 15000).run(query_id, query)
-            reward = 1. if index == 0 else -1.
+            reward = 1. if index == 0 else 0.
             for record in result.trajectory_records:
                 record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
                 longest = max(longest, len(record["collection_tokens"]["full_token_ids"]))

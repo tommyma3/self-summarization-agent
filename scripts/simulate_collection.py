@@ -580,14 +580,14 @@ def write_training_sequences(
             "- Every assistant message is trainable, including tool actions and the boundary completion.\n"
             "- System/user state, tool results, and appended boundary instructions are conditioning-only.\n"
             "- If the final answer is judged correct, every listed interval gets reward +1.\n"
-            "- If the final answer is judged wrong, every listed interval gets reward -1.\n"
+            "- If the final answer is judged wrong, every listed interval gets reward 0.\n"
         )
     elif terminal_status == "budget_exhausted":
-        reward_note = "This rollout exhausted the tool budget. Every listed interval gets reward -1.\n"
+        reward_note = "This rollout exhausted the tool budget. Every listed interval gets reward 0.\n"
     elif terminal_status == "summary_length_exceeded":
-        reward_note = "This rollout exceeded the summary length cap. Every listed interval gets reward -1.\n"
+        reward_note = "This rollout exceeded the summary length cap. Every listed interval gets reward 0.\n"
     else:
-        reward_note = "This rollout ended unsuccessfully. Every listed interval gets reward -1.\n"
+        reward_note = "This rollout ended unsuccessfully. Every listed interval gets reward 0.\n"
 
     write_section(
         handle,

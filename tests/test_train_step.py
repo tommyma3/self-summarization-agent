@@ -313,7 +313,7 @@ def test_run_train_step_consumes_malformed_negative_samples(tmp_path: Path) -> N
 
     assert trainer.grouped_samples is not None
     assert [sample.turn_id for sample in trainer.grouped_samples["q1"]] == ["trajectory-1", "trajectory-2"]
-    assert [sample.reward for sample in trainer.grouped_samples["q1"]] == [-1.0, -1.0]
+    assert [sample.reward for sample in trainer.grouped_samples["q1"]] == [0.0, 0.0]
     assert trainer.saved_checkpoints == [str(output_checkpoint)]
 
 

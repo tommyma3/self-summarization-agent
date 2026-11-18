@@ -44,9 +44,8 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
                  advantage_estimator="compaction_mc_value"):
         if advantage_estimator == "token_mc_value" and (
             not config.separate or config.num_bins != 2 or config.baseline_timing != "pre_fit"
-            or config.reward_profile != "signed_binary"
         ):
-            raise ValueError("Token MC requires a separate signed two-bin pre_fit critic")
+            raise ValueError("Token MC requires a separate two-bin pre_fit critic")
         self.config = config
         self.method = method_spec(config, advantage_estimator)
         self.frozen_digest = None
@@ -63,9 +62,7 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
                 raise ValueError("Token critic initializer has a different method/granularity")
         if resume:
             manifest = json.loads((Path(source) / CRITIC_MANIFEST).read_text())
-            legacy_method = {**method_spec(config), "num_bins": 2, "support": [-1.0, 1.0],
-                             "baseline_timing": "post_fit"}
-            if manifest.get("method", legacy_method) != self.method:
+            if manifest.get("method") != self.method:
                 raise ValueError("Critic method/support changed during resume; start a fresh experiment")
         self.tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=False)
         actor_tokenizer = AutoTokenizer.from_pretrained(actor_path, trust_remote_code=False)
@@ -357,12 +354,10 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
         torch.save({"version": 1, "optimizer": self.optimizer.state_dict(),
                     "update_count": self.update_count}, path / CRITIC_STATE)
         identity = uuid.uuid4().hex
-        version = 1 if self.config.num_bins == 2 and self.config.baseline_timing == "post_fit" and self.config.reward_profile == "signed_binary" else 2
-        atomic_json(path / CRITIC_MANIFEST, {"version": version, "identity": identity,
+        atomic_json(path / CRITIC_MANIFEST, {"version": 2, "identity": identity,
             "checkpoint_id": checkpoint_id,
-            **({"class_order": [-1, 1]} if version == 1 else {}),
-            **({"method": self.method, "frozen_digest": self.frozen_digest,
-                "source_critic_identity": self.source_critic_identity} if version == 2 else {}),
+            "method": self.method, "frozen_digest": self.frozen_digest,
+            "source_critic_identity": self.source_critic_identity,
             "tokenizer_signature": self.tokenizer_hash, "initialization": self.config.model_path,
             "source": self.source, "config": asdict(self.config)})
         return identity

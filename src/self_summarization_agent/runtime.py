@@ -24,6 +24,7 @@ from self_summarization_agent.prompts import (
     serialize_messages,
 )
 from self_summarization_agent.rewards import (
+    BINARY_REWARD,
     Outcome,
     apply_malformed_tool_penalty,
     apply_terminal_reward,
@@ -373,7 +374,7 @@ class EpisodeRuntime:
     # within a single round.  Remaining calls are skipped with an error string
     # so the episode can still complete.  None = no limit.
     tool_execution_timeout_seconds: float | None = 600
-    reward_profile: str = "signed_binary"
+    reward_profile: str = BINARY_REWARD
     scaffold: AgentScaffold | None = None
     max_compactions: int | None = None
     token_renderer: Any = field(init=False, default=None)

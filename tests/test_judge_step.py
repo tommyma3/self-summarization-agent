@@ -83,7 +83,7 @@ def test_judge_step_excludes_history_rewritten_records_from_trainable_samples() 
         JudgeDecision(outcome="correct_answer", judge_prompt="unused", judge_response="unused", parse_error=False),
     )
 
-    assert judged["turn_rewards"] == {"trajectory-1": -1.0}
+    assert judged["turn_rewards"] == {"trajectory-1": 0.0}
     assert judged["trainable_sample_count"] == 0
 
 
@@ -116,7 +116,7 @@ def test_judge_step_penalizes_summary_length_exceeded_without_judging() -> None:
     )
 
     assert judged["judge"]["outcome"] == "summary_length_exceeded"
-    assert judged["turn_rewards"] == {"trajectory-1": -1.0}
+    assert judged["turn_rewards"] == {"trajectory-1": 0.0}
     assert judged["trainable_sample_count"] == 1
 
 
@@ -327,7 +327,7 @@ def test_judge_rollouts_does_not_reward_verdicts_in_reasoning(
     assert judged["judge"]["outcome"] == "wrong_answer"
     assert judged["judge"]["parse_error"] is parse_error
     assert judged["judge"]["judge_response"] == judge_response
-    assert judged["turn_rewards"] == {f"trajectory-{i}": -1.0 for i in range(1, interval_count + 1)}
+    assert judged["turn_rewards"] == {f"trajectory-{i}": 0.0 for i in range(1, interval_count + 1)}
     assert judged["trainable_sample_count"] == interval_count
     assert judged["trajectory_records"] == raw_row["trajectory_records"]
     assert raw_path.read_bytes() == original_raw

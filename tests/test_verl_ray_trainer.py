@@ -120,7 +120,7 @@ def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> 
 def test_verl_actor_batch_zero_masks_alignment_padding(monkeypatch) -> None:
     patch_fake_dataproto(monkeypatch)
     first = sample("trajectory-1", 1.0, -0.5)
-    second = sample("trajectory-2", -1.0, -0.25)
+    second = sample("trajectory-2", 0.0, -0.25)
 
     batch = build_verl_actor_dataproto(
         [first, second],
@@ -159,7 +159,7 @@ def test_verl_value_batches_preserve_prefix_and_zero_weight_alignment_padding(mo
     first = sample("trajectory-1", 1.0, -0.5)
     first.rollout_id = "q1:0"
     first.state_prefix_length = 2
-    second = sample("trajectory-2", -1.0, -0.25)
+    second = sample("trajectory-2", 0.0, -0.25)
     second.rollout_id = "q1:1"
     second.state_prefix_length = 1
 
@@ -293,7 +293,7 @@ def test_grpo_fsdp_step_pads_minibatches_without_dropping_traces(monkeypatch, tm
             self.batches.append(batch)
             return {"actor/pg_loss": [0.1], "actor/ppo_kl": [0.01], "actor/pg_clipfrac": [0.0]}
 
-    samples = [sample(f"trace-{index}", 1.0 if index % 2 == 0 else -1.0, -0.5) for index in range(6)]
+    samples = [sample(f"trace-{index}", 1.0 if index % 2 == 0 else 0.0, -0.5) for index in range(6)]
     fake_worker = FakeWorkerGroup()
     trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
     trainer.model_config = ModelConfig(model_path=str(tmp_path))
@@ -346,7 +346,7 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
 
         def evaluate_compaction_values(self, batch):
             self.probe_batch = batch
-            return [0.25, -0.25], [0.47, 0.47]
+            return [0.625, 0.375], [0.47, 0.47]
 
         def update_actor(self, batch):
             self.actor_batch = batch
@@ -361,7 +361,7 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
     positive = sample("positive", 1.0, -0.5)
     positive.rollout_id = "q1:0"
     positive.state_prefix_length = 2
-    negative = sample("negative", -1.0, -0.25)
+    negative = sample("negative", 0.0, -0.25)
     negative.rollout_id = "q1:1"
     negative.state_prefix_length = 1
     fake_worker = FakeValueWorkerGroup()
@@ -381,8 +381,8 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
     assert fake_worker.probe_batch is not None
     assert fake_worker.actor_batch is not None
     advantages = fake_worker.actor_batch.batch["advantages"].unbind()
-    assert advantages[0].tolist() == [0.75, 0.75, 0.75]
-    assert advantages[1].tolist() == [-0.75, -0.75, -0.75]
+    assert advantages[0].tolist() == [0.375, 0.375, 0.375]
+    assert advantages[1].tolist() == [-0.375, -0.375, -0.375]
     assert fake_worker.actor_batch.batch["value_weights"].tolist() == [0.5, 0.5, 0.0, 0.0]
     assert fake_worker.actor_batch.batch["value_valid_mask"].tolist() == [True, True, False, False]
     assert metrics.sample_count == 2
@@ -484,7 +484,7 @@ def test_verl_fsdp_value_step_reduces_worker_metric_payloads(monkeypatch, tmp_pa
         data_parallel_size = 1
 
         def evaluate_compaction_values(self, batch):
-            return [0.25, -0.25], [0.47, 0.47]
+            return [0.625, 0.375], [0.47, 0.47]
 
         def update_actor(self, batch):
             # Mirror VerlFSDPWorkerGroup.update_actor: reduce the raw engine payload.
@@ -501,7 +501,7 @@ def test_verl_fsdp_value_step_reduces_worker_metric_payloads(monkeypatch, tmp_pa
     positive = sample("positive", 1.0, -0.5)
     positive.rollout_id = "q1:0"
     positive.state_prefix_length = 2
-    negative = sample("negative", -1.0, -0.25)
+    negative = sample("negative", 0.0, -0.25)
     negative.rollout_id = "q1:1"
     negative.state_prefix_length = 1
     trainer = VerlRayPolicyTrainer.__new__(VerlRayPolicyTrainer)
@@ -546,12 +546,12 @@ def test_frozen_loss_is_independent_of_minibatch_count(monkeypatch, minibatch_si
         def evaluate_compaction_values(self, batch):
             events.append("eval")
             if len(events) == 1:
-                return [0.0] * 20, [math.log(2)] * 20
+                return [0.5] * 20, [math.log(2)] * 20
             return [0.5] * 20, [0.2] + [0.8] * 19
 
         def update_actor(self, batch):
             events.append("update")
-            assert batch.batch["advantages"].values().tolist() == [1.0] * 60
+            assert batch.batch["advantages"].values().tolist() == [0.5] * 60
             count = 20 // minibatch_size
             return {"value/loss": math.log(2) / count, "value/weight_mass": 1 / count}
 

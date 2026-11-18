@@ -7,13 +7,13 @@ from __future__ import annotations
 import math
 
 from self_summarization_agent.separate_value import sample_key
-from .rewards import reward_bounds, rollout_reward_values
+from .rewards import BINARY_REWARD, read_rollout_reward, reward_bounds, rollout_reward_values
 
 
 TERMINAL_KINDS = {"final_answer", "forced_answer", "malformed", "context_overflow", "overlong"}
 
 
-def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
+def ordered_rollout_chains(rows, samples, reward_profile=BINARY_REWARD):
     """Require complete authoritative interval chains for every selected rollout."""
     by_key = {sample_key(s): s for s in samples}
     if len(by_key) != len(samples):
@@ -41,7 +41,7 @@ def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
                     or not isinstance(segment, int) or segment != index + 1):
                 raise ValueError("Missing, duplicate, or out-of-order interval in return chain")
             sample = by_key[key]
-            reward = row.get("turn_rewards", {}).get(key[1])
+            reward = read_rollout_reward(row.get("turn_rewards", {}).get(key[1]))
             if (sample.query_id != row.get("query_id") or record.get("query_id") != sample.query_id
                     or isinstance(reward, bool) or reward not in allowed_rewards or reward != sample.reward):
                 raise ValueError("Inconsistent rollout identity or reward in return chain")
@@ -73,7 +73,7 @@ def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
     return chains
 
 
-def segment_gae(chains, old_values, gae_lambda, reward_profile="signed_binary"):
+def segment_gae(chains, old_values, gae_lambda, reward_profile=BINARY_REWARD):
     """Return rows keyed by interval; gamma=1 and terminal reward is counted once."""
     if (isinstance(gae_lambda, bool) or not isinstance(gae_lambda, (int, float))
             or not math.isfinite(gae_lambda) or not 0 <= gae_lambda <= 1):
@@ -83,7 +83,7 @@ def segment_gae(chains, old_values, gae_lambda, reward_profile="signed_binary"):
     if len(set(keys)) != len(keys) or set(keys) != set(old_values):
         raise ValueError("Old values must cover exactly the interval chains")
     if any(not math.isfinite(v) or not low <= v <= high for v in old_values.values()):
-        raise ValueError("Old values must be finite and in [-1, 1]")
+        raise ValueError("Old values must be finite and in [0, 1]")
     result = {}
     for chain in chains:
         next_value, next_advantage = 0.0, 0.0
