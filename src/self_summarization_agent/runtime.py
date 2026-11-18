@@ -13,6 +13,7 @@ from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message, RuntimeResult, ToolCall
 from self_summarization_agent.prompts import (
     ACTION_TOOLS,
+    DOCUMENT_ID_ARGUMENT,
     ConversationPrompt,
     FORCED_FINISH_TOOL_CHOICE,
     build_compacted_messages,
@@ -23,6 +24,7 @@ from self_summarization_agent.prompts import (
     serialize_messages,
 )
 from self_summarization_agent.rewards import (
+    Outcome,
     apply_malformed_tool_penalty,
     apply_terminal_reward,
     trainable_turn_ids_from_records,
@@ -172,7 +174,7 @@ def _parse_tag_tool_call(raw_output: str) -> tuple[dict[str, object], str] | Non
         if tag == "search":
             normalized = {"tool_name": "search", "arguments": {"query": value}}
         elif tag == "document":
-            normalized = {"tool_name": "get_document", "arguments": {"doc_id": value}}
+            normalized = {"tool_name": "get_document", "arguments": {DOCUMENT_ID_ARGUMENT: value}}
         else:
             normalized = {"tool_name": "finish", "arguments": {"answer": value}}
         return normalized, json.dumps(normalized, ensure_ascii=False)
@@ -189,6 +191,9 @@ def _parse_json_tool_call(raw_output: str) -> tuple[dict[str, object], str] | No
         tool_name = candidate.get("tool_name")
         arguments = candidate.get("arguments")
         if isinstance(tool_name, str) and isinstance(arguments, dict):
+            if tool_name == "get_document" and "doc_id" in arguments and DOCUMENT_ID_ARGUMENT not in arguments:
+                # Older JSON actions used doc_id. Canonicalize only the routing view.
+                arguments[DOCUMENT_ID_ARGUMENT] = arguments.pop("doc_id")
             normalized = {"tool_name": tool_name, "arguments": arguments}
             return normalized, json.dumps(normalized, ensure_ascii=False)
         return None
@@ -336,17 +341,22 @@ class _GeneratedOutput:
 
 
 @dataclass(slots=True)
-class _PendingToolAction:
+class _ToolInvocation:
+    name: str
+    arguments: dict[str, Any]
+    id: str | None = None
+
+
+@dataclass(slots=True)
+class _PendingToolRound:
     active: _ActiveEpisode
     prompt: str
     raw_output: str
     normalized_output: str
-    tool_name: str
-    arguments: dict[str, object]
     prompt_tokens: int
     completion_tokens: int
-    assistant_message: Message | None = None
-    tool_call_id: str | None = None
+    assistant_message: Message | None
+    calls: list[_ToolInvocation]
 
 
 @dataclass(slots=True)
@@ -365,11 +375,16 @@ class EpisodeRuntime:
     tool_execution_timeout_seconds: float | None = 600
     reward_profile: str = "signed_binary"
     scaffold: AgentScaffold | None = None
+    max_compactions: int | None = None
     token_renderer: Any = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if self.max_summary_tokens < 1:
             raise ValueError(f"max_summary_tokens must be at least 1, got {self.max_summary_tokens}")
+        if self.max_compactions is not None and (
+            type(self.max_compactions) is not int or self.max_compactions < 0
+        ):
+            raise ValueError("max_compactions must be a nonnegative integer or None")
         create_renderer = getattr(self.model, "create_token_renderer", None)
         if create_renderer is not None:
             if not callable(getattr(self.model, "generate_token_batch", None)):
@@ -433,13 +448,14 @@ class EpisodeRuntime:
         return active.tool_call_counts.get("search", 0) + active.tool_call_counts.get("get_document", 0)
 
     def _remaining_tool_calls(self, active: _ActiveEpisode) -> int | None:
-        if self.max_tool_calls is None:
+        if self.max_compactions is not None or self.max_tool_calls is None:
             return None
         return max(0, self.max_tool_calls - self._tool_calls_used(active))
 
     def _generated_token_budget_exhausted(self, active: _ActiveEpisode) -> bool:
         return (
-            self.generated_token_budget is not None
+            self.max_compactions is None
+            and self.generated_token_budget is not None
             and active.token_usage.budget_consumed_tokens >= self.generated_token_budget
         )
 
@@ -469,7 +485,7 @@ class EpisodeRuntime:
                 state.messages,
                 tools=self.scaffold.tools if self.scaffold is not None else ACTION_TOOLS,
                 tool_choice="auto",
-                parallel_tool_calls=False,
+                parallel_tool_calls=self.scaffold is None,
                 generation_kind="action",
             )
         return ConversationPrompt(state.messages, generation_kind="action")
@@ -903,18 +919,21 @@ class EpisodeRuntime:
         self._initialize_ledger(active)
         return active
 
-    def _completed_result(
+    def _terminal_result(
         self,
         active: _ActiveEpisode,
-        answer: str,
+        *,
+        status: str,
+        outcome: Outcome,
+        answer: str | None = None,
     ) -> RuntimeResult:
         return RuntimeResult(
             query_id=active.state.query_id,
-            status="completed",
+            status=status,
             final_answer=answer,
             summary_turns=list(active.summary_turns),
             turn_rewards=apply_terminal_reward(
-                outcome="correct_answer",
+                outcome=outcome,
                 reward_profile=self.reward_profile,
                 trainable_turn_ids=trainable_turn_ids_from_records(active.trajectory_records),
             ),
@@ -928,13 +947,13 @@ class EpisodeRuntime:
     def _parse_action_output(
         self,
         generated_output: _GeneratedOutput,
-    ) -> tuple[dict[str, object], str, Message | None, str | None] | None:
+    ) -> tuple[list[_ToolInvocation], str, Message | None] | None:
         if not self._uses_native_tools:
             parsed = parse_model_tool_call(generated_output.text)
             if parsed is None:
                 return None
             payload, normalized_output = parsed
-            return payload, normalized_output, None, None
+            return [_ToolInvocation(payload["tool_name"], payload["arguments"])], normalized_output, None
         message = generated_output.message
         if self.scaffold is not None:
             from hashlib import sha256
@@ -943,19 +962,14 @@ class EpisodeRuntime:
             ]).encode()).hexdigest()[:24]
             message = self.scaffold.parse(generated_output.text, call_id=call_id,
                                           thinking=self.token_renderer.enable_thinking)
-        if message is None or len(message.tool_calls) != 1:
+        if message is None or not message.tool_calls:
             return None
-        tool_call = message.tool_calls[0]
-        payload: dict[str, object] = {
-            "tool_name": tool_call.name,
-            "arguments": tool_call.arguments,
-        }
-        return (
-            payload,
-            json.dumps(payload, ensure_ascii=False),
-            message,
-            tool_call.id,
-        )
+        calls = [_ToolInvocation(call.name, call.arguments, call.id) for call in message.tool_calls]
+        ids = {call.id for call in calls}
+        if len(ids) != len(calls) or not all(ids):
+            return None
+        payloads = [{"tool_name": call.name, "arguments": call.arguments} for call in calls]
+        return calls, json.dumps(payloads[0] if len(calls) == 1 else payloads, ensure_ascii=False), message
 
     def _prepare_action_output(
         self,
@@ -964,7 +978,7 @@ class EpisodeRuntime:
         prompt: str | None = None,
         prompt_tokens: int | None = None,
         generation_kind: str = "action",
-    ) -> _PendingToolAction | None:
+    ) -> _PendingToolRound | None:
         state = active.state
         query_id = state.query_id
         prompt = prompt if prompt is not None else self._build_runtime_prompt(state)
@@ -1011,8 +1025,8 @@ class EpisodeRuntime:
                     generation_kind=generation_kind,
                 )
                 return None
-        parsed_tool_call = self._parse_action_output(generated_output)
-        if parsed_tool_call is None:
+        parsed_action = self._parse_action_output(generated_output)
+        if parsed_action is None:
             active.result = self._malformed_result(
                 active,
                 prompt,
@@ -1022,12 +1036,17 @@ class EpisodeRuntime:
                 generation_kind=generation_kind,
             )
             return
-        payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
-        tool_name = payload["tool_name"]
-        arguments = payload["arguments"]
+        calls, normalized_output, assistant_message = parsed_action
+        first_call = calls[0]
+        if len(calls) > 1 and (self.scaffold is not None or any(call.name == "finish" for call in calls)):
+            active.result = self._malformed_result(
+                active, prompt, raw_output, prompt_tokens=prompt_tokens,
+                completion_tokens=generated_output.completion_tokens, generation_kind=generation_kind,
+            )
+            return None
 
         if (
-            tool_name in {"search", "get_document"}
+            any(call.name in {"search", "get_document"} for call in calls)
             and self._requires_exact_token_ids()
             and active.token_ledger is None
             and _extract_completed_thinking(raw_output) is None
@@ -1045,7 +1064,7 @@ class EpisodeRuntime:
             )
             return None
 
-        if active.token_ledger is not None and self.scaffold is None:
+        if active.token_ledger is not None:
             try:
                 self.token_renderer.validate_completion_boundary(
                     generated_output.completion_token_ids, generated_output.finish_reason)
@@ -1055,25 +1074,13 @@ class EpisodeRuntime:
                     generation_kind=generation_kind)
                 return None
 
-        if self.scaffold is not None:
-            try:
-                self.token_renderer.validate_completion_boundary(
-                    generated_output.completion_token_ids, generated_output.finish_reason)
-            except UnsupportedTokenBoundary:
-                active.result = self._malformed_result(active, prompt, raw_output,
-                    prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
-                    generation_kind=generation_kind)
-                return None
-            if self.scaffold.is_complete(tool_name, query_id=query_id, forced=False):
-                tool_name, arguments = "finish", {"answer": ""}
-            else:
-                return _PendingToolAction(active=active, prompt=prompt, raw_output=raw_output,
-                    normalized_output=normalized_output, tool_name=tool_name, arguments=arguments,
-                    prompt_tokens=prompt_tokens, completion_tokens=generated_output.completion_tokens,
-                    assistant_message=assistant_message, tool_call_id=tool_call_id)
+        tool_name, arguments = first_call.name, first_call.arguments
+        scaffold_complete = self.scaffold is not None and self.scaffold.is_complete(
+            tool_name, query_id=query_id, forced=False
+        )
 
-        if tool_name == "finish":
-            answer = arguments.get("answer")
+        if scaffold_complete or (self.scaffold is None and tool_name == "finish"):
+            answer = "" if scaffold_complete else arguments.get("answer")
             if not isinstance(answer, str):
                 active.result = self._malformed_result(
                     active,
@@ -1098,8 +1105,8 @@ class EpisodeRuntime:
             if assistant_message is not None:
                 turn_record["assistant_message"] = serialize_messages([assistant_message])[0]
                 turn_record["reasoning"] = assistant_message.reasoning_content or ""
-            if tool_call_id is not None:
-                turn_record["tool_call_id"] = tool_call_id
+            if first_call.id is not None:
+                turn_record["tool_call_id"] = first_call.id
             active.turn_records.append(turn_record)
             active.interval_turn_ids.append("final-answer")
             interval_messages = list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(state.messages)
@@ -1112,34 +1119,17 @@ class EpisodeRuntime:
                 termination_kind="final_answer",
                 prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
             )
-            active.result = self._completed_result(active, answer)
+            active.result = self._terminal_result(
+                active, status="completed", outcome="correct_answer", answer=answer
+            )
             return None
 
-        if tool_name == "search":
-            query = arguments.get("query")
-            if not isinstance(query, str):
-                active.result = self._malformed_result(
-                    active,
-                    prompt,
-                    raw_output,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=generated_output.completion_tokens,
-                    generation_kind=generation_kind,
-                )
-                return None
-        elif tool_name == "get_document":
-            doc_id = arguments.get("doc_id")
-            if not isinstance(doc_id, str):
-                active.result = self._malformed_result(
-                    active,
-                    prompt,
-                    raw_output,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=generated_output.completion_tokens,
-                    generation_kind=generation_kind,
-                )
-                return None
-        else:
+        retrieval_arguments = {"search": "query", "get_document": DOCUMENT_ID_ARGUMENT}
+        if self.scaffold is None and any(
+            call.name not in retrieval_arguments
+            or not isinstance(call.arguments.get(retrieval_arguments[call.name]), str)
+            for call in calls
+        ):
             active.result = self._malformed_result(
                 active,
                 prompt,
@@ -1150,17 +1140,15 @@ class EpisodeRuntime:
             )
             return None
 
-        return _PendingToolAction(
+        return _PendingToolRound(
             active=active,
             prompt=prompt,
             raw_output=raw_output,
             normalized_output=normalized_output,
-            tool_name=tool_name,
-            arguments=arguments,
             prompt_tokens=prompt_tokens,
             completion_tokens=generated_output.completion_tokens,
             assistant_message=assistant_message,
-            tool_call_id=tool_call_id,
+            calls=calls,
         )
 
     def _search_many(self, queries: list[str]) -> list[list[SearchResult]]:
@@ -1172,11 +1160,12 @@ class EpisodeRuntime:
             raise ValueError(f"search_many returned {len(results)} result batches for {len(queries)} queries")
         return results
 
-    def _apply_tool_result(self, action: _PendingToolAction, tool_result: str) -> None:
+    def _apply_tool_results(self, action: _PendingToolRound, tool_results: list[str]) -> None:
         active = action.active
         state = active.state
         query_id = state.query_id
         if self.scaffold is not None and active.token_ledger is not None:
+            tool_result, = tool_results
             # Bound only this new observation, before its first append. Reserve
             # the next control and completion; historical tokens are never cut.
             renderer = self.token_renderer
@@ -1187,7 +1176,7 @@ class EpisodeRuntime:
             available = max(0, limit - len(active.token_ledger) - reserve)
             def size(text):
                 return len(renderer.render_tool_result(
-                    Message(role="tool", content=text, tool_call_id=action.tool_call_id),
+                    Message(role="tool", content=text, tool_call_id=action.calls[0].id),
                     completion_ids=output.completion_token_ids, finish_reason=output.finish_reason))
             if size(tool_result) > available:
                 note = "\n[Observation truncated to reserve the next interval boundary.]"
@@ -1198,9 +1187,27 @@ class EpisodeRuntime:
                         low = mid
                     else:
                         high = mid - 1
-                tool_result = tool_result[:low] + note
-        tool_result_tokens = self._completion_token_count(tool_result)
-        active.token_usage.tool_result_tokens += tool_result_tokens
+                tool_results = [tool_result[:low] + note]
+
+        if self._uses_native_tools:
+            if action.assistant_message is None:
+                raise RuntimeError("Native tool round is missing its assistant message")
+            assistant_message = action.assistant_message
+            result_messages = [
+                Message(role="tool", content=result, tool_call_id=call.id)
+                for call, result in zip(action.calls, tool_results, strict=True)
+            ]
+        else:
+            tool_result, = tool_results
+            assistant_message = Message(role="assistant", content=action.raw_output)
+            result_messages = [Message(role="user", content=format_tool_response(tool_result))]
+        if active.token_ledger is not None:
+            output = active.interval_outputs[-1]
+            active.token_ledger.append_external(self.token_renderer.render_tool_results(
+                result_messages, completion_ids=output.completion_token_ids,
+                finish_reason=output.finish_reason), kind="tool_result")
+        state.messages.extend([assistant_message, *result_messages])
+        active.token_usage.tool_result_tokens += sum(self._completion_token_count(result) for result in tool_results)
 
         tool_turn_id = self._next_tool_turn_id(state)
         turn_record: dict[str, Any] = {
@@ -1217,77 +1224,59 @@ class EpisodeRuntime:
         if action.assistant_message is not None:
             turn_record["assistant_message"] = serialize_messages([action.assistant_message])[0]
             turn_record["reasoning"] = action.assistant_message.reasoning_content or ""
-        if action.tool_call_id is not None:
-            turn_record["tool_call_id"] = action.tool_call_id
+            if len(action.calls) == 1:
+                turn_record["tool_call_id"] = action.calls[0].id
         active.turn_records.append(turn_record)
         active.interval_turn_ids.append(tool_turn_id)
         state.tool_turn_count += 1
         active.interval_round_count += 1
-        if self._uses_native_tools:
-            if action.assistant_message is None or action.tool_call_id is None:
-                raise RuntimeError("Native tool action is missing its assistant message or tool_call_id")
-            state.messages.append(action.assistant_message)
-            state.messages.append(
-                Message(
-                    role="tool",
-                    content=tool_result,
-                    tool_call_id=action.tool_call_id,
-                )
-            )
-        else:
-            state.messages.append(Message(role="assistant", content=action.raw_output))
-            state.messages.append(Message(role="user", content=format_tool_response(tool_result)))
-        if active.token_ledger is not None:
-            output = active.interval_outputs[-1]
-            active.token_ledger.append_external(self.token_renderer.render_tool_result(
-                state.messages[-1], completion_ids=output.completion_token_ids,
-                finish_reason=output.finish_reason), kind="tool_result")
 
-    def _execute_pending_tool_actions(self, actions: list[_PendingToolAction]) -> None:
+    def _execute_pending_tool_actions(self, actions: list[_PendingToolRound]) -> None:
         if self.scaffold is not None:
             for action in actions:
-                output = self.scaffold.execute(action.tool_name, action.arguments,
+                call, = action.calls
+                output = self.scaffold.execute(call.name, call.arguments,
                                                query_id=action.active.state.query_id)
                 counts = action.active.tool_call_counts
-                counts[action.tool_name] = counts.get(action.tool_name, 0) + 1
-                self._apply_tool_result(action, output)
+                counts[call.name] = counts.get(call.name, 0) + 1
+                self._apply_tool_results(action, [output])
             return
         tool_started = time.monotonic()
 
-        search_actions = [action for action in actions if action.tool_name == "search"]
-        if search_actions:
-            queries = [str(action.arguments["query"]) for action in search_actions]
-            search_results_by_query = self._search_many(queries)
-            for action, search_results in zip(search_actions, search_results_by_query):
-                action.active.tool_call_counts["search"] += 1
-                self._record_search_result_docids(action.active.retrieved_docids, search_results)
-                self._apply_tool_result(action, json.dumps(search_results, ensure_ascii=False))
+        allowed_calls = [action.calls[:self._remaining_tool_calls(action.active)] for action in actions]
+        queries = [call.arguments["query"] for calls in allowed_calls for call in calls if call.name == "search"]
+        search_batches = iter(self._search_many(queries) if queries else [])
 
-        for action in actions:
-            if action.tool_name != "get_document":
-                continue
-            if (
-                self.tool_execution_timeout_seconds is not None
-                and time.monotonic() - tool_started >= self.tool_execution_timeout_seconds
-            ):
-                LOGGER.warning(
-                    "Tool execution timeout (%.0fs) reached; skipping get_document for %s",
-                    self.tool_execution_timeout_seconds,
-                    action.arguments.get("doc_id", "unknown"),
-                )
-                error_result = "Error: Tool execution timed out during document retrieval."
-                action.active.tool_call_counts["get_document"] += 1
-                self._apply_tool_result(action, error_result)
-                continue
-            doc_id = str(action.arguments["doc_id"])
-            self._record_retrieved_docids(action.active.retrieved_docids, [doc_id])
-            try:
-                tool_result = self.backend.get_document(doc_id)
-            except Exception:
-                LOGGER.warning("Failed to retrieve document %s", doc_id, exc_info=True)
-                tool_result = f"Error: Document '{doc_id}' not found in retrieval index."
-            action.active.tool_call_counts["get_document"] += 1
-            self._apply_tool_result(action, tool_result)
+        for action, calls in zip(actions, allowed_calls, strict=True):
+            results = []
+            for call in calls:
+                action.active.tool_call_counts[call.name] += 1
+                if call.name == "search":
+                    hits = next(search_batches)
+                    self._record_search_result_docids(action.active.retrieved_docids, hits)
+                    results.append(json.dumps(hits, ensure_ascii=False))
+                else:
+                    results.append(self._retrieve_document(
+                        action.active, call.arguments[DOCUMENT_ID_ARGUMENT], tool_started
+                    ))
+            # Every sampled call needs a linked response, including calls skipped by the budget.
+            results.extend(["Error: Tool call budget exhausted."] * (len(action.calls) - len(calls)))
+            self._apply_tool_results(action, results)
+
+    def _retrieve_document(self, active: _ActiveEpisode, doc_id: str, tool_started: float) -> str:
+        if (
+            self.tool_execution_timeout_seconds is not None
+            and time.monotonic() - tool_started >= self.tool_execution_timeout_seconds
+        ):
+            LOGGER.warning("Tool execution timeout (%.0fs) reached; skipping get_document for %s",
+                           self.tool_execution_timeout_seconds, doc_id)
+            return "Error: Tool execution timed out during document retrieval."
+        self._record_retrieved_docids(active.retrieved_docids, [doc_id])
+        try:
+            return self.backend.get_document(doc_id)
+        except Exception:
+            LOGGER.warning("Failed to retrieve document %s", doc_id, exc_info=True)
+            return f"Error: Document '{doc_id}' not found in retrieval index."
 
     def _apply_action_output(self, active: _ActiveEpisode, raw_output: str, prompt: str | None = None) -> None:
         action = self._prepare_action_output(
@@ -1346,8 +1335,8 @@ class EpisodeRuntime:
                     generation_kind="forced_answer",
                 )
                 return
-        parsed_tool_call = self._parse_action_output(generated_output)
-        if parsed_tool_call is None:
+        parsed_action = self._parse_action_output(generated_output)
+        if parsed_action is None or len(parsed_action[0]) != 1:
             active.result = self._malformed_result(
                 active,
                 prompt,
@@ -1358,9 +1347,8 @@ class EpisodeRuntime:
             )
             return
 
-        payload, normalized_output, assistant_message, tool_call_id = parsed_tool_call
-        tool_name = payload["tool_name"]
-        arguments = payload["arguments"]
+        (call,), normalized_output, assistant_message = parsed_action
+        tool_name, arguments = call.name, call.arguments
         if active.token_ledger is not None:
             try:
                 self.token_renderer.validate_completion_boundary(
@@ -1410,8 +1398,8 @@ class EpisodeRuntime:
         if assistant_message is not None:
             turn_record["assistant_message"] = serialize_messages([assistant_message])[0]
             turn_record["reasoning"] = assistant_message.reasoning_content or ""
-        if tool_call_id is not None:
-            turn_record["tool_call_id"] = tool_call_id
+        if call.id is not None:
+            turn_record["tool_call_id"] = call.id
         active.turn_records.append(turn_record)
         active.interval_turn_ids.append("final-answer")
         interval_messages = list(prompt.messages) if isinstance(prompt, ConversationPrompt) else list(state.messages)
@@ -1422,7 +1410,9 @@ class EpisodeRuntime:
             termination_kind="forced_answer",
             prompt=prompt if isinstance(prompt, ConversationPrompt) else None,
         )
-        active.result = self._completed_result(active, answer)
+        active.result = self._terminal_result(
+            active, status="completed", outcome="correct_answer", answer=answer
+        )
 
     def _build_summary_prompt_for_active(self, active: _ActiveEpisode) -> ConversationPrompt | None:
         if self._generated_token_budget_exhausted(active):
@@ -1432,6 +1422,12 @@ class EpisodeRuntime:
         if current_prompt_tokens < active.state.context_threshold_tokens:
             return None
         if active.interval_round_count == 0:
+            return None
+        if self.max_compactions is not None and len(active.summary_turns) >= self.max_compactions:
+            self._finalize_trajectory(
+                active, active.state.messages, termination_kind="overlong", prompt=current_prompt
+            )
+            active.result = self._terminal_result(active, status="overlong", outcome="overlong")
             return None
         prompt = active.context_manager.build_summary_context(
             active.state,
@@ -1595,7 +1591,7 @@ class EpisodeRuntime:
 
         if action_items:
             action_outputs = self._generate_batch([self._commit_token_input(active, prompt) for active, prompt, _, _ in action_items])
-            pending_tool_actions: list[_PendingToolAction] = []
+            pending_tool_actions: list[_PendingToolRound] = []
             for (active, prompt, prompt_tokens, forced_answer), generated_output in zip(
                 action_items,
                 action_outputs,

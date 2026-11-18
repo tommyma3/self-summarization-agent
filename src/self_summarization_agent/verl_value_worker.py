@@ -10,7 +10,7 @@ from self_summarization_agent.value_model import (
     CompactionValueHead,
     expected_binary_value,
     load_value_head,
-    reward_class_indices,
+    outcome_log_losses,
     save_value_head,
 )
 from self_summarization_agent.value_optimizer import attach_value_head, value_learning_rate_metrics
@@ -230,17 +230,17 @@ class CompactionValueTrainingWorker(TrainingWorker):
         dp_group: Any = None,
     ):
         state_logits = self._pop_state_logits(data)
+        reward_profile = getattr(self, "reward_profile", "signed_binary")
         value_probe = data["value_probe_mask"].to(device=state_logits.device, dtype=torch.bool)
         if bool(torch.all(value_probe)):
             model_output.pop("log_probs", None)
             # verl's postprocess builds nested tensors by unbinding along the batch
             # dimension. Keep per-state outputs at least 1-D so they are not treated
             # as zero-dimensional scalars.
-            model_output["compaction_values"] = expected_binary_value(state_logits, getattr(self, "reward_profile", "signed_binary")).unsqueeze(-1)
-            model_output["compaction_value_losses"] = torch.nn.functional.cross_entropy(
-                state_logits.float(),
-                reward_class_indices(data["rewards"].to(state_logits.device), getattr(self, "reward_profile", "signed_binary")),
-                reduction="none",
+            model_output["compaction_values"] = expected_binary_value(state_logits, reward_profile).unsqueeze(-1)
+            model_output["compaction_value_losses"] = outcome_log_losses(
+                state_logits, data["rewards"].to(state_logits.device),
+                reward_profile,
             ).unsqueeze(-1)
             model_output["sample_indices"] = data["sample_indices"].to(state_logits.device).unsqueeze(-1)
             return state_logits.sum() * 0.0, {}
@@ -255,12 +255,7 @@ class CompactionValueTrainingWorker(TrainingWorker):
         rewards = data["rewards"].to(device=state_logits.device, dtype=torch.float32)
         value_weights = data["value_weights"].to(device=state_logits.device, dtype=torch.float32)
         valid = data["value_valid_mask"].to(device=state_logits.device, dtype=torch.bool)
-        reward_class_indices(rewards[valid], getattr(self, "reward_profile", "signed_binary"))
-        per_state_loss = torch.nn.functional.cross_entropy(
-            state_logits.float(),
-            reward_class_indices(rewards, getattr(self, "reward_profile", "signed_binary")),
-            reduction="none",
-        )
+        per_state_loss = outcome_log_losses(state_logits, rewards, reward_profile)
         local_value_loss = (per_state_loss * value_weights * valid.to(value_weights.dtype)).sum()
         dp_size = int(data["dp_size"])
         # FSDP averages DP gradients; undo that average here. Microbatch
@@ -269,9 +264,10 @@ class CompactionValueTrainingWorker(TrainingWorker):
         value_loss = local_value_loss * dp_size
         total_loss = policy_loss + self.value_loss_coefficient * value_loss.to(policy_loss.device)
 
-        predicted = torch.where(expected_binary_value(state_logits, getattr(self, "reward_profile", "signed_binary")) >= (0.5 if getattr(self, "reward_profile", "signed_binary") == "binary_zero_one" else 0), 1.0, (0.0 if getattr(self, "reward_profile", "signed_binary") == "binary_zero_one" else -1.0))
+        success_threshold = 0.5 if reward_profile == "binary_zero_one" else 0.0
+        predicted_success = expected_binary_value(state_logits, reward_profile) >= success_threshold
         correct_weight = value_weights * valid.to(value_weights.dtype)
-        local_accuracy = ((predicted == rewards).to(value_weights.dtype) * correct_weight).sum()
+        local_accuracy = ((predicted_success == (rewards > 0)).to(value_weights.dtype) * correct_weight).sum()
         metrics["value/loss"] = Metric(value=value_loss, aggregation=AggregationType.SUM)
         metrics["value/weight_mass"] = Metric(
             value=correct_weight.sum() * dp_size,

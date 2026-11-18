@@ -25,6 +25,8 @@ SEARCH_TOOL = {
     },
 }
 
+DOCUMENT_ID_ARGUMENT = "docid"
+
 DOCUMENT_TOOL = {
     "type": "function",
     "function": {
@@ -33,12 +35,12 @@ DOCUMENT_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "doc_id": {
+                DOCUMENT_ID_ARGUMENT: {
                     "type": "string",
                     "description": "The document identifier returned by search.",
                 }
             },
-            "required": ["doc_id"],
+            "required": [DOCUMENT_ID_ARGUMENT],
             "additionalProperties": False,
         },
     },

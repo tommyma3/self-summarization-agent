@@ -11,6 +11,7 @@ import torch
 from safetensors import SafetensorError
 from safetensors.torch import load_file, save_file
 
+from .rewards import rollout_reward_values
 from .separate_value import (
     ADVANTAGES,
     CRITIC_DIR,
@@ -173,6 +174,7 @@ def read_shard(body, output):
         )
     offset = 0
     seen = set()
+    allowed_rewards = rollout_reward_values()
     for row in body["rows"]:
         key = tuple(row["key"])
         count = row["count"]
@@ -183,7 +185,7 @@ def read_shard(body, output):
             or count < 0
             or row["offset"] != offset
             or isinstance(reward, bool)
-            or reward not in (-1, 1)
+            or reward not in allowed_rewards
         ):
             raise ValueError("Invalid token interval membership")
         seen.add(key)

@@ -177,6 +177,12 @@ def test_verifier_rewards_shared_across_intervals_and_infrastructure_excluded():
     judged = apply_verifier_reward(row)
     assert set(judged["turn_rewards"].values()) == {1.0}
     assert judged["trainable_sample_count"] == 3
+    row["status"] = "overlong"
+    overlong = apply_verifier_reward(row)
+    assert set(overlong["turn_rewards"].values()) == {0.0}
+    assert overlong["judge"]["outcome"] == "overlong"
+    assert overlong["trainable_sample_count"] == 3
+    assert not overlong["benchmark_passed"]
     row["status"] = "malformed_tool_call"
     assert set(apply_verifier_reward(row)["turn_rewards"].values()) == {-1.0}
     row["benchmark_verifier"]["exception"] = {"exception_type": "VerifierTimeout"}

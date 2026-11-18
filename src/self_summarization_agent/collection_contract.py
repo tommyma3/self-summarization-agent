@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from self_summarization_agent.chat_template import load_chat_template
+from self_summarization_agent.config import runtime_config_identity
 from self_summarization_agent.token_stream import TITO_CONTRACT, TITO_COLLECTION_VERSION
 
 
@@ -19,7 +20,7 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
         from dataclasses import asdict
         from self_summarization_agent.benchmarks.harbor_common.dataset import benchmark_identity
         identity["benchmark"] = benchmark_identity(config.benchmark)
-        identity["runtime"] = asdict(config.runtime)
+        identity["runtime"] = runtime_config_identity(config.runtime)
         if config.benchmark.name == "swe-dev":
             # Catch local checkpoint replacement before accepting a stale cache.
             # Checkpoints are immutable once published; metadata avoids repeatedly
@@ -42,6 +43,11 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
             "train_limit": dataset.train_limit,
             "eval_limit": dataset.eval_limit,
         }
+    runtime = getattr(config, "runtime", None)
+    if getattr(runtime, "max_compactions", None) is not None and "runtime" not in identity:
+        identity["runtime"] = dict(max_compactions=runtime.max_compactions,
+            context_threshold_tokens=runtime.context_threshold_tokens,
+            max_context_tokens=runtime.max_context_tokens, max_summary_tokens=runtime.max_summary_tokens)
     for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt", "added_tokens.json"):
         path = checkpoint / name
         if path.is_file():

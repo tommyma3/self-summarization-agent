@@ -14,9 +14,9 @@ from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import JudgeDecision, RewardJudge
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.rewards import (
-    apply_malformed_tool_penalty,
     apply_terminal_reward,
-    is_penalized_runtime_status,
+    assign_runtime_rewards,
+    has_runtime_reward,
     trainable_turn_ids_from_records,
 )
 from self_summarization_agent.trajectory import extract_trainable_samples
@@ -112,8 +112,8 @@ def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) 
     trajectory_records = row["trajectory_records"]
     trainable_turn_ids = trainable_turn_ids_from_records(trajectory_records)
     rollout_id = f"{row.get('query_id')}:{row.get('rollout_index')}"
-    if is_penalized_runtime_status(status):
-        turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
+    turn_rewards = assign_runtime_rewards(status, trainable_turn_ids)
+    if turn_rewards is not None:
         judged_row["turn_rewards"] = turn_rewards
         judged_row["trainable_sample_count"] = len(
             extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id)
@@ -159,7 +159,7 @@ def judge_rollout_rows(
     judge_row_indices: list[int] = []
     decisions_by_row_index: dict[int, JudgeDecision] = {}
     for index, row in enumerate(rows):
-        if is_penalized_runtime_status(row.get("status")):
+        if has_runtime_reward(row.get("status")):
             decisions_by_row_index[index] = JudgeDecision(
                 outcome="wrong_answer",
                 judge_prompt=None,

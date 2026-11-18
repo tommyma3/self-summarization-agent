@@ -28,7 +28,7 @@ from self_summarization_agent.trajectory import (
     TOKEN_CACHE_VERSION,
     tokenize_interval_messages,
 )
-from self_summarization_agent.rewards import reward_bounds
+from self_summarization_agent.rewards import rollout_reward_values
 from self_summarization_agent.value_model import (
     CompactionValueHead,
     capture_lm_head_input,
@@ -39,7 +39,7 @@ from self_summarization_agent.value_model import (
     rollout_normalized_value_loss,
     save_value_head,
     normalized_value_evaluation_loss,
-    reward_class_indices,
+    outcome_log_losses,
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.value_optimizer import attach_value_head, value_learning_rate_metrics
@@ -896,8 +896,8 @@ class TransformersPolicyTrainer:
                     rewards = torch.tensor(
                         [s.reward for s in samples[start:end]], device=logits.device, dtype=torch.float32
                     )
-                    losses.extend(torch.nn.functional.cross_entropy(
-                        logits.float(), reward_class_indices(rewards, self.training_config.value.reward_profile), reduction="none"
+                    losses.extend(outcome_log_losses(
+                        logits, rewards, self.training_config.value.reward_profile
                     ).cpu().tolist())
                     if _report_progress(batch_index, len(ranges)):
                         elapsed = time.monotonic() - started
@@ -939,8 +939,9 @@ class TransformersPolicyTrainer:
             raise RuntimeError("Compaction value training is enabled without a value head")
         if any(sample.rollout_id is None for sample in samples):
             raise ValueError("Compaction value training requires rollout_id on every interval")
-        if any(sample.reward not in reward_bounds(self.training_config.value.reward_profile) for sample in samples):
-            raise ValueError("Compaction value training requires binary -1/+1 rollout rewards")
+        allowed_rewards = rollout_reward_values(self.training_config.value.reward_profile)
+        if any(sample.reward not in allowed_rewards for sample in samples):
+            raise ValueError("Compaction value training requires valid rollout rewards")
 
         reward_by_rollout: dict[str, float] = {}
         for sample in samples:
@@ -1074,9 +1075,10 @@ class TransformersPolicyTrainer:
             **value_diagnostics(samples, new_values, new_value_losses, prefix="value/eval_after", reward_profile=self.training_config.value.reward_profile),
         }
         minibatches_per_epoch = len(list(_minibatch_ranges(len(samples), minibatch_size)))
-        predicted_classes = [1.0 if value >= (0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0) else (0.0 if self.training_config.value.reward_profile == "binary_zero_one" else -1.0) for value in old_values]
+        success_threshold = 0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0.0
         accuracy = sum(
-            prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
+            (value >= success_threshold) == (sample.reward > 0)
+            for value, sample in zip(old_values, samples)
         ) / len(samples)
         mean_policy_loss = (
             sum(detached_policy_losses) / len(detached_policy_losses)

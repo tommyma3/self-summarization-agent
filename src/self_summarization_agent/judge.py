@@ -128,7 +128,7 @@ class RewardJudge:
     def evaluate(self, example: QueryExample, status: str, response: str) -> JudgeDecision:
         if status != "completed":
             return JudgeDecision(
-                outcome="budget_exhausted",
+                outcome="overlong" if status == "overlong" else "budget_exhausted",
                 judge_prompt=None,
                 judge_response=None,
                 parse_error=False,
@@ -155,7 +155,7 @@ class RewardJudge:
         for index, (example, status, response) in enumerate(items):
             if status != "completed":
                 decisions[index] = JudgeDecision(
-                    outcome="budget_exhausted",
+                    outcome="overlong" if status == "overlong" else "budget_exhausted",
                     judge_prompt=None,
                     judge_response=None,
                     parse_error=False,

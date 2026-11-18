@@ -11,6 +11,7 @@ from self_summarization_agent.value_model import (
     load_value_head,
     migrate_compaction_value_head_sidecar,
     normalized_value_evaluation_loss,
+    outcome_log_losses,
     reward_class_indices,
     rollout_normalized_value_loss,
     rollout_value_weights,
@@ -44,6 +45,16 @@ def test_rollout_normalized_value_loss_uses_binary_targets() -> None:
 
     assert loss.item() == pytest.approx(torch.log(torch.tensor(2.0)).item())
     assert reward_class_indices(rewards).tolist() == [0, 1, 1, 1]
+
+
+def test_zero_reward_is_a_neutral_target_for_signed_values() -> None:
+    logits = torch.tensor([[0.0, 2.0], [0.0, 2.0]])
+    rewards = torch.tensor([0.0, 1.0])
+    expected = -logits.log_softmax(-1)
+    assert torch.allclose(outcome_log_losses(logits, rewards),
+                          torch.stack((expected[0].mean(), expected[1, 1])))
+    assert torch.allclose(outcome_log_losses(logits, rewards, "binary_zero_one"),
+                          torch.stack((expected[0, 0], expected[1, 1])))
 
 
 def test_state_hidden_states_selects_exact_prompt_end() -> None:

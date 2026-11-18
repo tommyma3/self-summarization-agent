@@ -15,7 +15,7 @@ from self_summarization_agent.value_model import (
     VALUE_HEAD_FILENAME, VALUE_HEAD_MANIFEST_FILENAME, value_support, value_head_manifest,
 )
 
-from .rewards import reward_bounds
+from .rewards import reward_bounds, rollout_reward_values
 
 CRITIC_DIR = "critic"
 CRITIC_STATE = "training_state.pt"
@@ -87,13 +87,14 @@ def sample_key(sample):
 
 def validate_samples(samples, max_sequence_length=None, reward_profile="signed_binary"):
     seen, rewards = set(), {}
+    allowed_rewards = rollout_reward_values(reward_profile)
     for sample in samples:
         key = sample_key(sample)
         if sample.rollout_id is None or key in seen:
             raise ValueError("Separate critic requires unique rollout/interval keys")
         seen.add(key)
-        if sample.reward not in reward_bounds(reward_profile) or rewards.setdefault(sample.rollout_id, sample.reward) != sample.reward:
-            raise ValueError("Separate critic requires consistent binary rollout rewards")
+        if sample.reward not in allowed_rewards or rewards.setdefault(sample.rollout_id, sample.reward) != sample.reward:
+            raise ValueError("Separate critic requires consistent valid rollout rewards")
         if not sample.has_exact_collection_tokens or not sample.has_token_reference_logprobs:
             raise ValueError("Separate critic requires exact collected IDs and cached token log probabilities")
         ids, labels, mask = sample.input_ids, sample.labels, sample.completion_mask

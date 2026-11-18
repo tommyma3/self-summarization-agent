@@ -7,10 +7,10 @@ from __future__ import annotations
 import math
 
 from self_summarization_agent.separate_value import sample_key
-from .rewards import reward_bounds
+from .rewards import reward_bounds, rollout_reward_values
 
 
-TERMINAL_KINDS = {"final_answer", "forced_answer", "malformed", "context_overflow"}
+TERMINAL_KINDS = {"final_answer", "forced_answer", "malformed", "context_overflow", "overlong"}
 
 
 def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
@@ -19,6 +19,7 @@ def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
     if len(by_key) != len(samples):
         raise ValueError("Duplicate interval keys in return construction")
     selected = {key[0] for key in by_key}
+    allowed_rewards = rollout_reward_values(reward_profile)
     seen_rollouts, seen_keys, chains = set(), set(), []
     for row in rows:
         rollout_id = f"{row.get('query_id')}:{row.get('rollout_index')}"
@@ -42,7 +43,7 @@ def ordered_rollout_chains(rows, samples, reward_profile="signed_binary"):
             sample = by_key[key]
             reward = row.get("turn_rewards", {}).get(key[1])
             if (sample.query_id != row.get("query_id") or record.get("query_id") != sample.query_id
-                    or isinstance(reward, bool) or reward not in reward_bounds(reward_profile) or reward != sample.reward):
+                    or isinstance(reward, bool) or reward not in allowed_rewards or reward != sample.reward):
                 raise ValueError("Inconsistent rollout identity or reward in return chain")
             if "prefix_summary_turn_id" not in record:
                 raise ValueError("Missing compaction linkage metadata")

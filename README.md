@@ -220,7 +220,7 @@ What the runtime returns:
 
 Each training interval begins with the same system instructions and the same original user request. After the first compaction, the latest compressed agent history is appended as a separate conditioning-only user message wrapped in `<summary>...</summary>`. On the OpenAI-compatible path, `search`, `get_document`, and `finish` are native function tools and tool results are linked `role: tool` messages. Summary boundaries are terminal runtime-control `user` messages, while forced-answer boundaries remain terminal runtime-control `system` messages; both are appended without changing the earlier interval prefix. API `tool_choice` disables tools for a summary or requires `finish` for a forced answer. The generated summary remains a normal assistant message and must contain `<summary>...</summary>`. The runtime stores its extracted body for metrics and diagnostics, then rewraps that body when constructing the next interval after the unchanged task prefix. The runtime preserves the structured assistant reasoning, tool calls, tool-call IDs, and full raw sampled completion.
 
-For offline vLLM BrowseComp-Plus rollouts, set `rollout.browsecomp_native_tools: true` in the training YAML (or pass `--set rollout.browsecomp_native_tools=true`). The default is the tagged action format. Native mode renders the three function schemas once at each interval start, dispatches calls parsed from sampled IDs, and appends linked tool results. Summary and forced-answer generations use constrained decoding. Use a fresh output directory when changing formats because the collection profiles differ.
+The default training preset enables `rollout.browsecomp_native_tools` for offline vLLM BrowseComp-Plus rollouts. Native mode renders the three function schemas once at each interval start, dispatches calls parsed from sampled IDs, and appends linked tool results. Summary and forced-answer generations use constrained decoding. Use a fresh output directory when changing formats because the collection profiles differ.
 
 This context contract is trajectory schema version 3. Older rollout rows must be recollected under a fresh artifact root rather than resumed or mixed with schema-v3 data.
 
@@ -334,6 +334,19 @@ sampling: BrowseComp uses temperature 1.0 and presence penalty 1.5; SWE-dev and
 Terminal-Bench use temperature 0.6 and presence penalty 0.0. Both presets enable
 sampling with top-p 0.95, top-k 20, min-p 0.0, and repetition penalty 1.0.
 These settings affect generation; training still uses raw policy logprobs.
+
+The default BrowseComp-Plus preset checks the 16,000-token threshold after each
+tool round. It allows four successful compactions and ends the rollout with
+reward 0 if another tool round reaches the threshold. The compaction limit
+disables the episode budgets that trigger forced answers.
+
+Initialize a fresh run's `latest` pointer to the starting policy with
+`write_latest_checkpoint`, then run the default preset with the wrapper.
+
+```bash
+scripts/train_iterations.sh --iterations 1 \
+  --latest-root artifacts/train/qwen-bcplus-native-compaction-train
+```
 
 The `scripts/train_iterations.sh` wrapper reads the config with all `--set`
 overrides and automatically enables value pretraining for a separate critic
@@ -664,6 +677,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 - The summarization trigger is runtime-controlled, not model-controlled.
 - Summarization happens only after a completed tool round.
 - `runtime.generated_token_budget` limits `budget_consumed_tokens`: all model completion tokens, including thinking, actions, summaries, and forced answers, plus each raw appended tool result counted once. `total_generated_tokens` remains model-output-only for reporting. Budget exhaustion takes priority over compaction.
+- Set `runtime.max_compactions` to a nonnegative integer (for example, `--set runtime.max_compactions=2`) to disable tool and generated-token budgets and their forced answers. After that many successful compactions, reaching `runtime.context_threshold_tokens` after a tool round ends the rollout as `overlong` with reward 0 on every interval. A value of 0 allows no compactions.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
 - `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template permits a tagged summary user control or forced-answer system control at the end of an interval and preserves all reasoning since the interval's real user query.
 - A successful compaction starts a fresh interval with the unchanged system instructions, unchanged original user request, and the latest `<summary>...</summary>`-wrapped compressed agent history; no raw assistant/tool tail is retained.

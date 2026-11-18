@@ -240,7 +240,7 @@ def test_ppo_distinct_token_advantages_and_scalar_equivalence():
 
 
 def test_frozen_shard_retry_and_corruption(critic, tmp_path):
-    data = [sample(), sample("b", "0", -1)]
+    data = [sample(), sample("b", "0", 0)]
     values, _ = critic.evaluate(data)
     output = tmp_path / "frozen"
     body = freeze_tokens(
@@ -251,6 +251,7 @@ def test_frozen_shard_retry_and_corruption(critic, tmp_path):
         body, output, data, "behavior", critic.config, "source", critic.tokenizer_hash
     )
     assert result[sample_key(data[0])].dense(data[0]) == [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    assert result[sample_key(data[1])].dense(data[1]) == [0.0] * 6
     again = freeze_tokens(
         output, data, values, "behavior", critic.config, "source", critic.tokenizer_hash
     )

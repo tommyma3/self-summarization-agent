@@ -196,6 +196,16 @@ class RuntimeConfig:
     # timeout remains authoritative for backward compatibility.
     train_update_timeout_seconds: int | None = None
     tool_execution_timeout_seconds: float = 600
+    # A nonnegative limit replaces tool/token budgets and forced answers.
+    max_compactions: int | None = None
+
+
+def runtime_config_identity(config: RuntimeConfig) -> dict[str, Any]:
+    """Keep existing artifact identities when the compaction limit is unset."""
+    identity = asdict(config)
+    if identity.get("max_compactions") is None:
+        identity.pop("max_compactions", None)
+    return identity
 
 
 @dataclass(slots=True)

@@ -546,7 +546,7 @@ def test_runtime_terminates_episode_when_tool_result_overflows_context() -> None
 def test_runtime_terminates_episode_when_forced_answer_prompt_overflows_context() -> None:
     # The generated-token budget trips only after a large tool result is
     # appended, so the forced-answer prompt itself can exceed the safe limit.
-    get_document = tool_output('{"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}')
+    get_document = tool_output('{"tool_name": "get_document", "arguments": {"docid": "doc-1"}}')
     backend = FakeBackend(search_index={}, documents={"doc-1": "word " * 1200})
     model = ScriptedModel(outputs=[get_document])
     runtime = EpisodeRuntime(
@@ -644,7 +644,7 @@ def test_parse_model_tool_call_normalizes_document_and_answer_tags() -> None:
     answer = parse_model_tool_call("<think>Enough evidence.</think>\n<answer>done</answer>")
 
     assert document is not None
-    assert document[0] == {"tool_name": "get_document", "arguments": {"doc_id": "doc-1"}}
+    assert document[0] == {"tool_name": "get_document", "arguments": {"docid": "doc-1"}}
     assert answer is not None
     assert answer[0] == {"tool_name": "finish", "arguments": {"answer": "done"}}
 

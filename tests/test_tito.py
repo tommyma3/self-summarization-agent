@@ -398,9 +398,190 @@ def native_call(name, key, value):
     return f"</think><tool_call>\n<function={name}>\n<parameter={key}>\n{value}\n</parameter>\n</function>\n</tool_call><|im_end|>"
 
 
+def native_action(*calls):
+    return "</think>\n" + "\n".join(
+        native_call(*call).removeprefix("</think>").removesuffix("<|im_end|>") for call in calls
+    ) + "<|im_end|>"
+
+
+@pytest.mark.parametrize(("summary", "termination"), [
+    (None, "final_answer"),
+    (SUMMARY, "compaction"),
+    ("</think>invalid summary<|im_end|>", "malformed"),
+])
+def test_multiple_native_calls_complete_one_round_before_the_next_generation(summary, termination):
+    action = native_action(
+        ("get_document", "docid", "d"), ("search", "query", "q"), ("search", "query", "q")
+    )
+    valid = summary in (None, SUMMARY)
+    outputs = [action] + ([summary] if summary else [])
+    if valid:
+        outputs.append(native_call("finish", "answer", "done"))
+    model = TokenModel(outputs, native=True)
+    result = runtime(model, context_threshold_tokens=1 if summary else 15000).run("q", "question")
+
+    assert result.status == ("completed" if valid else "malformed_tool_call")
+    assert result.tool_call_counts == {"search": 2, "get_document": 1}
+    assert result.token_usage["retired_round_count"] == (1 if summary == SUMMARY else 0)
+    assert len([turn for turn in result.turn_records if turn["kind"] == "tool"]) == 1
+    assert len(result.trajectory_records) == model.tokenizer.template_calls == (2 if summary == SUMMARY else 1)
+    record = result.trajectory_records[0]
+    assert record["termination_kind"] == termination
+    assistant, *tools = record["messages"][2:6]
+    assert assistant["role"] == "assistant"
+    document_parameters = record["tools"][1]["function"]["parameters"]
+    assert document_parameters["required"] == ["docid"]
+    assert "docid" in document_parameters["properties"]
+    assert [tool["role"] for tool in tools] == ["tool"] * 3
+    call_ids = [call["id"] for call in assistant["tool_calls"]]
+    assert len(set(call_ids)) == 3
+    assert [tool["tool_call_id"] for tool in tools] == call_ids
+    assert tools[0]["content"] == "fact"
+    assert [json.loads(tool["content"]) for tool in tools[1:]] == [[{"docid": "d", "snippet": "fact"}]] * 2
+    assert result.turn_records[0]["completion"] == model.results[0].text
+
+    tokens = record["collection_tokens"]
+    first, following = tokens["generations"]
+    prefix = first["full_token_ids"]
+    assert first["completion_token_ids"] == model.results[0].completion_token_ids
+    assert following["prompt_token_ids"][:len(prefix)] == prefix
+    result_spans = [span for span in tokens["spans"] if span["kind"] == "tool_result"]
+    span, = result_spans
+    assert span["start"] == len(prefix)
+    assert not any(tokens["assistant_token_mask"][span["start"]:span["end"]])
+    assert model.tokenizer.decode(tokens["full_token_ids"][span["start"]:span["end"]]) == (
+        "\n<|im_start|>user\n"
+        + "\n".join(f"<tool_response>\n{tool['content']}\n</tool_response>" for tool in tools)
+        + "<|im_end|>\n"
+    )
+    if summary == SUMMARY:
+        successor = result.trajectory_records[1]
+        assert successor["messages"][:2] == record["messages"][:2]
+        assert successor["messages"][2] == {"role": "user", "content": "<summary>\nevidence\n</summary>"}
+    if not valid:
+        assert not result.summary_turns
+        assert record["completion"].endswith(model.results[-1].text)
+    assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == len(
+        result.trajectory_records
+    )
+
+
+@pytest.mark.parametrize("second_call", [("get_document", "doc_id", "d"), ("finish", "answer", "done")])
+def test_invalid_multi_call_action_runs_no_tools(second_call):
+    model = TokenModel([native_action(("search", "query", "q"), second_call)], native=True)
+    result = runtime(model).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert result.tool_call_counts == {"search": 0, "get_document": 0}
+    record, = result.trajectory_records
+    assert record["completion"] == model.results[0].text
+    assert all(message["role"] != "tool" for message in record["messages"])
+
+
+def test_multi_call_action_respects_remaining_tool_budget():
+    action = native_action(("search", "query", "q"), ("get_document", "docid", "other"))
+    model = TokenModel([action, native_call("finish", "answer", "done")], native=True)
+    result = runtime(model, max_tool_calls=1).run("q", "question")
+    assert result.status == "completed"
+    assert result.tool_call_counts == {"search": 1, "get_document": 0}
+    assert result.retrieved_docids == ["d"]
+    record, = result.trajectory_records
+    assert record["termination_kind"] == "forced_answer"
+    skipped = record["messages"][4]
+    assert skipped["tool_call_id"] == record["messages"][2]["tool_calls"][1]["id"]
+    assert skipped["content"] == "Error: Tool call budget exhausted."
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("limit", [0, 2])
+def test_compaction_limit_ends_at_threshold_with_zero_interval_rewards(native, limit):
+    from self_summarization_agent.config import load_run_config, parse_cli_overrides
+    from self_summarization_agent.dataset import QueryExample
+    from self_summarization_agent.judge import RewardJudge
+    from self_summarization_agent.judge_step import judge_rollout_rows
+    from self_summarization_agent.launcher_utils import build_runtime, serialize_runtime_result
+    from self_summarization_agent.rollout_collection import apply_judged_rewards
+    from self_summarization_agent.segment_returns import ordered_rollout_chains
+    from self_summarization_agent.token_value import validate_token_samples
+
+    search = native_call("search", "query", "q") if native else SEARCH
+    model = TokenModel([search, SUMMARY] * limit + [search], native=native)
+    config = load_run_config("configs/run/default.yaml", parse_cli_overrides([
+        f"runtime.max_compactions={limit}",
+        "runtime.context_threshold_tokens=1",
+        "runtime.max_summary_tokens=100",
+        "runtime.tool_budget=0",
+        "runtime.generated_token_budget=1",
+    ]))
+    backend = FakeBackend(search_index={"q": ["d"]}, documents={"d": "fact"})
+    result = build_runtime(model, backend, config.runtime).run("q1", "question")
+
+    assert result.status == "overlong"
+    assert result.final_answer is None
+    assert result.tool_call_counts["search"] == limit + 1
+    assert result.token_usage["summary_count"] == limit
+    assert result.token_usage["forced_answer_reasons"] == []
+    assert [request.generation_kind for request in model.requests] == ["action", "summary"] * limit + ["action"]
+    assert [record["termination_kind"] for record in result.trajectory_records] == ["compaction"] * limit + ["overlong"]
+    rewards = {f"trajectory-{index + 1}": 0.0 for index in range(limit + 1)}
+    assert result.turn_rewards == rewards
+    terminal = result.trajectory_records[-1]
+    tokens = terminal["collection_tokens"]
+    assert terminal["completion"] == model.results[-1].text
+    assert tokens["generations"][0]["completion_token_ids"] == model.results[-1].completion_token_ids
+    assert tokens["spans"][-1]["kind"] == "tool_result"
+    assert not tokens["spans"][-1]["sampled"]
+    assert model.tokenizer.template_calls == limit + 1
+    if native:
+        assert terminal["messages"][-1]["tool_call_id"] == terminal["messages"][-2]["tool_calls"][0]["id"]
+
+    row = serialize_runtime_result(result, query_text="question", include_rewards=False)
+    row["rollout_index"] = 0
+    judge = RewardJudge(model)
+    judged, = judge_rollout_rows([row], judge=judge, examples_by_query_id={})
+    assert judged["turn_rewards"] == rewards
+    assert judged["judge"]["outcome"] == "overlong"
+    assert judged["trainable_sample_count"] == limit + 1
+    example = QueryExample(query_id="q1", query="question", answer="answer")
+    assert apply_judged_rewards(result, example, judge)["outcome"] == "overlong"
+    assert result.turn_rewards == rewards
+    for record in judged["trajectory_records"]:
+        record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
+    samples = extract_trainable_samples(judged["trajectory_records"], rewards, rollout_id="q1:0")
+    validate_token_samples(samples)
+    chain, = ordered_rollout_chains([judged], samples)
+    assert chain[-1]["terminal"]
+    assert chain[-1]["reward"] == 0.0
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("case", ["below_threshold", "answer_at_limit", "malformed_summary"])
+def test_compaction_limit_still_allows_completion_and_rejects_malformed_summaries(native, case):
+    search = native_call("search", "query", "q") if native else SEARCH
+    finish = native_call("finish", "answer", "done") if native else FINISH
+    if case == "below_threshold":
+        outputs, limit, threshold, status = [search, finish], 0, 15000, "completed"
+    elif case == "answer_at_limit":
+        outputs, limit, threshold, status = [search, SUMMARY, finish], 1, 1, "completed"
+    else:
+        outputs, limit, threshold, status = [search, "</think><summary></summary><|im_end|>"], 1, 1, "empty_summary"
+
+    model = TokenModel(outputs, native=native)
+    result = runtime(model, context_threshold_tokens=threshold, max_compactions=limit,
+                     max_tool_calls=0, generated_token_budget=1).run("q", "question")
+    assert result.status == status
+    assert result.token_usage["forced_answer_reasons"] == []
+    if case == "malformed_summary":
+        assert result.summary_turns == []
+        assert result.turn_rewards == {"trajectory-1": -1.0}
+        assert result.trajectory_records[-1]["completion"].endswith(model.results[-1].text)
+    else:
+        assert result.final_answer == "done"
+        assert len(result.summary_turns) == limit
+
+
 @pytest.mark.parametrize("compact", [False, True])
 def test_native_tool_round_and_summary_keep_linked_messages(compact):
-    actions = [native_call("search", "query", "q"), native_call("get_document", "doc_id", "d")]
+    actions = [native_call("search", "query", "q"), native_call("get_document", "docid", "d")]
     outputs = []
     for action in actions:
         outputs.append(action)
@@ -633,9 +814,10 @@ def test_non_thinking_mode_compacts_without_a_sampled_thinking_close():
 def test_lineage_preflight_rejects_old_or_changed_artifacts(tmp_path):
     from types import SimpleNamespace
     from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
+    from self_summarization_agent.config import RuntimeConfig
     from self_summarization_agent.token_stream import TITO_CONTRACT
     config = SimpleNamespace(model=SimpleNamespace(chat_template_path=TEMPLATE_PATH, enable_thinking=True),
-                             rollout=SimpleNamespace(backend="vllm_offline"))
+                             rollout=SimpleNamespace(backend="vllm_offline"), runtime=RuntimeConfig())
     result = runtime(TokenModel([FINISH])).run("q", "question")
     path = tmp_path / "raw.jsonl"
     row = {"collection_contract": TITO_CONTRACT, "collection_profile_id": collection_profile_id(config, tmp_path),
@@ -646,6 +828,10 @@ def test_lineage_preflight_rejects_old_or_changed_artifacts(tmp_path):
     with pytest.raises(ValueError, match="missing trajectory records"):
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
     path.write_text(json.dumps(row), encoding="utf-8")
+    config.runtime.max_compactions = 0
+    with pytest.raises(ValueError, match="fresh output lineage"):
+        validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
+    config.runtime.max_compactions = None
     config.rollout.browsecomp_native_tools = True
     with pytest.raises(ValueError, match="fresh output lineage"):
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)

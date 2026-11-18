@@ -18,14 +18,16 @@ def apply_verifier_reward(row, *, reward_profile=None):
                     and math.isfinite(raw_reward) and raw_reward in (0, 1))
     penalized = is_penalized_runtime_status(row.get("status"))
     infra = bool(verifier.get("exception")) or not valid_reward or row.get("status") == "infrastructure_error"
-    if penalized and not verifier.get("exception"):
+    if row.get("status") == "overlong":
+        reward, outcome, infra = 0.0, "overlong", False
+    elif penalized and not verifier.get("exception"):
         reward, outcome = failure_reward, row["status"]
     elif infra:
         reward, outcome = None, "infrastructure_error"
     else:
         reward = 1.0 if raw_reward == 1 else failure_reward
         outcome = "correct_answer" if raw_reward == 1 else "wrong_answer"
-    row["benchmark_passed"] = valid_reward and raw_reward == 1 and not infra
+    row["benchmark_passed"] = valid_reward and raw_reward == 1 and not infra and outcome != "overlong"
     row["training_eligible"] = reward is not None
     row["turn_rewards"] = ({turn_id: reward for turn_id in
                             trainable_turn_ids_from_records(row["trajectory_records"])}

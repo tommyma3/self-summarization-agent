@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from .token_value import token_diagnostics, token_positions, validate_token_samples
+from .value_model import outcome_log_losses
 
 
 @dataclass
@@ -98,14 +99,13 @@ class TokenValueTrainerMixin:
                 ):
                     chunks = self._token_logits(prepared, indices)
                     logits = torch.cat(chunks).float()
-                    targets = torch.cat([
-                        torch.full((len(chunk),), int(samples[i].reward == 1),
-                                   device=self.device, dtype=torch.long)
+                    rewards = torch.cat([
+                        torch.full((len(chunk),), samples[i].reward,
+                                   device=self.device, dtype=torch.float32)
                         for i, chunk in zip(indices, chunks)
                     ])
                     batch_values = (logits.softmax(-1)[:, 1] * 2 - 1).cpu().tolist()
-                    batch_losses = torch.nn.functional.cross_entropy(
-                        logits, targets, reduction="none").cpu().tolist()
+                    batch_losses = outcome_log_losses(logits, rewards).cpu().tolist()
                     offset = 0
                     for i, chunk in zip(indices, chunks):
                         end = offset + len(chunk)
@@ -164,15 +164,13 @@ class TokenValueTrainerMixin:
                 ):
                     logits = self._token_logits(prepared, indices)
                     counts = [len(chunk) for chunk in logits]
-                    targets = self._to_device(torch.tensor([
-                        int(samples[i].reward == 1) for i in indices
+                    rewards = self._to_device(torch.tensor([
+                        samples[i].reward for i in indices
                     ])).repeat_interleave(torch.tensor(counts, device=self.device), output_size=sum(counts))
                     token_weights = self._to_device(torch.tensor([
                         weights[i] / count for i, count in zip(indices, counts)
                     ])).repeat_interleave(torch.tensor(counts, device=self.device), output_size=sum(counts))
-                    loss = (torch.nn.functional.cross_entropy(
-                        torch.cat(logits).float(), targets, reduction="none"
-                    ) * token_weights).sum()
+                    loss = (outcome_log_losses(torch.cat(logits), rewards) * token_weights).sum()
                     total += loss.detach() * len(selected)
                     mass += sum(weights[i] for i in indices)
                     loss.backward()

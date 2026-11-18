@@ -13,7 +13,7 @@ import time
 
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
-from self_summarization_agent.config import resolved_rollout_sampling_profile, sampling_profile_id
+from self_summarization_agent.config import resolved_rollout_sampling_profile, runtime_config_identity, sampling_profile_id
 from self_summarization_agent.separate_value import (
     CRITIC_MANIFEST, CRITIC_STATE, atomic_json, digest, model_files_complete,
     sample_key, source_critic_identity, validate_samples,
@@ -68,7 +68,7 @@ def initialization_binding(config, actor):
         "collection_profile_id": collection_profile_id(config, actor),
         "sampling_profile_id": sampling_profile_id(resolved_rollout_sampling_profile(config, split="train")),
         "pretraining": asdict(config.training.value_pretraining), "online_value_config": online_value_config,
-        "runtime": asdict(config.runtime), "dataset": asdict(config.dataset),
+        "runtime": runtime_config_identity(config.runtime), "dataset": asdict(config.dataset),
         "dataset_digest": file_digest(dataset_path) if dataset_path.is_file() else None,
         "retrieval": asdict(config.retrieval), "judge": asdict(config.judge), "model_dtype": config.model.dtype,
     }

@@ -6,11 +6,24 @@ from typing import Any
 
 from self_summarization_agent.chat_template import load_chat_template
 from self_summarization_agent.models import Message, ToolCall
-from self_summarization_agent.prompts import ConversationPrompt, serialize_messages, build_summary_prompt, build_forced_answer_prompt
+from self_summarization_agent.prompts import (
+    DOCUMENT_ID_ARGUMENT,
+    ConversationPrompt,
+    build_forced_answer_prompt,
+    build_summary_prompt,
+    serialize_messages,
+)
 from self_summarization_agent.token_stream import TITO_CONTRACT, token_ids
 
 
 TEMPLATE_PATH = "src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja"
+
+_NATIVE_CALL = re.compile(
+    r"<tool_call>\s*<function=(search|get_document|finish)>\s*(.*?)\s*</function>\s*</tool_call>\s*",
+    re.DOTALL,
+)
+_NATIVE_ARGUMENTS = {"search": "query", "get_document": DOCUMENT_ID_ARGUMENT, "finish": "answer"}
+_NESTED_CALL_MARKUP = re.compile(r"</?(?:tool_call>|function[=>]|parameter[=>])")
 
 
 def parse_native_completion(text: str, *, require_thinking_close: bool = False,
@@ -26,17 +39,23 @@ def parse_native_completion(text: str, *, require_thinking_close: bool = False,
         return None
     if "<tool_call>" not in body:
         return Message(role="assistant", content=body, reasoning_content=reasoning)
-    match = re.fullmatch(r"<tool_call>\s*<function=(search|get_document|finish)>\s*(.*?)\s*</function>\s*</tool_call>", body, re.DOTALL)
-    if match is None:
-        return None
-    name, parameters = match.groups()
-    argument = {"search": "query", "get_document": "doc_id", "finish": "answer"}[name]
-    value = re.fullmatch(r"<parameter=" + argument + r">\s*([\s\S]*?)\s*</parameter>", parameters)
-    if value is None or "<parameter=" in value[1]:
-        return None
     call_id = call_id or "call_" + sha256(text.encode()).hexdigest()[:24]
+    calls = []
+    position = 0
+    while position < len(body):
+        match = _NATIVE_CALL.match(body, position)
+        if match is None:
+            return None
+        name, parameters = match.groups()
+        argument = _NATIVE_ARGUMENTS[name]
+        value = re.fullmatch(r"<parameter=" + argument + r">\s*([\s\S]*?)\s*</parameter>", parameters)
+        if value is None or _NESTED_CALL_MARKUP.search(value[1]):
+            return None
+        calls.append(ToolCall(id=call_id if not calls else f"{call_id}_{len(calls) + 1}",
+                              name=name, arguments={argument: value[1]}))
+        position = match.end()
     return Message(role="assistant", content="", reasoning_content=reasoning,
-                   tool_calls=[ToolCall(id=call_id, name=name, arguments={argument: value[1]})])
+                   tool_calls=calls)
 
 
 class UnsupportedTokenBoundary(ValueError):
@@ -101,12 +120,18 @@ class QwenAgentTokenRenderer:
 
     def render_tool_result(self, message: Message, *, completion_ids: list[int] | tuple[int, ...],
                            finish_reason: str | None) -> tuple[int, ...]:
+        return self.render_tool_results([message], completion_ids=completion_ids, finish_reason=finish_reason)
+
+    def render_tool_results(self, messages: list[Message], *, completion_ids: list[int] | tuple[int, ...],
+                            finish_reason: str | None) -> tuple[int, ...]:
         self.validate_completion_boundary(completion_ids, finish_reason)
         if self.native_tools:
-            if message.role != "tool" or not message.tool_call_id:
+            if not messages or any(message.role != "tool" or not message.tool_call_id for message in messages):
                 raise ValueError("Native tool result must retain its linked call ID")
-            body = "<tool_response>\n" + message.content.strip() + "\n</tool_response>"
+            body = "\n".join("<tool_response>\n" + message.content.strip() + "\n</tool_response>"
+                             for message in messages)
         else:
+            message, = messages
             if message.role != "user" or not message.content.startswith("<tool_response>"):
                 raise ValueError("Tagged tool result must use the existing user wrapper")
             body = message.content.strip()

@@ -36,9 +36,8 @@ from self_summarization_agent.launcher_utils import (
     serialize_runtime_result,
 )
 from self_summarization_agent.rewards import (
-    apply_malformed_tool_penalty,
     apply_terminal_reward,
-    is_penalized_runtime_status,
+    assign_runtime_rewards,
     trainable_turn_ids_from_records,
 )
 from self_summarization_agent.trajectory import (
@@ -51,8 +50,9 @@ from self_summarization_agent.trajectory import (
 
 def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str, Any]:
     trainable_turn_ids = trainable_turn_ids_from_records(result.trajectory_records)
-    if is_penalized_runtime_status(result.status):
-        result.turn_rewards = apply_malformed_tool_penalty(trainable_turn_ids)
+    runtime_rewards = assign_runtime_rewards(result.status, trainable_turn_ids)
+    if runtime_rewards is not None:
+        result.turn_rewards = runtime_rewards
         return {"outcome": result.status, "judge_prompt": None, "judge_response": None, "parse_error": False}
     decision = judge.evaluate(example, result.status, result.final_answer or "")
     result.turn_rewards = apply_terminal_reward(

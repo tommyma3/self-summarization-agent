@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Any, Sequence
 
-from .rewards import reward_bounds
+from .rewards import reward_bounds, rollout_reward_values
 from self_summarization_agent.value_model import normalized_value_evaluation_loss, rollout_value_weights
 
 
@@ -20,8 +20,9 @@ def prediction_metrics(
     if not size or not (len(values) == len(losses) == len(rollout_ids) == size):
         raise ValueError("Critic diagnostics require nonempty, aligned predictions and labels")
     low, high = reward_bounds(reward_profile)
-    if any(r not in (low, high) for r in rewards):
-        raise ValueError("Critic diagnostics require binary -1/+1 rewards")
+    allowed_rewards = rollout_reward_values(reward_profile)
+    if any(r not in allowed_rewards for r in rewards):
+        raise ValueError("Critic diagnostics require valid rollout rewards")
     if any(not math.isfinite(v) or not low <= v <= high for v in values):
         raise ValueError("Critic predictions must be finite expected rewards in [-1, 1]")
     if any(not math.isfinite(loss) or loss < 0 for loss in losses):

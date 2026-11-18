@@ -26,7 +26,7 @@ from self_summarization_agent.value_model import (
     rollout_value_weights,
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
-from self_summarization_agent.rewards import reward_bounds
+from self_summarization_agent.rewards import rollout_reward_values
 from self_summarization_agent.token_value import validate_token_advantages, advantage_mean, TokenAdvantages
 from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
@@ -329,13 +329,14 @@ def _validate_compaction_value_samples(samples: list[RLSample], reward_profile="
     if not samples:
         return
     reward_by_rollout: dict[str, float] = {}
+    allowed_rewards = rollout_reward_values(reward_profile)
     for sample in samples:
         if not sample.has_training_cache:
             raise ValueError(f"Sample {sample.turn_id} is missing training cache")
         if sample.rollout_id is None:
             raise ValueError("Compaction value training requires rollout_id on every interval")
-        if sample.reward not in reward_bounds(reward_profile):
-            raise ValueError("Compaction value training requires binary -1/+1 rollout rewards")
+        if sample.reward not in allowed_rewards:
+            raise ValueError("Compaction value training requires valid rollout rewards")
         if sample.state_prefix_length is None:
             raise ValueError(f"Sample {sample.turn_id} is missing an exact value-state anchor")
         input_length = len(sample.input_ids or [])
@@ -1166,9 +1167,10 @@ class VerlRayPolicyTrainer:
         eval_loss_after = normalized_value_evaluation_loss(new_value_losses, value_weights)
         eval_seconds = time.monotonic() - eval_started
 
-        predicted_classes = [1.0 if value >= (0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0) else reward_bounds(self.training_config.value.reward_profile)[0] for value in old_values]
+        success_threshold = 0.5 if self.training_config.value.reward_profile == "binary_zero_one" else 0.0
         accuracy = sum(
-            prediction == sample.reward for prediction, sample in zip(predicted_classes, samples)
+            (value >= success_threshold) == (sample.reward > 0)
+            for value, sample in zip(old_values, samples)
         ) / len(samples)
         policy_loss = _mean_metric(worker_metrics, "actor/pg_loss")
         value_loss = _mean_metric(worker_metrics, "value/loss")

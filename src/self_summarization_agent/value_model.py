@@ -61,15 +61,20 @@ def two_hot_targets(targets: torch.Tensor, num_bins: int, reward_profile="signed
 
 
 def outcome_log_losses(logits: torch.Tensor, rewards: torch.Tensor, reward_profile="signed_binary") -> torch.Tensor:
-    """Binary outcome log loss implied by the categorical mean, computed stably."""
-    support = logits.new_tensor(value_support(logits.shape[-1], reward_profile), dtype=torch.float32)
-    reward_class_indices(rewards, reward_profile)
+    """Cross-entropy on the implied outcome probabilities, with soft targets for neutral rewards."""
     low, high = reward_bounds(reward_profile)
+    if not bool(torch.all((rewards == low) | (rewards == 0) | (rewards == high))):
+        raise ValueError("Compaction Monte Carlo value targets require valid rollout rewards")
+    targets = (rewards.float() - low) / (high - low)
+    if logits.shape[-1] == 2:
+        distribution = torch.stack((1 - targets, targets), dim=-1)
+        return torch.nn.functional.cross_entropy(logits.float(), distribution, reduction="none")
+    support = logits.new_tensor(value_support(logits.shape[-1], reward_profile), dtype=torch.float32)
     success = (support - low) / (high - low)
     log_probs = logits.float().log_softmax(-1)
     positive = torch.logsumexp(log_probs + success.log(), dim=-1)
     negative = torch.logsumexp(log_probs + (1 - success).log(), dim=-1)
-    return -torch.where(rewards > 0, positive, negative)
+    return -(targets * positive + (1 - targets) * negative)
 
 
 def value_head_manifest(hidden_size: int, num_bins: int, reward_profile="signed_binary") -> dict:
@@ -118,9 +123,7 @@ def rollout_normalized_value_loss(
     rollout_weights: torch.Tensor,
     reward_profile: str = "signed_binary",
 ) -> torch.Tensor:
-    losses = torch.nn.functional.cross_entropy(
-        logits.float(), reward_class_indices(rewards, reward_profile), reduction="none"
-    )
+    losses = outcome_log_losses(logits, rewards, reward_profile)
     weights = rollout_weights.to(device=losses.device, dtype=losses.dtype)
     if losses.shape != weights.shape:
         raise ValueError("Value losses and rollout weights must have the same shape")

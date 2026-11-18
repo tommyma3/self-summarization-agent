@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .dataset import benchmark_identity
 from ...chat_template import load_chat_template
-from ...config import resolved_rollout_sampling_profile
+from ...config import resolved_rollout_sampling_profile, runtime_config_identity
 from ...separate_value import digest, method_spec, atomic_json
 
 CONTRACT_FILE = "swe_training_contract.json"
@@ -16,7 +16,7 @@ def training_contract(config):
         reward_profile=config.benchmark.reward_profile,
         method=method_spec(config.training.value, config.training.advantage_estimator),
         value_enabled=config.training.value.enabled, value_architecture=config.training.value.architecture,
-        group_size=config.training.group_size, runtime=asdict(config.runtime),
+        group_size=config.training.group_size, runtime=runtime_config_identity(config.runtime),
         train_sampling=resolved_rollout_sampling_profile(config, split="train"),
         eval_sampling=resolved_rollout_sampling_profile(config, split="eval"),
         template=load_chat_template(config.model.chat_template_path),

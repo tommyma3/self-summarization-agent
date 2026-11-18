@@ -12,7 +12,11 @@ def reward_bounds(profile=SIGNED_REWARD):
     return (0.0 if profile == BINARY_REWARD else -1.0), 1.0
 
 
-Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted"]
+def rollout_reward_values(profile=SIGNED_REWARD) -> frozenset[float]:
+    return frozenset((*reward_bounds(profile), 0.0))
+
+
+Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted", "overlong"]
 TRAINABLE_TURN_KINDS = {"trajectory"}
 PENALIZED_RUNTIME_STATUSES = frozenset(
     {
@@ -27,6 +31,20 @@ PENALIZED_RUNTIME_STATUSES = frozenset(
 
 def is_penalized_runtime_status(status: object) -> bool:
     return isinstance(status, str) and status in PENALIZED_RUNTIME_STATUSES
+
+
+def has_runtime_reward(status: object) -> bool:
+    return status == "overlong" or is_penalized_runtime_status(status)
+
+
+def assign_runtime_rewards(
+    status: object, trainable_turn_ids: list[str]
+) -> dict[str, float] | None:
+    if status == "overlong":
+        return apply_terminal_reward("overlong", trainable_turn_ids=trainable_turn_ids)
+    if is_penalized_runtime_status(status):
+        return apply_malformed_tool_penalty(trainable_turn_ids)
+    return None
 
 
 def trainable_turn_ids_from_records(turn_records: Iterable[Mapping[str, object]]) -> list[str]:
@@ -52,9 +70,14 @@ def apply_terminal_reward(
     trainable_turn_ids: list[str] | None = None,
     reward_profile: str = SIGNED_REWARD,
 ) -> dict[str, float]:
-    if outcome not in {"correct_answer", "wrong_answer", "budget_exhausted"}:
+    if outcome not in {"correct_answer", "wrong_answer", "budget_exhausted", "overlong"}:
         raise ValueError(f"Unknown terminal outcome: {outcome}")
-    reward = 1.0 if outcome == "correct_answer" else reward_bounds(reward_profile)[0]
+    if outcome == "correct_answer":
+        reward = 1.0
+    elif outcome == "overlong":
+        reward = 0.0
+    else:
+        reward = reward_bounds(reward_profile)[0]
     if trainable_turn_ids is not None:
         return {turn_id: reward for turn_id in trainable_turn_ids}
     assigned = {turn_id: reward for turn_id in summary_turn_ids or []}
