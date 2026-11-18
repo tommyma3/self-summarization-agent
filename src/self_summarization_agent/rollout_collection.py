@@ -514,11 +514,13 @@ def _build_rollout_generator(config, checkpoint: Path, *, split: str) -> Any:
     # Seed the engine once. A fixed SamplingParams.seed on every request
     # would make identical prompts within a rollout group sample identically.
     seed = getattr(config.rollout, "sampling_seed", None)
-    seed_options = {"engine_seed": seed} if seed is not None else {}
+    engine_options = {"engine_seed": seed} if seed is not None else {}
+    if config.rollout.browsecomp_native_tools:
+        engine_options["browsecomp_native_tools"] = True
     return build_generator(
         rollout_model_config,
         sampling_extra=sampling_profile["extra_sampling_params"],
-        **seed_options,
+        **engine_options,
     )
 
 

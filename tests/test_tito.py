@@ -394,22 +394,63 @@ def test_backend_modified_input_is_discarded_without_training_its_completion():
     assert sum(samples[0].collection_assistant_token_mask) == len(model.results[0].completion_token_ids)
 
 
-def test_native_tool_round_and_summary_keep_linked_messages():
-    def call(name, key, value):
-        return f"</think><tool_call>\n<function={name}>\n<parameter={key}>\n{value}\n</parameter>\n</function>\n</tool_call><|im_end|>"
-    model = TokenModel([call("search", "query", "q"), SUMMARY, call("finish", "answer", "done")], native=True)
-    result = runtime(model, context_threshold_tokens=1).run("q", "question")
+def native_call(name, key, value):
+    return f"</think><tool_call>\n<function={name}>\n<parameter={key}>\n{value}\n</parameter>\n</function>\n</tool_call><|im_end|>"
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_native_tool_round_and_summary_keep_linked_messages(compact):
+    actions = [native_call("search", "query", "q"), native_call("get_document", "doc_id", "d")]
+    outputs = []
+    for action in actions:
+        outputs.append(action)
+        if compact:
+            outputs.append(SUMMARY)
+    model = TokenModel([*outputs, native_call("finish", "answer", "done")], native=True)
+    result = runtime(model, context_threshold_tokens=1 if compact else 15000).run("q", "question")
     assert result.status == "completed"
-    messages = result.trajectory_records[0]["messages"]
-    tool = next(m for m in messages if m["role"] == "tool")
-    assistant = next(m for m in messages if m.get("tool_calls"))
-    assert tool["tool_call_id"] == assistant["tool_calls"][0]["id"]
-    assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == 2
+    assert result.final_answer == "done"
+    assert result.tool_call_counts == {"search": 1, "get_document": 1}
+    intervals = 3 if compact else 1
+    assert model.tokenizer.template_calls == intervals
+    assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == intervals
+    for record in result.trajectory_records:
+        for assistant, tool in zip(record["messages"], record["messages"][1:]):
+            if tool["role"] == "tool":
+                assert tool["tool_call_id"] == assistant["tool_calls"][0]["id"]
+        generations = record["collection_tokens"]["generations"]
+        for previous, following in zip(generations, generations[1:]):
+            prefix = previous["prompt_token_ids"] + previous["completion_token_ids"]
+            assert following["prompt_token_ids"][:len(prefix)] == prefix
+        for generation in generations:
+            assert generation["completion_token_ids"][0] == 999999
+    for successor in result.trajectory_records[1:]:
+        assert successor["messages"][:2] == result.trajectory_records[0]["messages"][:2]
+        assert successor["messages"][2] == {"role": "user", "content": "<summary>\nevidence\n</summary>"}
 
 
-def test_vllm_adapter_submits_ids_and_preserves_raw_sampled_logprobs():
+@pytest.mark.parametrize("summary", [
+    SUMMARY.removesuffix("<|im_end|>"),
+    "</thinking>" + SUMMARY,
+    native_call("search", "query", "q"),
+])
+def test_native_malformed_summary_keeps_raw_sample_and_terminates(summary):
+    model = TokenModel([native_call("search", "query", "q"), summary], native=True)
+    result = runtime(model, context_threshold_tokens=1).run("q", "question")
+    assert result.status == "malformed_tool_call"
+    assert not result.summary_turns
+    assert model.tokenizer.template_calls == 1
+    record, = result.trajectory_records
+    assert record["termination_kind"] == "malformed"
+    assert record["collection_tokens"]["generations"][-1]["completion_token_ids"] == model.results[-1].completion_token_ids
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_vllm_adapter_submits_ids_and_preserves_raw_sampled_logprobs(native):
     from types import SimpleNamespace
     generator = VLLMGenerator.__new__(VLLMGenerator)
+    generator.supports_native_tools = native
+    generator.enable_thinking = True
     generator.tokenizer = Tokenizer()
     generator.max_new_tokens = 99
     generator.temperature = 0.7
@@ -418,18 +459,52 @@ def test_vllm_adapter_submits_ids_and_preserves_raw_sampled_logprobs():
     generator.sampling_extra = {}
     generator._sampling_params_cls = lambda **kw: kw
     seen = []
+    ids = [999999] + generator.tokenizer.encode(native_call("search", "query", "q"))
     def generate(prompts, params):
         seen.append((prompts, params))
-        completion = SimpleNamespace(token_ids=[999999, 2], logprobs=[{999999: SimpleNamespace(logprob=-0.2)}, {2: SimpleNamespace(logprob=-0.3)}], cumulative_logprob=-0.5, finish_reason="stop")
+        completion = SimpleNamespace(token_ids=ids, logprobs=[{i: SimpleNamespace(logprob=-0.2)} for i in ids],
+                                     cumulative_logprob=-0.2 * len(ids), finish_reason="stop")
         return [SimpleNamespace(prompt_token_ids=prompts[0]["prompt_token_ids"], outputs=[completion])]
     generator.llm = SimpleNamespace(generate=generate)
     result = generator.generate_token_batch([TokenRequest((1, 999999, 2), max_new_tokens=8)])[0]
     assert seen[0][0] == [{"prompt_token_ids": [1, 999999, 2]}]
     assert seen[0][1][0]["max_tokens"] == 8
-    assert result.completion_token_ids == [999999, 2]
-    assert result.token_logprobs == [-0.2, -0.3]
+    assert result.completion_token_ids == ids
+    assert result.token_logprobs == [-0.2] * len(ids)
     assert result.token_logprobs_mode == "raw_logprobs"
-    assert result.text == "sampled-only-reason<|im_end|>"
+    assert result.text == "sampled-only-reason" + native_call("search", "query", "q")
+    if native:
+        call, = result.message.tool_calls
+        assert call.name == "search" and call.arguments == {"query": "q"} and call.id
+    else:
+        assert result.message is None
+
+
+def test_offline_native_controls_apply_per_request(monkeypatch):
+    from types import SimpleNamespace
+
+    pytest.importorskip("vllm.sampling_params")
+    monkeypatch.setattr(VLLMGenerator, "__post_init__", lambda self: None)
+    generator = VLLMGenerator("model", 128, 0, 1, False, enable_thinking=True, supports_native_tools=True)
+    generator._sampling_params_cls = dict
+    generator.tokenizer = Tokenizer()
+    settings = []
+
+    def generate(prompts, params):
+        settings.extend(params)
+        completion = SimpleNamespace(token_ids=[999999, 2], finish_reason="stop")
+        return [SimpleNamespace(prompt_token_ids=p["prompt_token_ids"], outputs=[completion]) for p in prompts]
+
+    generator.llm = SimpleNamespace(generate=generate)
+    generator.generate_token_batch([TokenRequest((1,), generation_kind=kind)
+                                    for kind in ("action", "summary", "forced_answer")])
+    assert "structured_outputs" not in settings[0]
+    summary = SUMMARY.removesuffix("<|im_end|>")
+    finish = native_call("finish", "answer", "done").removesuffix("<|im_end|>")
+    search = native_call("search", "query", "q").removesuffix("<|im_end|>")
+    for params, expected in zip(settings[1:], [summary, finish]):
+        regex = params["structured_outputs"].regex
+        assert re.fullmatch(regex, expected) and not re.fullmatch(regex, search)
 
 
 def test_sglang_adapter_submits_ids_without_claiming_raw_logprobs():
@@ -539,6 +614,10 @@ def test_lineage_preflight_rejects_old_or_changed_artifacts(tmp_path):
     with pytest.raises(ValueError, match="missing trajectory records"):
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
     path.write_text(json.dumps(row), encoding="utf-8")
+    config.rollout.browsecomp_native_tools = True
+    with pytest.raises(ValueError, match="fresh output lineage"):
+        validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
+    config.rollout.browsecomp_native_tools = False
     config.model.enable_thinking = False
     with pytest.raises(ValueError, match="fresh output lineage"):
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)

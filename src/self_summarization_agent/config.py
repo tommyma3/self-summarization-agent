@@ -168,6 +168,7 @@ class RolloutConfig:
     api_max_retries: int = 2
     api_extra_body: dict[str, Any] = field(default_factory=dict)
     require_exact_token_ids: bool = True
+    browsecomp_native_tools: bool = False
     # Per-split timeout for the collection subprocess inside merged_collect.
     # None = no limit (relies on the outer phase_timeout_seconds).
     per_split_collection_timeout_seconds: float | None = None
@@ -514,6 +515,12 @@ class TrainConfig:
     benchmark: BenchmarkConfig = field(default_factory=BenchmarkConfig)
 
     def __post_init__(self):
+        if self.rollout.browsecomp_native_tools and (
+            self.benchmark.name != "browsecomp"
+            or self.rollout.backend not in {"vllm", "vllm_offline"}
+            or not self.rollout.require_exact_token_ids
+        ):
+            raise ValueError("rollout.browsecomp_native_tools requires BrowseComp and exact offline vLLM collection")
         if self.training.advantage_estimator == "token_mc_value" and (
             self.benchmark.name != "browsecomp" or self.benchmark.reward_profile != "signed_binary"
             or not self.rollout.require_exact_token_ids

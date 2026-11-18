@@ -1480,27 +1480,26 @@ class EpisodeRuntime:
             return
         self._append_output(active, generated_output, "summary")
         active.token_usage.summary_generated_tokens += generated_output.completion_tokens
-        if (
-            active.token_ledger is not None
-            and self.token_renderer is not None
-            and self.token_renderer.enable_thinking
-        ):
-            closure_reason = classify_thinking_closure(generated_summary, enable_thinking=True)
+        invalid_boundary = False
+        if active.token_ledger is not None:
+            closure_reason = classify_thinking_closure(
+                generated_summary, enable_thinking=self.token_renderer.enable_thinking)
             if closure_reason is not None:
+                invalid_boundary = True
                 active.turn_records.append({
                     "kind": "format_anomaly",
                     "query_id": active.state.query_id,
                     "anomaly": closure_reason,
                 })
-        invalid_boundary = False
-        if self.scaffold is not None:
             try:
                 self.token_renderer.validate_completion_boundary(
                     generated_output.completion_token_ids, generated_output.finish_reason)
             except UnsupportedTokenBoundary:
                 invalid_boundary = True
-            invalid_boundary = invalid_boundary or bool(classify_thinking_closure(
-                generated_summary, enable_thinking=self.token_renderer.enable_thinking))
+            if self.scaffold is None and self._uses_native_tools:
+                if generated_output.message is None or generated_output.message.tool_calls:
+                    invalid_boundary = True
+        if self.scaffold is not None:
             parsed_summary = self.scaffold.parse(generated_summary, call_id="summary-diagnostic",
                                                 thinking=self.token_renderer.enable_thinking)
             invalid_boundary = invalid_boundary or parsed_summary is None or bool(parsed_summary.tool_calls)

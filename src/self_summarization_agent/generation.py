@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from hashlib import sha256
 import inspect
 import json
 import os
@@ -58,6 +59,17 @@ def _resolve_torch_dtype(dtype_name: str):
     if dtype_name not in mapping:
         raise ValueError(f"Unsupported dtype: {dtype_name}")
     return mapping[dtype_name]
+
+
+def _native_routing_message(raw: str, prompt_ids: list[int], completion_ids: list[int], *, thinking: bool) -> Message | None:
+    call_id = "call_" + sha256(json.dumps([prompt_ids, completion_ids]).encode()).hexdigest()[:24]
+    return parse_native_completion(raw, require_thinking_close=thinking, call_id=call_id)
+
+
+def _native_control_body_regex(kind: str) -> str:
+    body = (r"<summary>[\s\S]+?</summary>" if kind == "summary" else
+            r"<tool_call>\s*<function=finish>\s*<parameter=answer>[\s\S]+?</parameter>\s*</function>\s*</tool_call>")
+    return body + r"\s*"
 
 
 class TokenInputGenerator:
@@ -429,9 +441,8 @@ class OpenAICompatibleGenerator(TokenInputGenerator):
             if "structured_outputs" in extra:
                 raise ValueError("TITO runtime controls cannot override custom structured_outputs")
             thinking = r"[\s\S]*?</think>\s*" if self.enable_thinking else ""
-            body = (r"<summary>[\s\S]+?</summary>" if request.generation_kind == "summary" else
-                    r"<tool_call>\s*<function=finish>\s*<parameter=answer>[\s\S]+?</parameter>\s*</function>\s*</tool_call>")
-            extra["structured_outputs"] = {"regex": request.response_regex or thinking + body + r"\s*"}
+            regex = request.response_regex or thinking + _native_control_body_regex(request.generation_kind)
+            extra["structured_outputs"] = {"regex": regex}
         payload = dict(model=self.api_model or self.model_path, prompt=list(request.prompt_token_ids),
                        max_tokens=request.max_new_tokens or self.max_new_tokens, temperature=self.temperature if self.do_sample else 0.0,
                        extra_body=extra)
@@ -447,11 +458,8 @@ class OpenAICompatibleGenerator(TokenInputGenerator):
         if prompt_ids != list(request.prompt_token_ids):
             raise RuntimeError("Token endpoint changed the submitted prompt IDs")
         raw = self.tokenizer.decode(ids, skip_special_tokens=False)
-        from hashlib import sha256
-        call_id = "call_" + sha256(json.dumps([prompt_ids, ids]).encode()).hexdigest()[:24]
         return GenerationResult(text=raw, prompt_token_ids=prompt_ids, completion_token_ids=ids,
-                                message=parse_native_completion(raw, require_thinking_close=self.enable_thinking,
-                                                                call_id=call_id),
+                                message=_native_routing_message(raw, prompt_ids, ids, thinking=self.enable_thinking),
                                 finish_reason=choice.get("finish_reason"))
 
     def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
@@ -510,6 +518,7 @@ class VLLMGenerator(TokenInputGenerator):
     require_exact_token_ids: bool = True
     gpu_memory_utilization: float | None = None
     engine_seed: int | None = None
+    supports_native_tools: bool = False
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
     _sampling_params_cls: Any = field(init=False)
@@ -668,9 +677,13 @@ class VLLMGenerator(TokenInputGenerator):
             return []
         constraints = []
         for request in requests:
-            if request.response_regex:
+            regex = request.response_regex
+            if self.supports_native_tools and request.generation_kind in {"summary", "forced_answer"}:
+                thinking = r"[^<]*</think>\s*" if self.enable_thinking else ""
+                regex = regex or thinking + _native_control_body_regex(request.generation_kind)
+            if regex:
                 from vllm.sampling_params import StructuredOutputsParams
-                constraints.append({"structured_outputs": StructuredOutputsParams(regex=request.response_regex)})
+                constraints.append({"structured_outputs": StructuredOutputsParams(regex=regex)})
             else:
                 constraints.append({})
         outputs = self.llm.generate(
@@ -683,14 +696,18 @@ class VLLMGenerator(TokenInputGenerator):
         if len(outputs) != len(requests):
             raise RuntimeError("vLLM returned the wrong number of token generations")
         for request, output in zip(requests, outputs):
-            if list(output.prompt_token_ids) != list(request.prompt_token_ids) or len(output.outputs) != 1:
+            prompt_ids = list(output.prompt_token_ids)
+            if prompt_ids != list(request.prompt_token_ids) or len(output.outputs) != 1:
                 raise RuntimeError("vLLM changed the submitted token prompt or response count")
             completion = output.outputs[0]
             ids = _required_int_list(list(completion.token_ids), field_name="completion token_ids")
             logprobs = _extract_completion_token_logprobs(completion)
+            raw = self.tokenizer.decode(ids, skip_special_tokens=False)
+            message = (_native_routing_message(raw, prompt_ids, ids, thinking=self.enable_thinking)
+                       if self.supports_native_tools else None)
             results.append(GenerationResult(
-                text=self.tokenizer.decode(ids, skip_special_tokens=False),
-                prompt_token_ids=list(output.prompt_token_ids), completion_token_ids=ids,
+                text=raw, message=message,
+                prompt_token_ids=prompt_ids, completion_token_ids=ids,
                 token_logprobs=logprobs, token_logprobs_mode="raw_logprobs" if logprobs is not None else None,
                 cumulative_logprob=getattr(completion, "cumulative_logprob", None),
                 finish_reason=getattr(completion, "finish_reason", None)))
@@ -918,6 +935,7 @@ def build_generator(
     judge_config: JudgeConfig | None = None,
     sampling_extra: dict[str, Any] | None = None,
     engine_seed: int | None = None,
+    browsecomp_native_tools: bool = False,
 ) -> TextGenerator:
     sampling_extra = dict(sampling_extra or {})
     max_new_tokens = judge_config.max_new_tokens if judge_config else model_config.max_new_tokens
@@ -967,6 +985,7 @@ def build_generator(
         return VLLMGenerator(
             model_path=model_path,
             engine_seed=engine_seed,
+            supports_native_tools=browsecomp_native_tools,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
