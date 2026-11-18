@@ -254,29 +254,33 @@ def write_prompt(
     generator: Any,
     title: str,
     prompt: str,
+    record: dict[str, Any],
     include_formatted_prompt: bool,
 ) -> None:
+    collection_tokens = record.get("collection_tokens") or {}
+    prompt_ids = collection_tokens.get("prompt_token_ids")
+    metadata: dict[str, int | None] = {"character_count": len(prompt)}
+    if isinstance(prompt_ids, list):
+        metadata["exact_final_prompt_token_count"] = len(prompt_ids)
+    else:
+        metadata["token_count"] = runtime.token_counter(prompt)
+        count_prompt_tokens = getattr(generator, "count_prompt_tokens", None)
+        metadata["chat_template_token_count"] = count_prompt_tokens(prompt) if callable(count_prompt_tokens) else None
     write_section(
         handle,
         title,
-        json.dumps(
-            {
-                "token_count": runtime.token_counter(prompt),
-                "chat_template_token_count": (
-                    generator.count_prompt_tokens(prompt)
-                    if callable(getattr(generator, "count_prompt_tokens", None))
-                    else None
-                ),
-                "character_count": len(prompt),
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
+        json.dumps(metadata, indent=2, ensure_ascii=False),
     )
     handle.write("\n--- Runtime prompt ---\n")
     handle.write(prompt)
     handle.write("\n")
     if not include_formatted_prompt:
+        return
+    if isinstance(prompt_ids, list):
+        tokenizer = getattr(generator, "tokenizer", None)
+        handle.write("\n--- Recorded model inputs ---\n")
+        handle.write(format_exact_model_input_sequences([record], tokenizer))
+        handle.write("\n")
         return
     formatter = getattr(generator, "_format_prompt", None)
     if callable(formatter):
@@ -299,7 +303,8 @@ def format_exact_model_input_sequences(
     """
     lines: list[str] = []
     found_per_generation_ids = False
-    for trajectory_index, record in enumerate(trajectory_records, start=1):
+    for index, record in enumerate(trajectory_records, start=1):
+        trajectory_index = record.get("segment_index", index)
         trajectory_id = record.get("turn_id", f"trajectory-{trajectory_index}")
         collection_tokens = record.get("collection_tokens")
         if not isinstance(collection_tokens, Mapping):
@@ -605,14 +610,6 @@ def write_training_sequences(
             "query_id": record["query_id"],
             "constituent_turn_ids": record.get("turn_ids", []),
             "assistant_completion_count": record.get("assistant_completion_count"),
-            "prompt_token_count": runtime.token_counter(prompt),
-            "chat_template_prompt_token_count": (
-                generator.count_prompt_tokens(prompt)
-                if generator is not None
-                and callable(getattr(generator, "count_prompt_tokens", None))
-                else None
-            ),
-            "completion_token_count": runtime.token_counter(completion),
             "prompt_character_count": len(prompt),
             "completion_character_count": len(completion),
             "training_total_tokens": tl_entry.get("training_total_tokens"),
@@ -620,6 +617,19 @@ def write_training_sequences(
             "fits_in_training_max_sequence_length": tl_entry.get("fits"),
             "training_max_sequence_length": max_sequence_length,
         }
+        collection_tokens = record.get("collection_tokens") or {}
+        prompt_ids = collection_tokens.get("prompt_token_ids")
+        assistant_mask = collection_tokens.get("assistant_token_mask")
+        if isinstance(prompt_ids, list) and isinstance(assistant_mask, list):
+            metadata["prompt_token_count"] = len(prompt_ids)
+            metadata["completion_token_count"] = sum(assistant_mask)
+        else:
+            metadata["prompt_token_count"] = runtime.token_counter(prompt)
+            count_prompt_tokens = getattr(generator, "count_prompt_tokens", None)
+            metadata["chat_template_prompt_token_count"] = (
+                count_prompt_tokens(prompt) if callable(count_prompt_tokens) else None
+            )
+            metadata["completion_token_count"] = runtime.token_counter(completion)
         write_section(
             handle,
             f"Training Sequence {index} Metadata",
@@ -628,10 +638,8 @@ def write_training_sequences(
         handle.write("\n--- Full interval messages ---\n")
         handle.write(json.dumps(messages, indent=2, ensure_ascii=False))
         handle.write("\n\n--- Trainable assistant completions ---\n")
-        for message in messages:
-            if message.get("role") == "assistant":
-                handle.write(str(message.get("content", "")))
-                handle.write("\n")
+        handle.write(completion)
+        handle.write("\n")
 
 
 def write_training_sequence_analysis(
@@ -799,6 +807,7 @@ def trace_collection(
                 "tool_budget": runtime.max_tool_calls,
                 "generated_token_budget": runtime.generated_token_budget,
                 "generator_max_model_len": getattr(generator, "max_model_len", None),
+                "native_tools": bool(getattr(generator, "supports_native_tools", False)),
                 "max_summary_tokens": runtime.max_summary_tokens,
                 "training_max_sequence_length": max_sequence_length,
             },
@@ -841,6 +850,7 @@ def trace_collection(
                 generator=generator,
                 title=f"Trajectory Interval {index}",
                 prompt=prompt,
+                record=record,
                 include_formatted_prompt=include_formatted_prompt,
             )
         write_exact_model_input_sequences(handle, result.trajectory_records)

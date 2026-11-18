@@ -5,6 +5,7 @@ import json
 import os
 import random
 import sys
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,21 +17,19 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from self_summarization_agent.bcplus_backend import build_backend
-from self_summarization_agent.config import load_train_config, parse_cli_overrides
+from self_summarization_agent.config import RolloutConfig, load_train_config, parse_cli_overrides
 from self_summarization_agent.dataset import QueryExample, load_query_examples
 from self_summarization_agent.generation import build_generator
 from self_summarization_agent.judge import RewardJudge
 from self_summarization_agent.launcher_utils import build_runtime, ensure_dir
+from self_summarization_agent.rollout_collection import _build_rollout_generator
 from simulate_collection import format_exact_model_input_sequences, trace_collection
-
-from collections.abc import Mapping
-from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Probe one training rollout with offline vLLM on 4 GPUs. "
+            "Probe one training rollout with offline vLLM. "
             "Runs one query until finish, malformed output, or tool budget exhaustion with forced answer, "
             "prints every exact model-input token sequence, and writes the trace."
         )
@@ -44,28 +43,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retrieval-backend", default=None, help="Override retrieval.backend.")
     parser.add_argument(
         "--vllm-gpus",
-        default="2,3",
-        help="Comma-separated physical GPU ids made visible to vLLM. Defaults to 2,3.",
+        help="Override rollout.gpu_ids with comma-separated physical GPU IDs.",
     )
-    parser.add_argument("--tensor-parallel-size", type=int, default=2, help="vLLM tensor parallel size.")
+    parser.add_argument("--tensor-parallel-size", type=int, help="Override rollout.tensor_parallel_size.")
     parser.add_argument(
         "--attention-backend",
         default=None,
-        help="Optional vLLM attention backend override, e.g. FLASH_ATTN. Defaults to vLLM backend selection.",
+        help="Override rollout.attention_backend, e.g. FLASH_ATTN.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Override rollout max_new_tokens.")
     parser.add_argument("--temperature", type=float, default=None, help="Override rollout temperature.")
     parser.add_argument("--top-p", type=float, default=None, help="Override rollout top_p.")
     parser.add_argument("--do-sample", action="store_true", default=None, help="Force sampled rollout generation.")
     parser.add_argument("--no-sample", action="store_false", dest="do_sample", help="Force deterministic rollout generation.")
-    parser.add_argument("--include-formatted-prompt", action="store_true", help="Also write tokenizer chat-template prompts.")
+    parser.add_argument("--include-formatted-prompt", action="store_true", help="Also write decoded model-input prompts to the trace.")
     parser.add_argument("--training-max-seq-len", type=int, default=None, help="Override training.max_sequence_length for the fit check.")
     parser.add_argument(
         "--set",
         dest="overrides",
         action="append",
         default=[],
-        help="Additional dotted config overrides, e.g. runtime.tool_budget=8",
+        help="Additional dotted config overrides, e.g. rollout.browsecomp_native_tools=true",
     )
     return parser.parse_args()
 
@@ -77,6 +75,22 @@ def merge_overrides(args: argparse.Namespace) -> dict[str, Any]:
     if args.retrieval_backend is not None:
         overrides["retrieval.backend"] = args.retrieval_backend
     return overrides
+
+
+def apply_rollout_cli_overrides(rollout: RolloutConfig, args: argparse.Namespace) -> RolloutConfig:
+    overrides: dict[str, Any] = {}
+    if rollout.backend not in {"vllm", "vllm_offline"}:
+        overrides["backend"] = "vllm_offline"
+    if args.vllm_gpus is not None:
+        gpu_ids = [part.strip() for part in args.vllm_gpus.split(",") if part.strip()]
+        if not gpu_ids:
+            raise ValueError("--vllm-gpus must list at least one GPU id")
+        overrides["gpu_ids"] = gpu_ids
+    for key in ("tensor_parallel_size", "attention_backend", "max_new_tokens", "temperature", "top_p", "do_sample"):
+        value = getattr(args, key)
+        if value is not None:
+            overrides[key] = value
+    return replace(rollout, **overrides)
 
 
 def choose_example(
@@ -175,33 +189,10 @@ def write_decoded_tokens(
         print(f"Decoded tokens written to: {decoded_path}")
 
 
-def build_rollout_model_config(config: Any, args: argparse.Namespace):
-    return replace(
-        config.model,
-        backend="vllm",
-        language_model_only=True,
-        tensor_parallel_size=args.tensor_parallel_size,
-        attention_backend=args.attention_backend,
-        max_new_tokens=args.max_new_tokens
-        if args.max_new_tokens is not None
-        else (config.rollout.max_new_tokens if config.rollout.max_new_tokens is not None else config.model.max_new_tokens),
-        temperature=args.temperature
-        if args.temperature is not None
-        else (config.rollout.temperature if config.rollout.temperature is not None else config.model.temperature),
-        top_p=args.top_p
-        if args.top_p is not None
-        else (config.rollout.top_p if config.rollout.top_p is not None else config.model.top_p),
-        do_sample=args.do_sample
-        if args.do_sample is not None
-        else (config.rollout.do_sample if config.rollout.do_sample is not None else config.model.do_sample),
-    )
-
-
 def main() -> None:
     args = parse_args()
-    if args.attention_backend:
-        os.environ["VLLM_ATTENTION_BACKEND"] = args.attention_backend
     config = load_train_config(args.config, merge_overrides(args))
+    config.rollout = apply_rollout_cli_overrides(config.rollout, args)
     seed = config.experiment.seed if args.seed is None else args.seed
     examples = load_query_examples(
         config.experiment.bc_plus_root,
@@ -216,28 +207,31 @@ def main() -> None:
         seed=seed,
     )
 
-    vllm_gpu_ids = [part.strip() for part in args.vllm_gpus.split(",") if part.strip()]
-    if not vllm_gpu_ids:
-        raise ValueError("--vllm-gpus must list at least one GPU id")
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    vllm_gpu_ids = [str(gpu_id) for gpu_id in config.rollout.gpu_ids]
+    if not vllm_gpu_ids and visible_devices:
+        vllm_gpu_ids = visible_devices.split(",")
     # Pin retrieval (FAISS embedding model) to a GPU outside the vLLM set when
     # one is available. Sharing a vLLM GPU leaves the embedding model's ~16 GiB
     # held there, so the engine's gpu_memory_utilization free-memory check
     # fails at startup. Mirrors the launcher's use of retrieval.gpu_ids.
     retrieval_gpu = next(
         (str(gpu_id) for gpu_id in config.retrieval.gpu_ids if str(gpu_id) not in vllm_gpu_ids),
-        next((candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids), vllm_gpu_ids[0]),
+        next((candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids), next(iter(vllm_gpu_ids), "0")),
     )
     os.environ["CUDA_VISIBLE_DEVICES"] = retrieval_gpu
-    backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
-    # Pin rollout generator to the requested vLLM GPUs.
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(vllm_gpu_ids)
-    rollout_model_config = build_rollout_model_config(config, args)
-    generator = build_generator(rollout_model_config)
+    try:
+        backend = build_backend(config.experiment.bc_plus_root, config.retrieval)
+    finally:
+        if visible_devices is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+    generator = _build_rollout_generator(config, Path(config.model.model_path), split="train")
     judge = None
     if getattr(config, "judge", None) and config.judge.enabled:
         judge_model_path = config.judge.model_path or config.model.model_path
-        rollout_model_path = rollout_model_config.model_path
-        if judge_model_path == rollout_model_path:
+        if judge_model_path == config.model.model_path:
             # Reuse the launched generator's underlying model/engine.
             # dataclasses.replace calls __post_init__ for slotted dataclasses,
             # which would spawn a second vLLM instance and OOM.  We shallow-copy
@@ -249,6 +243,7 @@ def main() -> None:
             judge_generator.temperature = config.judge.temperature
             judge_generator.top_p = config.judge.top_p
             judge_generator.do_sample = config.judge.do_sample
+            judge_generator.sampling_extra = {}
             judge = RewardJudge(judge_generator)
         else:
             # Pin judge to a GPU outside the rollout set when one is available
@@ -256,7 +251,7 @@ def main() -> None:
             # which already holds the embedding model.
             judge_gpu = next(
                 (candidate for candidate in ("1", "0") if candidate not in vllm_gpu_ids and candidate != retrieval_gpu),
-                vllm_gpu_ids[-1],
+                vllm_gpu_ids[-1] if vllm_gpu_ids else retrieval_gpu,
             )
             os.environ["CUDA_VISIBLE_DEVICES"] = judge_gpu
             judge_model_config = replace(

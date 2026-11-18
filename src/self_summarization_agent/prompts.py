@@ -210,14 +210,9 @@ A <summary>...</summary> user message is prior agent state for the original quer
 
 
 def build_native_tool_system_prompt() -> str:
-    return f"""You are an expert research agent. Normally, use exactly one provided function per turn.
-Use search to find relevant passages, get_document to inspect a selected document, and finish only when you can submit the best-supported final answer.
-
-The original user query remains present verbatim after every compaction. A later user message wrapped in <summary>...</summary> is compressed agent history for continuing that original query, not a new task.
-
-The runtime may append a user message enclosed in <summary_request> tags. For that next turn only, do not call a function or answer the original question. Compact only the accumulated research state, evidence, unresolved work, and next steps without restating the original query, then output exactly one <summary>...</summary> block. Normal function-calling mode resumes afterward.
-
-For your final answer only, put the following response format in the finish function's answer argument.
+    return f"""You are a deep research agent. You need to answer the given question by interact
+ing with a search engine, using the search tool provided. Please perform reasoning and
+use the tool step by step, in an interleaved manner. You may use the search tool multiple times.
 {_FINAL_ANSWER_FORMAT}"""
 
 
@@ -236,13 +231,55 @@ def build_summary_prompt(*, max_summary_tokens: int | None = None) -> str:
     # Retain the keyword for compatibility with existing callers; the limit is
     # enforced by the runtime rather than disclosed in the compaction prompt.
     del max_summary_tokens
-    return """<summary_request>
-Compact the agent history into a summary for continuing the original user query.
-</summary_request>"""
+    return """You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
+1. Task Overview
+The user's core request and success criteria
+Any clarifications or constraints they specified
+2. Current State
+What has been completed so far
+Files created, modified, or analyzed (with paths if relevant)
+Key outputs or artifacts produced
+3. Important Discoveries
+Technical constraints or requirements uncovered
+Decisions made and their rationale
+Errors encountered and how they were resolved
+What approaches were tried that didn't work (and why)
+4. Next Steps
+Specific actions needed to complete the task
+Any blockers or open questions to resolve
+Priority order if multiple steps remain
+5. Context to Preserve
+User preferences or style requirements
+Domain-specific details that aren't obvious
+Any promises made to the user
+Be concise but complete—err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task.
+Wrap your summary in <summary></summary> tags."""
 
 
 def build_native_summary_system_prompt() -> str:
-    return """You compact research-agent history for a later continuation. The original user query remains present verbatim, so do not restate it. Do not call tools. Preserve gathered evidence, conclusions, unresolved questions, and the best next steps. Output exactly one <summary>...</summary> block and no text outside it."""
+    return """You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
+1. Task Overview
+The user's core request and success criteria
+Any clarifications or constraints they specified
+2. Current State
+What has been completed so far
+Files created, modified, or analyzed (with paths if relevant)
+Key outputs or artifacts produced
+3. Important Discoveries
+Technical constraints or requirements uncovered
+Decisions made and their rationale
+Errors encountered and how they were resolved
+What approaches were tried that didn't work (and why)
+4. Next Steps
+Specific actions needed to complete the task
+Any blockers or open questions to resolve
+Priority order if multiple steps remain
+5. Context to Preserve
+User preferences or style requirements
+Domain-specific details that aren't obvious
+Any promises made to the user
+Be concise but complete—err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task.
+Wrap your summary in <summary></summary> tags."""
 
 
 def build_summary_system_prompt(*, max_summary_tokens: int | None = None) -> str:

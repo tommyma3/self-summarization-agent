@@ -445,6 +445,38 @@ def test_native_malformed_summary_keeps_raw_sample_and_terminates(summary):
     assert record["collection_tokens"]["generations"][-1]["completion_token_ids"] == model.results[-1].completion_token_ids
 
 
+def test_collection_trace_shows_raw_native_calls_and_recorded_inputs(tmp_path, monkeypatch):
+    from pathlib import Path
+    from self_summarization_agent.dataset import QueryExample
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from simulate_collection import trace_collection
+
+    search = native_call("search", "query", "q")
+    finish = native_call("finish", "answer", "done")
+    model = TokenModel([search, SUMMARY, finish], native=True)
+    output_path = tmp_path / "trace.txt"
+    result = trace_collection(
+        runtime=runtime(model, context_threshold_tokens=1),
+        generator=model,
+        example=QueryExample(query_id="q", query="question", answer="done"),
+        sample_index=0,
+        output_path=output_path,
+        include_formatted_prompt=True,
+    )
+
+    assert result.status == "completed"
+    assert model.tokenizer.template_calls == 2
+    trace = output_path.read_text(encoding="utf-8")
+    assert "native_tools: True" in trace
+    assert '"tool_call_id": "' in trace
+    exact_first_input = model.tokenizer.decode(model.requests[0].prompt_token_ids)
+    assert "--- Recorded model inputs ---" in trace and exact_first_input in trace
+    assert "--- Recorded model inputs ---\ntrajectory 2 (trajectory-2), generation 0" in trace
+    assert "--- Trainable assistant completions ---\nsampled-only-reason" + search in trace
+    assert "--- Trainable assistant completions ---\nsampled-only-reason" + finish in trace
+
+
 @pytest.mark.parametrize("native", [False, True])
 def test_vllm_adapter_submits_ids_and_preserves_raw_sampled_logprobs(native):
     from types import SimpleNamespace
