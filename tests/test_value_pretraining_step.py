@@ -189,5 +189,8 @@ def test_vllm_seed_reaches_engine_without_pinning_each_request(tmp_path, monkeyp
     options = {}
     monkeypatch.setattr(rollout_collection, 'build_generator', lambda *a, **kw: options.update(kw))
     rollout_collection._build_rollout_generator(config, tmp_path / 'actor', split='train')
-    assert options['engine_seed'] == 7 and options['sampling_extra'] == {}
+    assert options['engine_seed'] == 7
+    assert options['sampling_extra'] == {
+        'top_k': 20, 'min_p': 0.0, 'presence_penalty': 1.5, 'repetition_penalty': 1.0,
+    }
     assert resolved_rollout_sampling_profile(config, split='train')['engine_seed'] == 7

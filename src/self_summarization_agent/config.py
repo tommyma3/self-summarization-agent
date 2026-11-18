@@ -159,6 +159,8 @@ class RolloutConfig:
     top_p: float | None = None
     do_sample: bool | None = None
     sampling_seed: int | None = None
+    # Backend sampling options shared by training and evaluation unless overridden.
+    extra_sampling_params: dict[str, Any] = field(default_factory=dict)
     api_base_url: str | None = None
     api_model: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
@@ -708,7 +710,7 @@ def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dic
             else config.model.do_sample
         ),
         "api_extra_body": dict(config.rollout.api_extra_body),
-        "extra_sampling_params": {},
+        "extra_sampling_params": dict(config.rollout.extra_sampling_params),
     }
     if split == "train" and getattr(config.rollout, "sampling_seed", None) is not None:
         profile["engine_seed"] = config.rollout.sampling_seed

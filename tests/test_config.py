@@ -6,6 +6,7 @@ from self_summarization_agent.config import (
     load_run_config,
     load_train_config,
     resolved_rollout_sampling_profile,
+    sampling_profile_id,
 )
 
 
@@ -329,6 +330,49 @@ training:
     assert config.training.verl.shutdown_ray is False
 
 
+def test_rollout_sampling_extras_are_inherited_overridden_and_fingerprinted(tmp_path: Path) -> None:
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        """
+experiment: {name: sampling, seed: 0, output_root: output}
+dataset: {}
+retrieval: {}
+model: {model_path: model}
+runtime: {}
+judge: {}
+rollout:
+  temperature: 1.0
+  top_p: 0.95
+  do_sample: true
+  extra_sampling_params:
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+evaluation:
+  temperature: 0.6
+  extra_sampling_params:
+    presence_penalty: 0.0
+""",
+        encoding="utf-8",
+    )
+    config = load_train_config(config_path)
+    train_profile = resolved_rollout_sampling_profile(config, split="train")
+    eval_profile = resolved_rollout_sampling_profile(config, split="eval")
+
+    assert train_profile["extra_sampling_params"]["presence_penalty"] == 1.5
+    assert eval_profile["extra_sampling_params"] == {
+        "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0,
+    }
+    assert eval_profile["temperature"] == 0.6
+    assert eval_profile["do_sample"] is True
+    original_id = sampling_profile_id(train_profile)
+    config.rollout.extra_sampling_params["top_k"] = 40
+    assert sampling_profile_id(resolved_rollout_sampling_profile(config, split="train")) != original_id
+    assert train_profile["extra_sampling_params"]["top_k"] == 20
+    assert config.rollout.extra_sampling_params["presence_penalty"] == 1.5
+
+
 def test_load_no_compact_32k_training_preset() -> None:
     config_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "no_compact_32k.yaml"
 
@@ -353,10 +397,14 @@ def test_load_no_compact_32k_training_preset() -> None:
     assert config.rollout.api_base_url is not None
     assert config.rollout.require_exact_token_ids is True
 
-    # Evaluation: deterministic (matches default).
-    assert config.evaluation.temperature == 0.0
-    assert config.evaluation.top_p == 1.0
-    assert config.evaluation.extra_sampling_params == {}
+    # Evaluation and collection use Qwen's general-task thinking preset.
+    assert config.evaluation.temperature == 1.0
+    assert config.evaluation.top_p == 0.95
+    assert config.evaluation.do_sample is True
+    assert config.evaluation.extra_sampling_params == {
+        "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0,
+    }
+    assert config.rollout.extra_sampling_params == config.evaluation.extra_sampling_params
 
     # Training: verl/FSDP with full-sequence preservation.
     assert config.training.backend == "verl_ray"

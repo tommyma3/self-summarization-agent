@@ -42,7 +42,7 @@ model:
   dtype: bfloat16
   device_map: auto
   max_new_tokens: 8192
-  temperature: 0.7
+  temperature: 1.0
   top_p: 0.95
   do_sample: true
   trust_remote_code: false
@@ -62,7 +62,7 @@ rollout:
   overlap_judge: true
   overlap_queue_max_batches: 8
   max_new_tokens: 8192
-  temperature: 0.7
+  temperature: 1.0
   top_p: 0.95
   do_sample: true
   api_base_url: http://127.0.0.1:8000/v1
@@ -72,13 +72,22 @@ rollout:
   api_max_retries: 2
   api_extra_body: {}
   require_exact_token_ids: true
+  extra_sampling_params:
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
 
 evaluation:
   samples_per_task: 1
-  temperature: 0.0
-  top_p: 1.0
-  do_sample: false
-  extra_sampling_params: {}
+  temperature: 1.0
+  top_p: 0.95
+  do_sample: true
+  extra_sampling_params:
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
 
 runtime:
   context_threshold_tokens: 6000

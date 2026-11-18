@@ -18,6 +18,7 @@ from self_summarization_agent.config import (
     RuntimeConfig,
     TrainConfig,
     TrainingConfig,
+    resolved_rollout_sampling_profile,
 )
 from self_summarization_agent.dataset import QueryExample
 from self_summarization_agent.rollout_collection import collect_rollouts
@@ -426,12 +427,13 @@ def test_build_rollout_generator_uses_split_specific_sampling_config(
     config = train_config(tmp_path)
     config.rollout.gpu_ids = []
     config.rollout.max_new_tokens = 64
-    config.rollout.temperature = 0.7
+    config.rollout.temperature = 1.0
     config.rollout.top_p = 0.95
     config.rollout.do_sample = True
+    config.rollout.extra_sampling_params = {"top_k": 20, "presence_penalty": 1.5}
     config.evaluation.max_new_tokens = 128
-    config.evaluation.temperature = 0.0
-    config.evaluation.extra_sampling_params = {}
+    config.evaluation.temperature = 0.6
+    config.evaluation.extra_sampling_params = {"presence_penalty": 0.0}
     captured = []
 
     def fake_build_generator(model_config, *, sampling_extra):
@@ -446,11 +448,29 @@ def test_build_rollout_generator_uses_split_specific_sampling_config(
     eval_model_config, eval_extra = captured[0]
     train_model_config, train_extra = captured[1]
     assert eval_model_config.max_new_tokens == 128
-    assert eval_model_config.temperature == 0.0
-    assert eval_extra == {}
+    assert eval_model_config.temperature == 0.6
+    assert eval_extra == {"top_k": 20, "presence_penalty": 0.0}
     assert train_model_config.max_new_tokens == 64
-    assert train_model_config.temperature == 0.7
-    assert train_extra == {}
+    assert train_model_config.temperature == 1.0
+    assert train_extra == {"top_k": 20, "presence_penalty": 1.5}
+
+
+@pytest.mark.parametrize("extra_attribute", ["sampling_extra", "api_extra_body"])
+def test_temporary_eval_sampling_restores_training_extras(tmp_path: Path, extra_attribute: str) -> None:
+    config = train_config(tmp_path)
+    config.rollout.extra_sampling_params = {"top_k": 20, "presence_penalty": 1.5}
+    config.evaluation.extra_sampling_params = {"presence_penalty": 0.0}
+    generator = FinishingGenerator()
+    training_extras = dict(config.rollout.extra_sampling_params)
+    setattr(generator, extra_attribute, training_extras)
+
+    with rollout_collection._temporary_sampling_profile(
+        generator, resolved_rollout_sampling_profile(config, split="eval"),
+    ):
+        assert getattr(generator, extra_attribute) == {"top_k": 20, "presence_penalty": 0.0}
+
+    assert getattr(generator, extra_attribute) is training_extras
+    assert training_extras["presence_penalty"] == 1.5
 
 
 def test_collect_rollouts_resume_skips_existing_rows(tmp_path: Path) -> None:

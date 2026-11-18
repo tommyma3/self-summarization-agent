@@ -46,7 +46,9 @@ def test_config_round_trip_and_legacy_value_fingerprint(tmp_path):
     loaded.rollout = replace(loaded.rollout, sampling_seed=7)
     assert resolved_rollout_sampling_profile(loaded, split='eval') == before
     assert resolved_rollout_sampling_profile(loaded, split='train')['engine_seed'] == 7
-    assert resolved_rollout_sampling_profile(loaded, split='train')['extra_sampling_params'] == {}
+    assert resolved_rollout_sampling_profile(loaded, split='train')['extra_sampling_params'] == {
+        'top_k': 20, 'min_p': 0.0, 'presence_penalty': 1.5, 'repetition_penalty': 1.0,
+    }
     with pytest.raises(ValueError):
         loaded.training = replace(loaded.training, value_pretraining=ValuePretrainingConfig(enabled=True),
                                   value=replace(loaded.training.value, architecture='shared', enabled=False))

@@ -315,7 +315,7 @@ For the intended GPU run:
 - exact `vllm_offline` training generations retain raw sampled-token logprobs and assemble v6 training caches directly from authoritative collection IDs and assistant masks before the policy process exits
 - after both raw artifacts are complete and policy/retrieval teardown is confirmed, one judge vLLM loads on GPUs 0-3 with tensor parallel size 4 and judges all pending eval rows followed by all pending training rows
 - `rollout.overlap_judge: true` instead overlaps merged collection with judging: the collection-scoped retrieval worker starts first, the judge engine loads before the policy children and sizes its GPU budget around the resident retrieval footprint, streamed raw rows are judged as they complete, and the post-collection judge phase only catches rows the stream missed; this requires the judge and policy engines to fit in GPU memory simultaneously (disjoint `judge.gpu_ids`/`rollout.gpu_ids` or reduced `judge.gpu_memory_utilization`) and falls back to sequential judging if the judge worker fails to start
-- `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; its generator is constructed from the resolved evaluation profile instead of mutating the training generator
+- `rollout.extra_sampling_params` supplies backend sampling options for training and evaluation; `evaluation.extra_sampling_params` overrides individual options for checkpoint evaluation, whose generator is constructed from the resolved evaluation profile instead of mutating the training generator
 - raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` preserves complete rollout-native v6 caches without loading a model; when fallback rescoring is required, a GPU-0 policy scorer starts only after the judge process exits. Resume preserves completed v6 rows and regenerates older cache versions as v6
@@ -326,6 +326,12 @@ For the intended GPU run:
 - iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
+
+The checked-in training and evaluation configs use Qwen3.5 thinking-mode
+sampling: BrowseComp uses temperature 1.0 and presence penalty 1.5; SWE-dev and
+Terminal-Bench use temperature 0.6 and presence penalty 0.0. Both presets enable
+sampling with top-p 0.95, top-k 20, min-p 0.0, and repetition penalty 1.0.
+These settings affect generation; training still uses raw policy logprobs.
 
 The `scripts/train_iterations.sh` wrapper reads the config with all `--set`
 overrides and automatically enables value pretraining for a separate critic
