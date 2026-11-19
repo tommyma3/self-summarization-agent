@@ -28,6 +28,12 @@ import sys
 from pathlib import Path
 
 
+SUMMARY_INTRO = (
+    "This session is being continued from a previous conversation that ran out of context. "
+    "The summary below covers the earlier portion of the conversation.\n\n"
+)
+
+
 def load_records(path: Path) -> list[dict]:
     records = []
     with path.open(encoding="utf-8") as handle:
@@ -180,7 +186,7 @@ def check_successor_prefix(records: list[dict], tokenizer) -> list[str]:
         body = raw.split("</think>", 1)[-1]
         summary = re.search(r"<\s*summary\s*>(.*?)<\s*/\s*summary\s*>", body, re.S | re.I)
         wrapped = "<summary>\n" + summary[1].strip() + "\n</summary>" if summary else None
-        if wrapped is None or prefix[2]["content"] != wrapped:
+        if wrapped is None or prefix[2]["content"] not in (wrapped, SUMMARY_INTRO + wrapped):
             problems.append(f"interval[{index}]: successor does not contain the extracted predecessor summary")
         expected_suffix = "<|im_start|>user\n" + prefix[2]["content"].strip() + "<|im_end|>\n"
         suffix = tokenizer.decode(initial[len(stable):], skip_special_tokens=False)

@@ -65,13 +65,14 @@
     {%- endif %}
 {%- endif %}
 {%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{%- set summary_intro = 'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n' %}
 {%- for message in messages[::-1] %}
     {%- set index = (messages|length - 1) - loop.index0 %}
     {%- if ns.multi_step_tool and message.role == "user" %}
         {%- set content = render_content(message.content, false)|trim %}
         {%- set is_tool_response = content.startswith('<tool_response>') and content.endswith('</tool_response>') %}
         {%- set is_summary_request = content.startswith('<summary_request>') and content.endswith('</summary_request>') %}
-        {%- set is_compacted_state = content.startswith('<summary>') and content.endswith('</summary>') %}
+        {%- set is_compacted_state = (content.startswith('<summary>') or content.startswith(summary_intro + '<summary>')) and content.endswith('</summary>') %}
         {%- if not is_tool_response and not is_summary_request and not is_compacted_state %}
             {%- set ns.multi_step_tool = false %}
             {%- set ns.last_query_index = index %}

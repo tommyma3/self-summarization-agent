@@ -9,7 +9,7 @@ from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.chat_template import load_chat_template
 from self_summarization_agent.generation import GenerationResult, VLLMGenerator, SGLangGenerator, OpenAICompatibleGenerator
 from self_summarization_agent.models import Message
-from self_summarization_agent.prompts import ConversationPrompt, build_initial_messages, format_tool_response
+from self_summarization_agent.prompts import ConversationPrompt, build_initial_messages, format_compacted_summary, format_tool_response
 from self_summarization_agent.runtime import EpisodeRuntime
 from self_summarization_agent.token_renderer import QwenAgentTokenRenderer, TEMPLATE_PATH, UnsupportedTokenBoundary, parse_native_completion
 from self_summarization_agent.token_stream import IntervalTokenLedger, TokenRequest
@@ -457,7 +457,7 @@ def test_multiple_native_calls_complete_one_round_before_the_next_generation(sum
     if summary == SUMMARY:
         successor = result.trajectory_records[1]
         assert successor["messages"][:2] == record["messages"][:2]
-        assert successor["messages"][2] == {"role": "user", "content": "<summary>\nevidence\n</summary>"}
+        assert successor["messages"][2] == {"role": "user", "content": format_compacted_summary("evidence")}
     if not valid:
         assert not result.summary_turns
         assert record["completion"].endswith(model.results[-1].text)
@@ -607,7 +607,7 @@ def test_native_tool_round_and_summary_keep_linked_messages(compact):
             assert generation["completion_token_ids"][0] == 999999
     for successor in result.trajectory_records[1:]:
         assert successor["messages"][:2] == result.trajectory_records[0]["messages"][:2]
-        assert successor["messages"][2] == {"role": "user", "content": "<summary>\nevidence\n</summary>"}
+        assert successor["messages"][2] == {"role": "user", "content": format_compacted_summary("evidence")}
 
 
 @pytest.mark.parametrize("summary", [

@@ -10,6 +10,7 @@ from self_summarization_agent.cli import build_smoke_run_record
 from self_summarization_agent.launcher_utils import serialize_runtime_result
 from self_summarization_agent.generation import GenerationResult
 from self_summarization_agent.models import Message, ToolCall
+from self_summarization_agent.prompts import format_compacted_summary
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import (
     REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
@@ -206,7 +207,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
     acting_prompt_after_summary = model.prompts[2]
     assert [message.role for message in acting_prompt_after_summary.messages] == ["system", "user", "user"]
     assert acting_prompt_after_summary.messages[:2] == model.prompts[0].messages[:2]
-    assert acting_prompt_after_summary.messages[2].content == "<summary>\nstate\n</summary>"
+    assert acting_prompt_after_summary.messages[2].content == format_compacted_summary("state")
     assert [message["role"] for message in result.trajectory_records[0]["messages"]] == [
         "system",
         "user",
@@ -873,7 +874,7 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
     assert "### USER\nquestion" in acting_prompt_after_summary
-    assert "### USER\n<summary>\nsummary of the task and old-doc\n</summary>" in acting_prompt_after_summary
+    assert f"### USER\n{format_compacted_summary('summary of the task and old-doc')}" in acting_prompt_after_summary
     assert "retain this reasoning" not in acting_prompt_after_summary
     assert "<search>first</search>" not in acting_prompt_after_summary
 
@@ -908,7 +909,7 @@ def test_runtime_puts_only_post_think_summary_into_context() -> None:
     assert summary_record["thinking"] == "reason about old-doc"
     assert summary_record["summary"] == "summary body for context"
     acting_prompt_after_summary = model.prompts[2]
-    assert "### USER\n<summary>\nsummary body for context\n</summary>" in acting_prompt_after_summary
+    assert f"### USER\n{format_compacted_summary('summary body for context')}" in acting_prompt_after_summary
     assert "reason about old-doc" not in acting_prompt_after_summary
     assert "<think>" not in acting_prompt_after_summary
     assert "outside prefix" not in acting_prompt_after_summary
@@ -999,9 +1000,7 @@ def test_runtime_records_one_training_trajectory_per_interval() -> None:
         "system", "user", "user", "assistant"
     ]
     assert second_interval["messages"][1]["content"] == "question"
-    assert second_interval["messages"][2]["content"] == (
-        "<summary>\nsummary of the task and old-doc\n</summary>"
-    )
+    assert second_interval["messages"][2]["content"] == format_compacted_summary("summary of the task and old-doc")
     assert result.turn_records[1]["summary"] == "summary of the task and old-doc"
     assert result.turn_rewards == {"trajectory-1": 1.0, "trajectory-2": 1.0}
 
@@ -1040,11 +1039,11 @@ def test_runtime_preserves_original_prefix_and_replaces_only_history_across_comp
         assert record["messages"][1]["content"] == "exact original question"
 
     second_interval = result.trajectory_records[1]["messages"]
-    assert second_interval[2]["content"] == "<summary>\nfirst compressed history\n</summary>"
+    assert second_interval[2]["content"] == format_compacted_summary("first compressed history")
     assert all("first reasoning" not in message["content"] for message in second_interval)
 
     third_interval = result.trajectory_records[2]["messages"]
-    assert third_interval[2]["content"] == "<summary>\nsecond compressed history\n</summary>"
+    assert third_interval[2]["content"] == format_compacted_summary("second compressed history")
     assert all("first compressed history" not in message["content"] for message in third_interval)
     assert all("second reasoning" not in message["content"] for message in third_interval)
 

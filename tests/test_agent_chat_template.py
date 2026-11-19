@@ -3,7 +3,7 @@ import pytest
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from self_summarization_agent.chat_template import load_chat_template
-from self_summarization_agent.prompts import build_forced_answer_prompt, build_summary_prompt
+from self_summarization_agent.prompts import build_forced_answer_prompt, build_summary_prompt, format_compacted_summary
 
 
 TEMPLATE_PATH = "src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja"
@@ -101,25 +101,30 @@ def test_summary_request_only_appends_tokens_to_the_rendered_tool_segment() -> N
 
 
 def test_wrapped_compacted_state_is_rendered_after_the_preserved_user_query() -> None:
+    compacted_state = format_compacted_summary("compressed task state")
     rendered = _render(
         [
             {"role": "system", "content": "policy"},
             {"role": "user", "content": "original question"},
-            {"role": "user", "content": "<summary>\ncompressed task state\n</summary>"},
+            {"role": "user", "content": compacted_state},
         ]
     )
 
     assert rendered.index("original question") < rendered.index("compressed task state")
-    assert "<|im_start|>user\n<summary>\ncompressed task state\n</summary><|im_end|>" in rendered
+    assert f"<|im_start|>user\n{compacted_state}<|im_end|>" in rendered
     assert rendered.rstrip().endswith("<|im_start|>assistant\n<think>")
 
 
-def test_wrapped_compacted_state_does_not_replace_query_for_reasoning_history() -> None:
+@pytest.mark.parametrize("compacted_state", [
+    "<summary>\ncompressed task state\n</summary>",
+    format_compacted_summary("compressed task state"),
+])
+def test_wrapped_compacted_state_does_not_replace_query_for_reasoning_history(compacted_state: str) -> None:
     rendered = _render(
         [
             {"role": "system", "content": "policy"},
             {"role": "user", "content": "original question"},
-            {"role": "user", "content": "<summary>\ncompressed task state\n</summary>"},
+            {"role": "user", "content": compacted_state},
             {
                 "role": "assistant",
                 "content": "<search>next</search>",

@@ -98,7 +98,7 @@ runtime:
   # Summary-body cap. An overlong summary terminates the rollout with reward 0.
   max_summary_tokens: 6400
   # After four successful compactions, another threshold crossing ends the rollout.
-  max_compactions: 4
+  max_compactions: 3
   # Per-phase subprocess timeout (seconds). If a rollout/judge/train subprocess
   # does not exit within this limit it is terminated. None = no timeout.
   phase_timeout_seconds: 9000

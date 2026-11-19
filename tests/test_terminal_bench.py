@@ -13,6 +13,7 @@ from self_summarization_agent.benchmarks.terminal_bench.dataset import task_mani
 from self_summarization_agent.benchmarks.terminal_bench.verification import apply_verifier_reward
 from self_summarization_agent.config import BenchmarkConfig, load_train_config
 from self_summarization_agent.collection_contract import collection_profile_id
+from self_summarization_agent.prompts import format_compacted_summary
 from self_summarization_agent.runtime import EpisodeRuntime
 from self_summarization_agent.trajectory import extract_trainable_samples, build_rollout_native_training_cache, _extract_collection_tokens, ProviderHistoryRewriteError
 
@@ -71,7 +72,7 @@ def test_terminal_compaction_preserves_exact_tokens_shell_and_confirmation(compa
     for index, record in enumerate(result.trajectory_records):
         assert record["messages"][:2] == first_prefix
         if index:
-            assert record["messages"][2]["content"].startswith("<summary>")
+            assert record["messages"][2]["content"] == format_compacted_summary("evidence")
             assert record["messages"][3]["role"] == "assistant"
         payload = record["collection_tokens"]
         _extract_collection_tokens(record, turn_id=record["turn_id"])
@@ -386,7 +387,7 @@ def test_verification_script_accepts_tool_schema_and_checks_full_successor_state
     records = rt.run("task", "instruction").trajectory_records
     assert check(records, model.tokenizer) == []
     damaged = deepcopy(records)
-    damaged[1]["messages"][2]["content"] = "<summary>\nwrong state\n</summary>"
+    damaged[1]["messages"][2]["content"] = format_compacted_summary("wrong state")
     assert any("predecessor summary" in problem for problem in check(damaged, model.tokenizer))
     rt, model, _ = runtime([EXECUTE, SUMMARY, COMPLETE], context_threshold_tokens=1, max_tool_calls=1)
     records = rt.run("task", "instruction").trajectory_records

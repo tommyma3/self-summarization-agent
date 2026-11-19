@@ -81,7 +81,11 @@ def test_compacted_messages_preserve_original_prefix_and_wrap_generated_state() 
         assert messages[1].role == "user"
         assert messages[1].content == "original user query"
         assert messages[2].role == "user"
-        assert messages[2].content == "<summary>\ncompressed task state\n</summary>"
+        assert messages[2].content == (
+            "This session is being continued from a previous conversation that ran out of context. "
+            "The summary below covers the earlier portion of the conversation.\n\n"
+            "<summary>\ncompressed task state\n</summary>"
+        )
         assert messages[2].content.count("<summary>") == 1
         assert messages[2].content.count("</summary>") == 1
 

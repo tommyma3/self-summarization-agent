@@ -255,7 +255,12 @@ User preferences or style requirements
 Domain-specific details that aren't obvious
 Any promises made to the user
 Be concise but complete—err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task.
-Wrap your summary in <summary></summary> tags."""
+Wrap your summary in <summary></summary> tags.
+
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+- You already have all the context you need in the conversation above.
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.
+"""
 
 
 def build_native_summary_system_prompt() -> str:
@@ -301,7 +306,11 @@ def build_initial_messages(user_prompt: str, *, native_tools: bool = False) -> l
 
 def format_compacted_summary(summary: str) -> str:
     """Mark a model-generated compressed state when it becomes the next user input."""
-    return f"<summary>\n{summary}\n</summary>"
+    return (
+        "This session is being continued from a previous conversation that ran out of context. "
+        "The summary below covers the earlier portion of the conversation.\n\n"
+        f"<summary>\n{summary}\n</summary>"
+    )
 
 
 def build_compacted_messages(
