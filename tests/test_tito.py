@@ -200,8 +200,12 @@ def test_overflow_retains_untrained_tool_tail():
     model = TokenModel([SEARCH])
     rt = runtime(model)
     active = rt._new_active_episode("q", "question")
-    initial = len(active.token_ledger)
-    rt.max_context_tokens = initial + 80
+    response = Message(role="user", content=format_tool_response('[{"docid": "d", "snippet": "fact"}]'))
+    completion = [999999] + model.tokenizer.encode(SEARCH)
+    response_ids = rt.token_renderer.render_tool_result(response, completion_ids=completion, finish_reason="stop")
+    rt.max_context_tokens = (
+        len(active.token_ledger) + len(rt.token_renderer.header("action")) + len(completion) + len(response_ids)
+    )
     result = rt.run("q", "question")
     assert result.status == "context_length_exceeded"
     record = result.trajectory_records[0]
@@ -464,6 +468,67 @@ def test_multiple_native_calls_complete_one_round_before_the_next_generation(sum
     assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == len(
         result.trajectory_records
     )
+
+
+@pytest.mark.parametrize("max_compactions", [0, 1])
+def test_oversized_native_tool_round_fits_before_interval_finalization(max_compactions):
+    action = native_action(("get_document", "docid", "a"), ("get_document", "docid", "b"))
+    outputs = [action, SUMMARY, native_call("finish", "answer", "done")] if max_compactions else [action]
+    model = TokenModel(outputs, native=True)
+    model.max_new_tokens = 512
+    rt = runtime(model, context_threshold_tokens=1, max_compactions=max_compactions)
+    reserve = max(
+        len(rt.token_renderer.header("summary")) + rt.max_summary_tokens,
+        len(rt.token_renderer.header("forced_answer")) + model.max_new_tokens,
+    )
+    document_length = reserve + 1000
+    rt.backend = FakeBackend(search_index={}, documents={"a": "a" * document_length, "b": "b" * document_length})
+    initial_length = len(rt._new_active_episode("q", "question").token_ledger)
+    model.max_model_len = initial_length + reserve + 600
+
+    result = rt.run("q", "question")
+
+    assert result.status == ("completed" if max_compactions else "overlong")
+    assert len(result.trajectory_records) == max_compactions + 1
+    record = result.trajectory_records[0]
+    assistant, first_response, second_response = record["messages"][2:5]
+    assert [first_response["tool_call_id"], second_response["tool_call_id"]] == [
+        call["id"] for call in assistant["tool_calls"]
+    ]
+    assert first_response["content"].startswith("a")
+    assert second_response["content"].startswith("b")
+    assert all("[Observation truncated" in tool["content"] for tool in (first_response, second_response))
+    tokens = record["collection_tokens"]
+    first = tokens["generations"][0]
+    assert first["completion_token_ids"] == model.results[0].completion_token_ids
+    assert tokens["full_token_ids"][:len(first["full_token_ids"])] == first["full_token_ids"]
+    if max_compactions:
+        assert tokens["generations"][1]["prompt_token_ids"][:len(first["full_token_ids"])] == first["full_token_ids"]
+    assert len(tokens["full_token_ids"]) <= model.max_model_len
+    tool_span, = [span for span in tokens["spans"] if span["kind"] == "tool_result"]
+    assert not any(tokens["assistant_token_mask"][tool_span["start"]:tool_span["end"]])
+    assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == max_compactions + 1
+
+
+def test_exact_token_runtime_stops_before_tools_when_response_wrappers_cannot_fit():
+    action = native_call("search", "query", "q")
+    model = TokenModel([action], native=True)
+    rt = runtime(model)
+    active = rt._new_active_episode("q", "question")
+    prompt_length = len(active.token_ledger) + len(rt.token_renderer.header("action"))
+    rt.max_context_tokens = prompt_length + 1 + len(model.tokenizer.encode(action))
+
+    result = rt.run("q", "question")
+
+    assert result.status == "context_length_exceeded"
+    assert result.tool_call_counts == {"search": 0, "get_document": 0}
+    record, = result.trajectory_records
+    assert record["termination_kind"] == "context_overflow"
+    assert record["messages"][-1]["role"] == "assistant"
+    tokens = record["collection_tokens"]
+    assert tokens["full_token_ids"] == tokens["generations"][0]["full_token_ids"]
+    assert len(tokens["full_token_ids"]) == rt.max_context_tokens
+    assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == 1
 
 
 @pytest.mark.parametrize("second_call", [("get_document", "doc_id", "d"), ("finish", "answer", "done")])

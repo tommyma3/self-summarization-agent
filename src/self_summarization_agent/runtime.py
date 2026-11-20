@@ -409,12 +409,14 @@ class EpisodeRuntime:
                 fingerprint=self.token_renderer.fingerprint)
             active.token_request = None
 
+    def _token_context_limit(self) -> int:
+        return min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
+
     def _token_input(self, active: _ActiveEpisode, prompt: ConversationPrompt) -> TokenRequest:
         assert active.token_ledger is not None
         request = active.token_ledger.request(self.token_renderer.header(prompt.generation_kind),
                                               generation_kind=prompt.generation_kind)
-        limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
-        available = limit - len(request.prompt_token_ids)
+        available = self._token_context_limit() - len(request.prompt_token_ids)
         return replace(request, max_new_tokens=max(0, min(getattr(self.model, "max_new_tokens", available), available)),
                        # Prose-only reasoning in constrained control turns prevents
                        # a wildcard from consuming a closing think tag and tools.
@@ -517,22 +519,19 @@ class EpisodeRuntime:
         """
         try:
             if active.token_ledger is not None:
-                limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
-                if self._prompt_token_count(active, prompt) >= limit:
+                if self._prompt_token_count(active, prompt) >= self._token_context_limit():
                     raise ValueError("TITO prompt exceeds the context limit")
             else:
                 active.context_manager.assert_fits(prompt)
         except ValueError as exc:
-            LOGGER.warning("Terminating episode %s: %s", active.state.query_id, exc)
-            self._finalize_trajectory(
-                active,
-                list(active.state.messages),
-                termination_kind="context_overflow",
-                prompt=prompt,
-            )
-            active.result = self._penalized_result(active, status="context_length_exceeded")
+            self._finish_context_overflow(active, prompt, str(exc))
             return True
         return False
+
+    def _finish_context_overflow(self, active: _ActiveEpisode, prompt: ConversationPrompt | None, reason: str) -> None:
+        LOGGER.warning("Terminating episode %s: %s", active.state.query_id, reason)
+        self._finalize_trajectory(active, active.state.messages, termination_kind="context_overflow", prompt=prompt)
+        active.result = self._penalized_result(active, status="context_length_exceeded")
 
     def _next_tool_turn_id(self, state: EpisodeState) -> str:
         return f"tool-{state.tool_turn_count + 1}"
@@ -1141,7 +1140,7 @@ class EpisodeRuntime:
             )
             return None
 
-        return _PendingToolRound(
+        action = _PendingToolRound(
             active=active,
             prompt=prompt,
             raw_output=raw_output,
@@ -1151,6 +1150,20 @@ class EpisodeRuntime:
             assistant_message=assistant_message,
             calls=calls,
         )
+        if active.token_ledger is not None:
+            empty_responses = self._tool_result_messages(action, [""] * len(calls))
+            minimum_length = len(active.token_ledger) + len(self._render_tool_results(active, empty_responses))
+            if minimum_length > self._token_context_limit():
+                # There is no room even for linked empty responses. Stop before
+                # executing the calls, with the entire sampled action retained.
+                state.messages.append(assistant_message or Message(role="assistant", content=raw_output))
+                self._finish_context_overflow(
+                    active,
+                    prompt if isinstance(prompt, ConversationPrompt) else None,
+                    "Tool response framing exceeds the context limit",
+                )
+                return None
+        return action
 
     def _search_many(self, queries: list[str]) -> list[list[SearchResult]]:
         search_many = getattr(self.backend, "search_many", None)
@@ -1161,52 +1174,64 @@ class EpisodeRuntime:
             raise ValueError(f"search_many returned {len(results)} result batches for {len(queries)} queries")
         return results
 
+    def _tool_result_messages(self, action: _PendingToolRound, tool_results: list[str]) -> list[Message]:
+        if self._uses_native_tools:
+            return [
+                Message(role="tool", content=result, tool_call_id=call.id)
+                for call, result in zip(action.calls, tool_results, strict=True)
+            ]
+        tool_result, = tool_results
+        return [Message(role="user", content=format_tool_response(tool_result))]
+
+    def _render_tool_results(self, active: _ActiveEpisode, messages: list[Message]) -> tuple[int, ...]:
+        output = active.interval_outputs[-1]
+        return self.token_renderer.render_tool_results(
+            messages, completion_ids=output.completion_token_ids, finish_reason=output.finish_reason
+        )
+
+    def _fit_tool_results(
+        self, action: _PendingToolRound, tool_results: list[str], budget: int
+    ) -> tuple[list[str], list[Message], tuple[int, ...]]:
+        # Fit the entire linked response block before its first append. A
+        # terminal ledger can include this block even if no later request fits.
+        chosen_results = [""] * len(tool_results)
+        messages = self._tool_result_messages(action, chosen_results)
+        ids = self._render_tool_results(action.active, messages)
+        budget = max(len(ids), budget)
+        note = "\n[Observation truncated to fit the context.]"
+        low, high = 0, max(map(len, tool_results))
+        while low <= high:
+            cap = (low + high) // 2
+            candidates = [result[:cap] + note if len(result) > cap else result for result in tool_results]
+            candidate_messages = self._tool_result_messages(action, candidates)
+            candidate_ids = self._render_tool_results(action.active, candidate_messages)
+            if len(candidate_ids) <= budget:
+                chosen_results, messages, ids = candidates, candidate_messages, candidate_ids
+                low = cap + 1
+            else:
+                high = cap - 1
+        return chosen_results, messages, ids
+
     def _apply_tool_results(self, action: _PendingToolRound, tool_results: list[str]) -> None:
         active = action.active
         state = active.state
         query_id = state.query_id
-        if self.scaffold is not None and active.token_ledger is not None:
-            tool_result, = tool_results
-            # Bound only this new observation, before its first append. Reserve
-            # the next control and completion; historical tokens are never cut.
-            renderer = self.token_renderer
-            output = active.interval_outputs[-1]
-            limit = min(self.max_context_tokens, getattr(self.model, "max_model_len", None) or self.max_context_tokens)
-            reserve = max(len(renderer.header("summary")) + self.max_summary_tokens,
-                          len(renderer.header("forced_answer")) + getattr(self.model, "max_new_tokens", 1024))
-            available = max(0, limit - len(active.token_ledger) - reserve)
-            def size(text):
-                return len(renderer.render_tool_result(
-                    Message(role="tool", content=text, tool_call_id=action.calls[0].id),
-                    completion_ids=output.completion_token_ids, finish_reason=output.finish_reason))
-            if size(tool_result) > available:
-                note = "\n[Observation truncated to reserve the next interval boundary.]"
-                low, high = 0, len(tool_result)
-                while low < high:
-                    mid = (low + high + 1) // 2
-                    if size(tool_result[:mid] + note) <= available:
-                        low = mid
-                    else:
-                        high = mid - 1
-                tool_results = [tool_result[:low] + note]
-
-        if self._uses_native_tools:
-            if action.assistant_message is None:
-                raise RuntimeError("Native tool round is missing its assistant message")
-            assistant_message = action.assistant_message
-            result_messages = [
-                Message(role="tool", content=result, tool_call_id=call.id)
-                for call, result in zip(action.calls, tool_results, strict=True)
-            ]
-        else:
-            tool_result, = tool_results
-            assistant_message = Message(role="assistant", content=action.raw_output)
-            result_messages = [Message(role="user", content=format_tool_response(tool_result))]
+        if self._uses_native_tools and action.assistant_message is None:
+            raise RuntimeError("Native tool round is missing its assistant message")
+        assistant_message = action.assistant_message or Message(role="assistant", content=action.raw_output)
+        result_messages = self._tool_result_messages(action, tool_results)
         if active.token_ledger is not None:
-            output = active.interval_outputs[-1]
-            active.token_ledger.append_external(self.token_renderer.render_tool_results(
-                result_messages, completion_ids=output.completion_token_ids,
-                finish_reason=output.finish_reason), kind="tool_result")
+            result_ids = self._render_tool_results(active, result_messages)
+            available = self._token_context_limit() - len(active.token_ledger)
+            result_budget = available
+            if self.scaffold is not None or len(result_ids) > available:
+                result_budget -= max(
+                    len(self.token_renderer.header("summary")) + self.max_summary_tokens,
+                    len(self.token_renderer.header("forced_answer")) + getattr(self.model, "max_new_tokens", 1024),
+                )
+            if len(result_ids) > result_budget:
+                tool_results, result_messages, result_ids = self._fit_tool_results(action, tool_results, result_budget)
+            active.token_ledger.append_external(result_ids, kind="tool_result")
         state.messages.extend([assistant_message, *result_messages])
         active.token_usage.tool_result_tokens += sum(self._completion_token_count(result) for result in tool_results)
 
