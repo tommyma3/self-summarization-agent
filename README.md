@@ -391,12 +391,15 @@ Value checkpoints record their reward support. Start a fresh value run when
 switching from a signed-reward checkpoint. Existing judged token caches can be
 reused. Training reads historical failure labels of `-1` as `0`.
 
-Use the existing launcher with a fresh artifact root and the GAE preset:
+For a matched comparison with native-tool GRPO, initialize both runs from the
+same starting policy. Use a fresh GAE artifact directory and disable the
+wrapper's critic warmup so GAE uses the same rollout budget as the baseline.
 
 ```bash
 scripts/train_iterations.sh --iterations 1 \
-  --latest-root /path/to/separate-gae-run \
-  --config configs/train/compact_separate_gae_ppo.yaml
+  --latest-root artifacts/train/qwen-bcplus-native-compact-separate-gae-ppo \
+  --config configs/train/compact_separate_gae_ppo.yaml \
+  --set training.value_pretraining.enabled=false
 ```
 
 For matched controls, set `training.value.num_bins=2` on the GAE preset, or also

@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from self_summarization_agent.config import (
@@ -8,6 +9,25 @@ from self_summarization_agent.config import (
     resolved_rollout_sampling_profile,
     sampling_profile_id,
 )
+
+
+def test_segment_gae_ppo_matches_native_grpo_preset() -> None:
+    baseline = load_train_config("configs/train/default.yaml")
+    gae = load_train_config("configs/train/compact_separate_gae_ppo.yaml")
+
+    assert gae.experiment.name != baseline.experiment.name
+    assert gae.rollout.browsecomp_native_tools
+    assert gae.training.advantage_estimator == "compaction_gae_value"
+    assert gae.training.value.separate
+    assert gae == replace(
+        baseline,
+        experiment=replace(baseline.experiment, name=gae.experiment.name),
+        training=replace(
+            baseline.training,
+            advantage_estimator=gae.training.advantage_estimator,
+            value=gae.training.value,
+        ),
+    )
 
 
 def test_compaction_mc_value_config_is_opt_in_and_validated(tmp_path: Path) -> None:
