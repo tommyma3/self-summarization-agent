@@ -100,6 +100,7 @@ class TerminusKiraTito(BaseAgent):
             max_tool_calls=self.runtime_config.tool_budget,
             generated_token_budget=self.runtime_config.generated_token_budget,
             max_compactions=self.runtime_config.max_compactions,
+            force_answer_at_compaction_limit=self.runtime_config.force_answer_at_compaction_limit,
             token_counter=self.policy.count_tokens)
         active = rt._new_active_episode(self.query_id, instruction)
         try:

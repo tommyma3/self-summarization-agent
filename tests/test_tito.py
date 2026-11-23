@@ -619,6 +619,37 @@ def test_compaction_limit_ends_at_threshold_with_zero_interval_rewards(native, l
 
 
 @pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("limit", [0, 2])
+def test_force_answer_at_compaction_limit_appends_one_terminal_control(native, limit):
+    from self_summarization_agent.config import load_run_config, parse_cli_overrides
+    from self_summarization_agent.launcher_utils import build_runtime
+
+    search = native_call("search", "query", "q") if native else SEARCH
+    finish = native_call("finish", "answer", "done") if native else FINISH
+    model = TokenModel([search, SUMMARY] * limit + [search, finish], native=native)
+    config = load_run_config("configs/run/default.yaml", parse_cli_overrides([
+        f"runtime.max_compactions={limit}", "runtime.force_answer_at_compaction_limit=true",
+        "runtime.context_threshold_tokens=1", "runtime.tool_budget=0", "runtime.generated_token_budget=1",
+    ]))
+    backend = FakeBackend(search_index={"q": ["d"]}, documents={"d": "fact"})
+    result = build_runtime(model, backend, config.runtime).run("q1", "question")
+
+    assert result.status == "completed"
+    assert result.final_answer == "done"
+    assert result.token_usage["forced_answer_reasons"] == ["max_compactions"]
+    assert [r.generation_kind for r in model.requests] == ["action", "summary"] * limit + ["action", "forced_answer"]
+    assert [r["termination_kind"] for r in result.trajectory_records] == ["compaction"] * limit + ["forced_answer"]
+    terminal = result.trajectory_records[-1]
+    control = terminal["messages"][-2]
+    assert control["role"] == "system" and "<forced_answer_request>" in control["content"]
+    if native:
+        assert terminal["messages"][-3]["tool_call_id"] == terminal["messages"][-4]["tool_calls"][0]["id"]
+    action, answer = terminal["collection_tokens"]["generations"]
+    assert answer["prompt_token_ids"][:len(action["full_token_ids"])] == action["full_token_ids"]
+    assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == limit + 1
+
+
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("case", ["below_threshold", "answer_at_limit", "malformed_summary"])
 def test_compaction_limit_still_allows_completion_and_rejects_malformed_summaries(native, case):
     search = native_call("search", "query", "q") if native else SEARCH
@@ -632,7 +663,7 @@ def test_compaction_limit_still_allows_completion_and_rejects_malformed_summarie
 
     model = TokenModel(outputs, native=native)
     result = runtime(model, context_threshold_tokens=threshold, max_compactions=limit,
-                     max_tool_calls=0, generated_token_budget=1).run("q", "question")
+                     force_answer_at_compaction_limit=True, max_tool_calls=0, generated_token_budget=1).run("q", "question")
     assert result.status == status
     assert result.token_usage["forced_answer_reasons"] == []
     if case == "malformed_summary":
@@ -896,7 +927,11 @@ def test_lineage_preflight_rejects_old_or_changed_artifacts(tmp_path):
     config.runtime.max_compactions = 0
     with pytest.raises(ValueError, match="fresh output lineage"):
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
+    capped_profile = collection_profile_id(config, tmp_path)
+    config.runtime.force_answer_at_compaction_limit = True
+    assert collection_profile_id(config, tmp_path) != capped_profile
     config.runtime.max_compactions = None
+    validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
     config.rollout.browsecomp_native_tools = True
     with pytest.raises(ValueError, match="fresh output lineage"):
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)

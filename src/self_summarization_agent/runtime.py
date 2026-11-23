@@ -377,6 +377,7 @@ class EpisodeRuntime:
     reward_profile: str = BINARY_REWARD
     scaffold: AgentScaffold | None = None
     max_compactions: int | None = None
+    force_answer_at_compaction_limit: bool = False
     token_renderer: Any = field(init=False, default=None)
 
     def __post_init__(self) -> None:
@@ -1450,6 +1451,9 @@ class EpisodeRuntime:
         if active.interval_round_count == 0:
             return None
         if self.max_compactions is not None and len(active.summary_turns) >= self.max_compactions:
+            if self.force_answer_at_compaction_limit:
+                active.token_usage.forced_answer_reasons.append("max_compactions")
+                return None
             self._finalize_trajectory(
                 active, active.state.messages, termination_kind="overlong", prompt=current_prompt
             )
@@ -1595,14 +1599,13 @@ class EpisodeRuntime:
             if active.result is not None:
                 continue
             remaining_tool_calls = self._remaining_tool_calls(active)
-            forced_reasons: list[str] = []
+            forced_reasons = active.token_usage.forced_answer_reasons
             if remaining_tool_calls == 0:
                 forced_reasons.append("tool_budget")
             if self._generated_token_budget_exhausted(active):
                 forced_reasons.append("generated_token_budget")
 
             if forced_reasons:
-                active.token_usage.forced_answer_reasons.extend(forced_reasons)
                 acting_prompt = self._build_forced_answer_prompt(active)
                 if self._terminate_on_context_overflow(active, acting_prompt):
                     continue

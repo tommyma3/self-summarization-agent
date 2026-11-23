@@ -87,6 +87,7 @@ def build_runtime(
         max_tool_calls=runtime_config.tool_budget,
         generated_token_budget=runtime_config.generated_token_budget,
         max_compactions=getattr(runtime_config, "max_compactions", None),
+        force_answer_at_compaction_limit=getattr(runtime_config, "force_answer_at_compaction_limit", False),
         token_counter=token_counter,
         tool_execution_timeout_seconds=getattr(
             runtime_config, "tool_execution_timeout_seconds", 600

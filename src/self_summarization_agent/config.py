@@ -193,15 +193,18 @@ class RuntimeConfig:
     # timeout remains authoritative for backward compatibility.
     train_update_timeout_seconds: int | None = None
     tool_execution_timeout_seconds: float = 600
-    # A nonnegative limit replaces tool/token budgets and forced answers.
+    # A nonnegative limit replaces tool/token budgets.
     max_compactions: int | None = None
+    force_answer_at_compaction_limit: bool = False
 
 
 def runtime_config_identity(config: RuntimeConfig) -> dict[str, Any]:
-    """Keep existing artifact identities when the compaction limit is unset."""
+    """Omit inactive compaction options to preserve existing artifact identities."""
     identity = asdict(config)
     if identity.get("max_compactions") is None:
         identity.pop("max_compactions", None)
+    if "max_compactions" not in identity or not identity.get("force_answer_at_compaction_limit"):
+        identity.pop("force_answer_at_compaction_limit", None)
     return identity
 
 

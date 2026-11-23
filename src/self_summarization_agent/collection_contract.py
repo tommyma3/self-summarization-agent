@@ -48,6 +48,8 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
         identity["runtime"] = dict(max_compactions=runtime.max_compactions,
             context_threshold_tokens=runtime.context_threshold_tokens,
             max_context_tokens=runtime.max_context_tokens, max_summary_tokens=runtime.max_summary_tokens)
+        if getattr(runtime, "force_answer_at_compaction_limit", False):
+            identity["runtime"]["force_answer_at_compaction_limit"] = True
     for name in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt", "added_tokens.json"):
         path = checkpoint / name
         if path.is_file():
