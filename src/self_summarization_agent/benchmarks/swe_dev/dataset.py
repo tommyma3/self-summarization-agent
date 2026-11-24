@@ -103,6 +103,12 @@ def _load(path, split, config):
 
 
 def manifests(config):
+    if config.dataset == "compactionrl-swe-dev":
+        if config.environment == "local-tmux":
+            from .tmux_tasks import load_tasks
+            return load_tasks(config), []
+        from .compactionrl import training_tasks
+        return training_tasks(config), []
     if not config.train_manifest_path or not config.eval_manifest_path:
         raise ValueError("SWE requires explicit train and eval manifests")
     train = _load(config.train_manifest_path, "train", config)
@@ -122,6 +128,8 @@ def manifests(config):
 def task_manifest(config, *, split):
     if split not in {"train", "eval"}:
         raise ValueError("Unsupported SWE split")
+    if split == "eval" and config.dataset == "compactionrl-swe-dev":
+        return []  # The reference manifest contains training IDs only.
     train, evaluation = manifests(config)
     return train if split == "train" else evaluation
 
@@ -130,7 +138,10 @@ def benchmark_identity(config):
     from ..terminal_bench import HARBOR_VERSION, KIRA_REVISION, SCAFFOLD_VERSION
     from ..terminal_bench.scaffold import TerminusKiraScaffold
     train, evaluation = manifests(config)
-    return dict(config=asdict(config), train=train, eval=evaluation, selection=SELECTION_VERSION,
+    settings = asdict(config)
+    if settings["prepared_task_root"] is None:
+        del settings["prepared_task_root"]  # Preserve existing fixture and recovered-task lineage.
+    return dict(config=settings, train=train, eval=evaluation, selection=SELECTION_VERSION,
                 harbor=HARBOR_VERSION, kira=KIRA_REVISION, scaffold=SCAFFOLD_VERSION,
-                scaffold_digest=TerminusKiraScaffold(None).fingerprint,
-                verification="fresh-candidate-v1", reward_profile=config.reward_profile)
+                scaffold_digest=TerminusKiraScaffold(None, local_tmux=config.environment == "local-tmux").fingerprint,
+                verification="tmux-pytest-v1" if config.environment == "local-tmux" else "harbor-task" if config.dataset == "compactionrl-swe-dev" else "fresh-candidate-v1", reward_profile=config.reward_profile)

@@ -196,3 +196,10 @@ def test_interval_tokenization_never_left_truncates_system_prefix() -> None:
             max_sequence_length=2,
             sample_id="trajectory-1",
         )
+
+
+def test_cap_discount_is_opt_in_and_specific_to_compaction_budget():
+    kwargs = dict(outcome="correct_answer", trainable_turn_ids=["trajectory-1"])
+    assert apply_terminal_reward(**kwargs, forced_answer_reasons=["max_compactions"]) == {"trajectory-1": 1.0}
+    assert apply_terminal_reward(**kwargs, reward_profile="voluntary_stopping",
+                                 forced_answer_reasons=["tool_budget"]) == {"trajectory-1": 1.0}

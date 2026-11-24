@@ -39,7 +39,7 @@ def evaluate_value_checkpoint(
         if any(record.get("query_id") != row["query_id"] for record in row.get("trajectory_records", [])):
             raise ValueError("Rollout and trajectory query identities disagree")
     samples = samples_from_rollout_rows(
-        rows, expected_checkpoint_id=generating_checkpoint_id,
+        rows, expected_checkpoint_id=generating_checkpoint_id, reward_profile=config.training.value.reward_profile,
         train_compaction_tokens=config.training.train_compaction_tokens, retain_critic_only_states=True,
     )
     if not samples or any(not sample.has_exact_collection_tokens for sample in samples):

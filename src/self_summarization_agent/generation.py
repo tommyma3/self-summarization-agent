@@ -168,10 +168,22 @@ class TransformersGenerator(TokenInputGenerator):
         for request in requests:
             inputs = torch.tensor([request.prompt_token_ids], dtype=torch.long, device=self.model.device)
             cap = request.max_new_tokens or self.max_new_tokens
+            # Some Qwen checkpoints set the model EOS to endoftext. Stop at
+            # the sampled chat boundary as well, without slicing the completion.
+            turn_end = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            eos = self.model.generation_config.eos_token_id
+            stop_ids = list(eos) if isinstance(eos, (list, tuple)) else ([eos] if eos is not None else [])
+            if turn_end is not None and self.tokenizer.convert_ids_to_tokens(turn_end) == "<|im_end|>" and turn_end not in stop_ids:
+                stop_ids.append(turn_end)
             kwargs = dict(max_new_tokens=cap, do_sample=self.do_sample,
                           pad_token_id=self.tokenizer.pad_token_id)
+            if stop_ids:
+                kwargs["eos_token_id"] = stop_ids
             if self.do_sample:
-                kwargs.update(temperature=self.temperature, top_p=self.top_p, **self.sampling_extra)
+                extra = self.sampling_extra.copy()
+                if extra.get("presence_penalty") == 0:
+                    del extra["presence_penalty"]  # vLLM's neutral default has no HF equivalent.
+                kwargs.update(temperature=self.temperature, top_p=self.top_p, **extra)
             with torch.inference_mode():
                 output = self.model.generate(input_ids=inputs, attention_mask=torch.ones_like(inputs), **kwargs)
             ids = output[0, inputs.shape[1]:].tolist()
@@ -501,6 +513,10 @@ def _apply_vllm_subprocess_fix() -> None:
 
 @dataclass(slots=True)
 class VLLMGenerator(TokenInputGenerator):
+    # Per-request sampling parameters allow constrained summaries and
+    # ordinary actions from different episodes to share one engine call.
+    supports_mixed_control_batches = True
+
     model_path: str
     max_new_tokens: int
     temperature: float
@@ -627,7 +643,8 @@ class VLLMGenerator(TokenInputGenerator):
             sampling_kwargs["top_p"] = self.top_p
             sampling_kwargs.update(self.sampling_extra)
         if include_logprobs:
-            sampling_kwargs["logprobs"] = 1
+            # vLLM always includes the sampled token. No alternative is consumed.
+            sampling_kwargs["logprobs"] = 0
         return sampling_kwargs
 
     def generate_batch(self, prompts: list[str]) -> list[str]:
@@ -675,22 +692,25 @@ class VLLMGenerator(TokenInputGenerator):
     def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
         if not requests:
             return []
-        constraints = []
+        sampling_kwargs = self._sampling_kwargs(include_logprobs=True)
+        # Decode the exact IDs once below. Stop strings need vLLM's
+        # incremental detokenizer to determine the generation boundary.
+        if not sampling_kwargs.get("stop"):
+            sampling_kwargs.setdefault("detokenize", False)
+        params = []
         for request in requests:
             regex = request.response_regex
             if self.supports_native_tools and request.generation_kind in {"summary", "forced_answer"}:
                 thinking = r"[^<]*</think>\s*" if self.enable_thinking else ""
                 regex = regex or thinking + _native_control_body_regex(request.generation_kind)
+            kwargs = dict(sampling_kwargs, max_tokens=request.max_new_tokens or self.max_new_tokens)
             if regex:
                 from vllm.sampling_params import StructuredOutputsParams
-                constraints.append({"structured_outputs": StructuredOutputsParams(regex=regex)})
-            else:
-                constraints.append({})
+                kwargs["structured_outputs"] = StructuredOutputsParams(regex=regex)
+            params.append(self._sampling_params_cls(**kwargs))
         outputs = self.llm.generate(
             [{"prompt_token_ids": list(r.prompt_token_ids)} for r in requests],
-            [self._sampling_params_cls(**{**self._sampling_kwargs(include_logprobs=True),
-                                         **constraint,
-                                         "max_tokens": r.max_new_tokens or self.max_new_tokens}) for r, constraint in zip(requests, constraints)],
+            params,
         )
         results = []
         if len(outputs) != len(requests):

@@ -1,19 +1,105 @@
 # SWE-Dev integration and validation
 
-The integration currently has **one deterministic local coding fixture and zero
-validated upstream SWE-Dev tasks**. It connects the existing Harbor/Terminus-KIRA
-collector and `EpisodeRuntime` to verifier rewards, complete-group selection,
-exact-token cache construction, all four training objectives, and checkpoint
-resume. Local tests use scripted completions and a tiny CPU causal LM. They prove
-integration, not fresh on-policy SWE-Dev performance, Docker isolation, Qwen/vLLM
-collection, distributed GPU training, or held-out benchmark accuracy.
+Use `configs/train/swe_dev_tmux_grpo.yaml` to train on locally validated repository tasks.
+Each attempt uses the project KIRA harness, an independent checkout, and a persistent
+tmux shell. Model turns, tool calls, compactions, and verifier rewards go through the
+same exact-token collection and training pipeline as the Harbor integration.
 
-`AGENTS.md` is unchanged. The trajectory schema, TITO contract, interval renderer,
-and cache version are unchanged. Only runtime reward selection was added to the
-runtime; the append-only state machine is reused. Every successful compaction
-finalizes the old ledger before starting its successor, and the shell/environment
-belongs to the entire rollout. Saved-record checks cover the old interval and
-its successor, including summary tokens and linked native tool messages.
+## Run locally with tmux
+
+The local pool contains **35 validated reference IDs**. A clean rebuild from the
+checked-in dependency locks passed the baseline and reference tests twice for all 35.
+Qwen3.5-9B solved the optional-YAML task through tmux, and a separate
+Qwen3.5-0.8B value-MC iteration completed a GPU optimizer update. A second 9B
+attempt produced a passing patch and received zero training reward for a malformed
+final call. [Run results](swe-dev/tmux-validation.json)
+
+From the repository root, install the project dependencies and make `git`, `tmux`,
+`bash`, and `uv` available. The worker needs a Python interpreter it can execute.
+For example, on this Linux x86-64 host, prepare the optional-YAML task using Python 3.9:
+
+```bash
+uv python install 3.9 --install-dir "$PWD/artifacts/swe-dev/tmux-runtime"
+.venv/bin/python -m self_summarization_agent.benchmarks.swe_dev.prepare_tmux \
+  --python "$PWD/artifacts/swe-dev/tmux-runtime/cpython-3.9-linux-x86_64-gnu/bin/python3.9" \
+  --output artifacts/swe-dev/tmux-tasks --instance en0_dnry-config-4
+```
+
+The preparer downloads and checks the pinned [Nebius SWE-bench Extra dataset](https://huggingface.co/datasets/nebius/SWE-bench-extra/tree/11dcbfb30e19552df2a2f8030bd764adc95c92a5)
+and matches its repository/PR identifiers to the [CompactionRL reference manifest](https://github.com/THUDM/CompactionRL/blob/c0727751da3d1edfdfb5cc55fba5c6e30f67ce00/buffer/data/manifests/swedev_reference_1105.json).
+It fetches each base commit, installs project dependencies in a per-task virtual
+environment, restores the published tests in a separate grading copy, and runs both
+the original and reference-fixed trees twice. Admission requires every named test
+to show its expected outcome. The output contains `validated.json`, `exclusions.json`,
+package versions, and per-task pytest logs. Additional `--instance` arguments select
+more IDs. Omitting the filter prepares the known validated pool using the checked-in Python 3.9 dependency versions.
+An explicit matched ID without a lock attempts dependency discovery and the same validation.
+Use `--parquet PATH` to supply the pinned download offline. Finish preparation before
+collecting a run because the manifest is part of checkpoint and cache lineage.
+
+For one collection pass from a configured checkpoint:
+
+```bash
+.venv/bin/python -m self_summarization_agent.rollout_collection \
+  --config configs/train/swe_dev_tmux_grpo.yaml --split train \
+  --checkpoint /124090467/Qwen/Qwen3.5-9B --output artifacts/swe-dev/train.raw.jsonl \
+  --set collection.train_task_count=1
+```
+
+To run a complete first GRPO iteration with one task and four attempts, initialize
+a fresh run directory and use the standard iteration launcher:
+
+```bash
+run_dir=$(mktemp -d "$PWD/artifacts/swe-dev/train-XXXXXX")
+printf '%s\n' /124090467/Qwen/Qwen3.5-9B > "$run_dir/latest"
+.venv/bin/python -m self_summarization_agent.iteration_launcher \
+  --config configs/train/swe_dev_tmux_grpo.yaml --iteration 1 --latest-root "$run_dir" \
+  --set collection.train_task_count=1
+```
+
+Set the rollout and training GPU IDs for your machine. Subsequent iterations reuse the
+same run directory. The other SWE training objectives can use the same bundles with
+`--set benchmark.environment=local-tmux --set benchmark.prepared_task_root=artifacts/swe-dev/tmux-tasks`.
+Training uses the validated pool only. This local profile has no held-out evaluation split.
+
+The grader runs pytest in a fresh copy of the candidate after tmux stops, with the
+published test files restored. Complete passing discovery earns 1, ordinary failures
+earn 0, and missing discovery produces an infrastructure error. Runtime format
+penalties retain precedence. Attempts save their diff, snapshot, verifier output, and
+trajectory in the trial directory. On Linux when launched as root, the model shell
+uses the `nobody` account and the grader uses `daemon`; worker-visible interpreters
+and their parent directories must be accessible. This is a shared-host execution
+profile for trusted task sources. It does not provide container isolation or claim
+identity with CompactionRL's unpublished Harbor bundles.
+
+## Training on prepared CompactionRL Harbor tasks
+
+The four Docker SWE training presets select all 1,105 task IDs in
+the historical GLM-4.7-Flash reference manifest. The selection is pinned to
+[CompactionRL commit c072775](https://github.com/THUDM/CompactionRL/blob/c0727751da3d1edfdfb5cc55fba5c6e30f67ce00/buffer/data/manifests/swedev_reference_1105.json).
+The upstream [reproduction guide](https://github.com/THUDM/CompactionRL/blob/c0727751da3d1edfdfb5cc55fba5c6e30f67ce00/slime/compactionrl/docs/reproduction.md#models-and-data)
+requires separately prepared Harbor tasks and images. Supply the original
+bundles to reproduce the task contents. The ID list alone establishes membership.
+
+Point the launcher at the directory containing one Harbor task per ID. Each
+subdirectory contains `task.toml`, `instruction.md`, `environment/`, and
+`tests/test.sh`. With an initialized run directory pointing to the starting checkpoint,
+a first GRPO iteration from the repository root is
+
+```bash
+.venv/bin/python -m self_summarization_agent.iteration_launcher \
+  --config configs/train/swe_dev_grpo.yaml --iteration 1 \
+  --latest-root /absolute/path/to/initialized-run \
+  --set benchmark.prepared_task_root=/absolute/path/to/prepared-swedev-tasks
+```
+
+The loader checks the ID manifest digest, requires all selected directories,
+ignores unrelated directories, and records Harbor's bundle checksum for each
+task. Reference-mode collection uses the supplied task's standard Harbor trial
+and verifier in Docker. Our runtime controls compaction and our SWE binary
+reward mapping still applies. Use `collection.train_task_count` to sample a
+smaller per-iteration batch from the same pool. The reference list has no
+evaluation split.
 
 ## Source-recoverability audit (2026-11-02)
 
@@ -109,10 +195,7 @@ and overlapping train/eval task/content identities are rejected.
 
 The `local-fixture` environment accepts only fixed inspection/edit commands from
 a generator explicitly labeled `fixture_only`. It is a CPU plumbing harness,
-not a sandbox for arbitrary policies. The four checked-in `swe_dev_*` training
-presets select this example and resolve binary rewards; the tests replace their
-large-model paths with the tiny fixture model. They are not a command to launch
-an unrestricted model against the host shell.
+not a sandbox for arbitrary policies. The fixture tests explicitly select this dataset and use a tiny CPU model.
 
 ## Collection, verification, selection and cache
 
@@ -132,7 +215,7 @@ rejects symlinks/special files rather than following them, and excludes `.git` a
 Python bytecode caches. The snapshot is the reconstruction authority; candidate
 Git hooks/configuration are not executed.
 
-The SWE Harbor trial hook stops the agent container, copies the repository from
+For recovered-task manifests, the SWE Harbor trial hook stops the agent container, copies the repository from
 the stopped environment, and verifies the frozen snapshot in a fresh pinned
 container. It disables network, drops capabilities, applies CPU/memory/PID/tmp
 limits, uses a read-only repository/root, and mounts the trusted verifier outside
@@ -245,13 +328,12 @@ records the operation trace, FP64/finite-difference evidence, kernel-precision
 control, optimizer-step comparison, and the combined 117-passing-test result.
 The earlier validation JSON remains the historical record of that earlier run.
 
-## Production readiness recovery gate
+## Historical Docker recovery gate (2026-11-02)
 
 The [2026-11-02 readiness plan](plans/2026-11-02-swe-dev-production-readiness.md)
 now has a reproducible [independent recovery gate](swe-dev/recovery.md), including
 per-field hashed provenance, exclusion reports, connected leakage groups, explicit
-split reservations, and external evaluation overlap checks. The checked scoped
-inventory still yields zero recoverable upstream specifications. Public Git HEAD
+split reservations, and external evaluation overlap checks. That audit of the original SWE-Dev release yielded zero recoverable upstream specifications. Public Git HEAD
 and dataset revisions are unchanged; the GitHub release API check was rate-limited.
 M2–M7 remain pending trusted task assets and Docker validation. The recovery report
 is a proposal and cannot be used as an executable task manifest.

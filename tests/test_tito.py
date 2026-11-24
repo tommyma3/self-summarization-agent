@@ -117,6 +117,47 @@ def test_ledger_snapshots_and_duplicate_commit():
         ledger.append_external([7], kind="tool")
 
 
+@pytest.mark.parametrize("summary", [SUMMARY, "</think>bad<|im_end|>"])
+def test_mixed_control_batch_preserves_individual_trajectories(summary):
+    class BatchedModel(TokenModel):
+        supports_mixed_control_batches = True
+
+        def __init__(self):
+            super().__init__([])
+            self.batches = []
+            self.short_actions = 0
+
+        def generate_token_batch(self, requests):
+            self.batches.append([r.generation_kind for r in requests])
+            assert len(self.batches) <= 4
+            outputs = []
+            for request in requests:
+                prompt = self.tokenizer.decode(request.prompt_token_ids)
+                if request.generation_kind == "summary":
+                    outputs.append(summary)
+                elif "long-question" in prompt:
+                    outputs.append(FINISH if format_compacted_summary("evidence") in prompt else SEARCH)
+                else:
+                    self.short_actions += 1
+                    outputs.append(SEARCH if self.short_actions < 3 else FINISH)
+            self.outputs = iter(outputs)
+            return super().generate_token_batch(requests)
+
+    episodes = [("long", "long-question" + "x" * 5000), ("short", "short-question")]
+    baseline = BatchedModel()
+    baseline.supports_mixed_control_batches = False
+    mixed = BatchedModel()
+    expected = runtime(baseline, context_threshold_tokens=5000).run_many(episodes)
+    actual = runtime(mixed, context_threshold_tokens=5000).run_many(episodes)
+    assert ["summary", "action"] in mixed.batches
+    assert len(mixed.batches) == 3
+    assert len(baseline.batches) == 4
+    for before, after in zip(expected, actual):
+        assert before.trajectory_records == after.trajectory_records
+        assert before.status == after.status
+        assert before.turn_rewards == after.turn_rewards
+
+
 @pytest.mark.parametrize("compactions", [0, 1, 2])
 @pytest.mark.parametrize("final_output", [FINISH, PLAIN_FINISH])
 def test_all_segments_keep_exact_sampled_tokens_and_native_cache(compactions, final_output):
@@ -778,6 +819,11 @@ def test_vllm_adapter_submits_ids_and_preserves_raw_sampled_logprobs(native):
     result = generator.generate_token_batch([TokenRequest((1, 999999, 2), max_new_tokens=8)])[0]
     assert seen[0][0] == [{"prompt_token_ids": [1, 999999, 2]}]
     assert seen[0][1][0]["max_tokens"] == 8
+    assert seen[0][1][0]["logprobs"] == 0
+    assert seen[0][1][0]["detokenize"] is False
+    generator.sampling_extra = {"stop": ["stop here"]}
+    generator.generate_token_batch([TokenRequest((1,))])
+    assert seen[1][1][0].get("detokenize", True)
     assert result.completion_token_ids == ids
     assert result.token_logprobs == [-0.2] * len(ids)
     assert result.token_logprobs_mode == "raw_logprobs"
@@ -888,13 +934,17 @@ def test_transformers_adapter_preserves_exact_inputs_and_sampled_stop():
         seen.append(kwargs)
         return torch.cat([kwargs["input_ids"], torch.tensor([[999999, 2]])], dim=1)
     tokenizer = Tokenizer()
-    adapter = SimpleNamespace(model=SimpleNamespace(device="cpu", generate=generate),
+    adapter = SimpleNamespace(model=SimpleNamespace(device="cpu", generate=generate,
+        generation_config=SimpleNamespace(eos_token_id=7)),
         tokenizer=SimpleNamespace(pad_token_id=0, decode=tokenizer.decode,
-                                  convert_tokens_to_ids=lambda token: 2),
-        max_new_tokens=99, do_sample=False)
+                                  convert_tokens_to_ids=lambda token: 2, convert_ids_to_tokens=lambda _: "<|im_end|>"),
+        max_new_tokens=99, do_sample=True, temperature=0.6, top_p=1.0,
+        sampling_extra={"presence_penalty": 0.0})
     result = TransformersGenerator.generate_token_batch(adapter, [TokenRequest((1, 999999, 2), max_new_tokens=8)])[0]
     assert seen[0]["input_ids"].tolist() == [[1, 999999, 2]]
     assert seen[0]["max_new_tokens"] == 8
+    assert seen[0]["eos_token_id"] == [7, 2]
+    assert "presence_penalty" not in seen[0]
     assert result.completion_token_ids == [999999, 2]
     assert result.finish_reason == "stop"
 
@@ -1052,3 +1102,44 @@ def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
         assert metrics.mean_advantage == pytest.approx(1 / 6)
         assert metrics.extra_metrics["value/state_count"] == 3
         assert metrics.extra_metrics["value/rollout_count"] == 2
+
+
+@pytest.mark.parametrize(("outputs", "limit", "outcome", "expected"), [
+    ([FINISH], 0, "correct_answer", 1.0),
+    ([SEARCH, SUMMARY, FINISH], 1, "correct_answer", 1.0),
+    ([SEARCH, FINISH], 0, "correct_answer", 0.9),
+    ([SEARCH, SUMMARY, SEARCH, FINISH], 1, "correct_answer", 0.9),
+    ([SEARCH, FINISH], 0, "wrong_answer", 0.0),
+    ([SEARCH, "</think><summary></summary><|im_end|>"], 1, "wrong_answer", 0.0),
+])
+def test_voluntary_stopping_judgment_through_segment_returns(outputs, limit, outcome, expected):
+    from self_summarization_agent.config import load_train_config
+    from self_summarization_agent.judge import JudgeDecision
+    from self_summarization_agent.judge_step import apply_decision_to_rollout_row
+    from self_summarization_agent.launcher_utils import serialize_runtime_result
+    from self_summarization_agent.segment_returns import ordered_rollout_chains, segment_gae
+    from self_summarization_agent.train_step import samples_from_rollout_rows
+
+    config = load_train_config("configs/train/native_segment_gae_force_answer.yaml",
+                               {"benchmark.reward_profile": "voluntary_stopping"})
+    profile = config.training.value.reward_profile
+    result = runtime(TokenModel(outputs), max_compactions=limit, context_threshold_tokens=1,
+                     force_answer_at_compaction_limit=True).run("q", "question")
+    raw = serialize_runtime_result(result, query_text="question", include_rewards=False)
+    raw.update(policy_checkpoint_id="test", rollout_index=0)
+    decision = JudgeDecision(outcome=outcome, judge_prompt=None, judge_response=None, parse_error=False)
+    row = apply_decision_to_rollout_row(raw, decision, reward_profile=profile)
+    assert set(row["turn_rewards"].values()) == {expected}
+    assert row["judge"]["outcome"] == (outcome if result.status == "completed" else result.status)
+    for record in row["trajectory_records"]:
+        record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
+    samples = samples_from_rollout_rows([row], expected_checkpoint_id="test", reward_profile=profile)
+    chain, = ordered_rollout_chains([row], samples, profile)
+    values = {tuple(item["key"]): 0.5 for item in chain}
+    returns = segment_gae([chain], values, 1.0, profile)
+    for item in chain:
+        interval = returns[tuple(item["key"])]
+        assert interval["transition_reward"] == (expected if item["terminal"] else 0)
+        assert interval["target"] == pytest.approx(expected)
+    with pytest.raises(ValueError, match="reward profile"):
+        samples_from_rollout_rows([row], expected_checkpoint_id="test")

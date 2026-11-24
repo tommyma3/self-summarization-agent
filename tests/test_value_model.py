@@ -135,3 +135,19 @@ def test_frozen_value_loss_uses_rollout_mass_not_state_or_batch_count() -> None:
 def test_frozen_value_loss_rejects_invalid_evaluation(losses, weights) -> None:
     with pytest.raises(ValueError):
         normalized_value_evaluation_loss(losses, weights)
+
+
+@pytest.mark.parametrize("bins", [2, 51])
+def test_cap_answer_value_loss_preserves_fractional_target(bins):
+    from self_summarization_agent.value_model import expected_categorical_value
+
+    logits = torch.linspace(-1, 1, bins).unsqueeze(0).requires_grad_()
+    rewards = torch.tensor([0.9])
+    p = expected_categorical_value(logits)
+    expected = -0.9 * p.log() - 0.1 * (1 - p).log()
+    loss = outcome_log_losses(logits, rewards, "voluntary_stopping")
+    assert torch.allclose(loss, expected)
+    loss.sum().backward()
+    assert logits.grad.isfinite().all()
+    with pytest.raises(ValueError, match="binary reward classes"):
+        outcome_log_losses(logits, rewards)

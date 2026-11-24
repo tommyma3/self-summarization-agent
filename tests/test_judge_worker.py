@@ -49,6 +49,7 @@ def _message(batch_id: int, query_id: str) -> dict:
 def test_judge_worker_microbatches_multiple_streamed_submissions(monkeypatch) -> None:
     judge = RecordingBatchJudge()
     config = SimpleNamespace(
+        benchmark=SimpleNamespace(reward_profile="binary_zero_one"),
         judge=SimpleNamespace(batch_size=8, batch_wait_ms=100, batch_timeout_seconds=600)
     )
     monkeypatch.setattr(judge_worker, "load_train_config", lambda *_args, **_kwargs: config)
@@ -77,6 +78,7 @@ def test_judge_worker_microbatches_multiple_streamed_submissions(monkeypatch) ->
 def test_judge_worker_caps_large_submission_at_configured_batch_size(monkeypatch) -> None:
     judge = RecordingBatchJudge()
     config = SimpleNamespace(
+        benchmark=SimpleNamespace(reward_profile="binary_zero_one"),
         judge=SimpleNamespace(batch_size=2, batch_wait_ms=0, batch_timeout_seconds=600)
     )
     monkeypatch.setattr(judge_worker, "load_train_config", lambda *_args, **_kwargs: config)

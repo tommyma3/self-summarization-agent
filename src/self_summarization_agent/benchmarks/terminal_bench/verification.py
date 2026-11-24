@@ -33,7 +33,7 @@ def apply_verifier_reward(row, *, reward_profile=BINARY_REWARD):
                             trainable_turn_ids_from_records(row["trajectory_records"])}
                            if reward is not None else {})
     row["judge"] = dict(outcome=outcome, judge_prompt=None, judge_response=None,
-                        parse_error=infra, source="harbor-verifier", raw_reward=raw_reward,
+                        parse_error=infra, source="tmux-pytest" if row.get("swe_metadata", {}).get("verifier_mode") == "tmux-pytest" else "harbor-verifier", raw_reward=raw_reward,
                         rollout_index=row.get("rollout_index"))
     row["trainable_sample_count"] = len(extract_trainable_samples(
         row["trajectory_records"], row["turn_rewards"],

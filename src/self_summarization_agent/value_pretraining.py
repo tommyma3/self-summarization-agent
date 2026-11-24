@@ -14,7 +14,7 @@ import time
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
 from self_summarization_agent.config import resolved_rollout_sampling_profile, runtime_config_identity, sampling_profile_id
-from self_summarization_agent.rewards import read_rollout_reward
+from self_summarization_agent.rewards import BINARY_REWARD, correct_answer_reward, read_rollout_reward
 from self_summarization_agent.separate_value import (
     CRITIC_MANIFEST, CRITIC_STATE, atomic_json, digest, model_files_complete,
     sample_key, source_critic_identity, validate_samples,
@@ -104,14 +104,17 @@ def prepare_dataset(config, actor, path, allowed_queries):
         judge, rewards = row.get("judge"), row.get("turn_rewards")
         if not isinstance(judge, dict) or not isinstance(rewards, dict):
             raise ValueError("Pretraining requires judged rollout rewards")
-        expected = 1.0 if judge.get("outcome") == "correct_answer" else 0.0
+        expected = 0.0
+        if judge.get("outcome") == "correct_answer":
+            expected = correct_answer_reward(config.benchmark.reward_profile, row.get("token_usage", {}).get("forced_answer_reasons", ()))
         if ((expected > 0 and row.get("status") != "completed")
-                or any(isinstance(r, bool) or read_rollout_reward(r) != expected for r in rewards.values())):
+                or any(isinstance(r, bool) or read_rollout_reward(r, config.benchmark.reward_profile) != expected for r in rewards.values())):
             raise ValueError("Pretraining rewards disagree with the terminal judge decision")
         keys.add((query, index))
         queries.setdefault(query, set()).add(index)
-        extracted = samples_from_rollout_rows([row], expected_checkpoint_id=checkpoint_id, retain_critic_only_states=True)
-        validate_samples(extracted, config.training.max_sequence_length)
+        extracted = samples_from_rollout_rows([row], expected_checkpoint_id=checkpoint_id, retain_critic_only_states=True,
+                                              reward_profile=config.benchmark.reward_profile)
+        validate_samples(extracted, config.training.max_sequence_length, config.benchmark.reward_profile)
         if config.training.advantage_estimator == "token_mc_value":
             from .segment_returns import ordered_rollout_chains
             ordered_rollout_chains([row], extracted)
@@ -304,11 +307,12 @@ def fit_pretraining(config, actor, rollout_path, output, allowed_queries, *, res
 
     def evaluate(epoch, train_metrics=None):
         values, losses = critic.evaluate(validation)
-        metrics = value_diagnostics(validation, values, losses, prefix="validation")
+        metrics = value_diagnostics(validation, values, losses, prefix="validation", reward_profile=value_config.reward_profile)
         if not math.isfinite(metrics["validation/brier_score"]):
             raise ValueError("Nonfinite pretraining validation score")
+        baseline_metric = "constant_success_probability" if value_config.reward_profile == BINARY_REWARD else "constant_expected_reward"
         return {"epoch": epoch, "optimizer_steps": critic.update_count, "train_metrics": train_metrics,
-                **metrics, "constant_success_probability": prevalence, "constant_brier_score": constant_brier}
+                **metrics, baseline_metric: prevalence, "constant_brier_score": constant_brier}
 
     if state is None:
         record = evaluate(0)

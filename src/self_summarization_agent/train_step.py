@@ -27,6 +27,7 @@ from self_summarization_agent.trainer import (
     TransformersPolicyTrainer,
     _write_training_progress,
 )
+from self_summarization_agent.rewards import BINARY_REWARD, validate_reward_profile
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
     extract_training_samples,
@@ -102,9 +103,11 @@ def samples_from_rollout_rows(
     expected_checkpoint_id: str,
     train_compaction_tokens: bool = True,
     retain_critic_only_states: bool = False,
+    reward_profile=BINARY_REWARD,
 ) -> list[Any]:
     samples = []
     for index, row in enumerate(rows, start=1):
+        validate_reward_profile(row, reward_profile)
         checkpoint_id = row.get("policy_checkpoint_id")
         if checkpoint_id != expected_checkpoint_id:
             raise ValueError(
@@ -126,6 +129,7 @@ def samples_from_rollout_rows(
         row_samples = extract_training_samples(
             trajectory_records,
             turn_rewards,
+            reward_profile=reward_profile,
             rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
             train_compaction_tokens=train_compaction_tokens,
             retain_critic_only_states=retain_critic_only_states,
@@ -200,6 +204,7 @@ def run_train_step(
             raise ValueError("No complete eligible SWE task groups; no training update")
     samples = samples_from_rollout_rows(
         rows,
+        reward_profile=config.benchmark.reward_profile,
         expected_checkpoint_id=checkpoint_id,
         train_compaction_tokens=config.training.train_compaction_tokens,
         retain_critic_only_states=config.training.value.enabled,

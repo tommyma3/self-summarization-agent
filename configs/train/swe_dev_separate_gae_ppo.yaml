@@ -1,20 +1,20 @@
-# Fixture integration preset; scripted fixtures are exercised by the validation tests.
+# CompactionRL reference selection; set prepared_task_root to the prepared SWE-Dev Harbor task directory.
 experiment:
   name: swe-dev-separate_gae_ppo
   seed: 0
   output_root: artifacts/swe-dev/experiment
 benchmark:
   name: swe-dev
-  dataset: deterministic-local-fixture-v1
-  dataset_revision: local-fixture-v1
+  dataset: compactionrl-swe-dev
+  dataset_revision: c0727751da3d1edfdfb5cc55fba5c6e30f67ce00
   reward_profile: binary_zero_one
-  environment: local-fixture
+  environment: docker
   image_profile: text-only
-  train_manifest_path: docs/swe-dev/fixture-train.json
-  eval_manifest_path: docs/swe-dev/fixture-eval.json
+  train_manifest_path: configs/train/data/swedev_reference_1105.json
+  prepared_task_root: artifacts/swe-dev/prepared-swedev-tasks
 dataset: {}
 collection:
-  train_task_count: 1
+  train_task_count: null
   eval_task_count: 0
 retrieval: {}
 model:

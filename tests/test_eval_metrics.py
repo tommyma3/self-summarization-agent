@@ -144,3 +144,21 @@ def test_write_eval_metrics_reuses_existing_iteration_record(tmp_path: Path) -> 
     written = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
     assert second == first
     assert written == [first]
+
+
+def test_voluntary_stopping_reports_correctness_and_cap_hits(tmp_path):
+    path = tmp_path / "judged.jsonl"
+    metrics = tmp_path / "metrics.jsonl"
+    rows = [
+        {"judge": {"outcome": outcome}, "token_usage": {"forced_answer_reasons": reasons}}
+        for outcome, reasons in [("correct_answer", []), ("correct_answer", ["max_compactions"]),
+                                 ("malformed_tool_call", ["max_compactions"])]
+    ]
+    kwargs = dict(judged_rollout_path=path, metrics_path=metrics, iteration=0, policy_checkpoint_id="base")
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    write_eval_metrics(**kwargs)
+    path.write_text("".join(json.dumps(dict(row, reward_profile="voluntary_stopping")) + "\n" for row in rows))
+    record = write_eval_metrics(**kwargs)
+    assert record["eval_accuracy"] == 2 / 3
+    assert record["eval_compaction_cap_hits"] == 2
+    assert record["eval_cap_forced_correct"] == record["eval_voluntary_correct"] == 1

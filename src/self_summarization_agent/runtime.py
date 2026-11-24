@@ -325,6 +325,7 @@ class _ActiveEpisode:
     result: RuntimeResult | None = None
     token_ledger: IntervalTokenLedger | None = None
     token_request: TokenRequest | None = None
+    pending_summary: ConversationPrompt | None = None
 
 
 @dataclass(slots=True)
@@ -465,7 +466,7 @@ class EpisodeRuntime:
 
     def _prompt_token_count(self, active: _ActiveEpisode, prompt: str) -> int:
         prompt_counter = getattr(self.model, "count_prompt_tokens", None)
-        prompt_tokens = (len(self._token_input(active, prompt).prompt_token_ids)
+        prompt_tokens = (len(active.token_ledger) + len(self.token_renderer.header(prompt.generation_kind))
                          if active.token_ledger is not None else
                          prompt_counter(prompt) if prompt_counter is not None else self.token_counter(prompt))
         active.token_usage.max_prompt_tokens_seen = max(
@@ -1594,9 +1595,14 @@ class EpisodeRuntime:
         episodes and refill their slots before the next round.
         """
 
-        action_items: list[tuple[_ActiveEpisode, str, int, bool]] = []
+        generation_items: list[tuple[_ActiveEpisode, ConversationPrompt, int]] = []
         for active in active_episodes:
             if active.result is not None:
+                continue
+            if active.pending_summary is not None:
+                prompt = active.pending_summary
+                generation_items.append((active, prompt, self._prompt_token_count(active, prompt)))
+                active.pending_summary = None
                 continue
             remaining_tool_calls = self._remaining_tool_calls(active)
             forced_reasons = active.token_usage.forced_answer_reasons
@@ -1605,27 +1611,27 @@ class EpisodeRuntime:
             if self._generated_token_budget_exhausted(active):
                 forced_reasons.append("generated_token_budget")
 
-            if forced_reasons:
-                acting_prompt = self._build_forced_answer_prompt(active)
-                if self._terminate_on_context_overflow(active, acting_prompt):
-                    continue
-                prompt_tokens = self._prompt_token_count(active, acting_prompt)
-                action_items.append((active, acting_prompt, prompt_tokens, True))
-                continue
-            acting_prompt = self._build_runtime_prompt(active.state)
+            acting_prompt = (
+                self._build_forced_answer_prompt(active) if forced_reasons
+                else self._build_runtime_prompt(active.state)
+            )
             if self._terminate_on_context_overflow(active, acting_prompt):
                 continue
             prompt_tokens = self._prompt_token_count(active, acting_prompt)
-            action_items.append((active, acting_prompt, prompt_tokens, False))
+            generation_items.append((active, acting_prompt, prompt_tokens))
 
-        if action_items:
-            action_outputs = self._generate_batch([self._commit_token_input(active, prompt) for active, prompt, _, _ in action_items])
+        if generation_items:
+            outputs = self._generate_batch([
+                self._commit_token_input(active, prompt) for active, prompt, _ in generation_items
+            ])
             pending_tool_actions: list[_PendingToolRound] = []
-            for (active, prompt, prompt_tokens, forced_answer), generated_output in zip(
-                action_items,
-                action_outputs,
+            for (active, prompt, prompt_tokens), generated_output in zip(
+                generation_items,
+                outputs,
             ):
-                if forced_answer:
+                if prompt.generation_kind == "summary":
+                    self._apply_summary_output(active, prompt, prompt_tokens, generated_output)
+                elif prompt.generation_kind == "forced_answer":
                     self._apply_forced_answer_output(active, generated_output, prompt, prompt_tokens)
                 else:
                     pending_action = self._prepare_action_output(
@@ -1641,7 +1647,7 @@ class EpisodeRuntime:
 
         summary_items: list[tuple[_ActiveEpisode, str, int]] = []
         for active in active_episodes:
-            if active.result is not None:
+            if active.result is not None or active.interval_round_count == 0:
                 continue
             # The generation budget has priority over context compaction.
             # If both thresholds are reached by the latest action, the next
@@ -1650,6 +1656,11 @@ class EpisodeRuntime:
                 continue
             summary_request = self._build_summary_prompt_for_active(active)
             if summary_request is None:
+                continue
+            if len(active_episodes) > 1 and getattr(self.model, "supports_mixed_control_batches", False):
+                # The next scheduler tick can refill retired slots and submit
+                # other episodes' actions alongside this terminal control.
+                active.pending_summary = summary_request
                 continue
             summary_prompt = summary_request
             prompt_tokens = self._prompt_token_count(active, summary_prompt)

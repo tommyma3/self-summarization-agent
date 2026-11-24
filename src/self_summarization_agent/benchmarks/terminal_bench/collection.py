@@ -28,20 +28,22 @@ def collect_terminal_rollouts(config, *, checkpoint_path, output_path, generator
 
     if not config.rollout.require_exact_token_ids or not config.model.chat_template_path:
         raise ValueError("Terminal-Bench requires exact token IDs and the project Qwen template")
-    tasks = task_manifest(config.benchmark, split=split)
-    rng = random.Random(config.experiment.seed if sample_seed is None else sample_seed)
-    if config.dataset.shuffle and config.benchmark.name != "swe-dev":
-        rng.shuffle(tasks)
-    tasks = tasks[config.dataset.offset:]
-    if config.dataset.limit is not None:
-        tasks = tasks[:config.dataset.limit]
-    count = getattr(config.collection, f"{split}_task_count")
-    if count is not None and config.benchmark.name != "swe-dev":
-        if count < 1 or count > len(tasks):
-            raise ValueError("Requested task count is outside the selected benchmark")
-        tasks = rng.sample(tasks, count)
+    compactionrl_tasks = config.benchmark.name == "swe-dev" and config.benchmark.dataset == "compactionrl-swe-dev"
     if config.benchmark.name == "swe-dev":
         tasks = selected_tasks(config, split=split, sample_seed=sample_seed)
+    else:
+        tasks = task_manifest(config.benchmark, split=split)
+        rng = random.Random(config.experiment.seed if sample_seed is None else sample_seed)
+        if config.dataset.shuffle:
+            rng.shuffle(tasks)
+        tasks = tasks[config.dataset.offset:]
+        if config.dataset.limit is not None:
+            tasks = tasks[:config.dataset.limit]
+        count = getattr(config.collection, f"{split}_task_count")
+        if count is not None:
+            if count < 1 or count > len(tasks):
+                raise ValueError("Requested task count is outside the selected benchmark")
+            tasks = rng.sample(tasks, count)
     if not tasks and not (config.benchmark.name == "swe-dev" and split == "eval"):
         raise ValueError("No terminal tasks selected")
     attempts = config.evaluation.samples_per_task if split == "eval" else config.training.group_size
@@ -104,9 +106,12 @@ def collect_terminal_rollouts(config, *, checkpoint_path, output_path, generator
                             model_name=str(checkpoint), override_timeout_sec=config.benchmark.agent_timeout_seconds,
                             kwargs=dict(policy_key=policy_key, query_id=task["name"],
                                         runtime=asdict(config.runtime), benchmark=asdict(config.benchmark))),
-                        environment=EnvironmentConfig(type="docker" if config.benchmark.environment == "local-fixture" else config.benchmark.environment))
+                        environment=EnvironmentConfig(type="docker" if config.benchmark.environment in {"local-fixture", "local-tmux"} else config.benchmark.environment))
                     # Task download/build preparation is synchronous in Harbor.
-                    if config.benchmark.name == "swe-dev":
+                    if config.benchmark.environment == "local-tmux":
+                        from ..swe_dev.local_tmux import LocalTmuxTrial
+                        trial = LocalTmuxTrial(trial_config, swe_task=task)
+                    elif config.benchmark.name == "swe-dev" and not compactionrl_tasks:
                         if config.benchmark.environment == "local-fixture":
                             from ..swe_dev.local_fixture import FixtureTrial as TrialClass
                             if not getattr(generator, "fixture_only", False):
@@ -142,11 +147,17 @@ def collect_terminal_rollouts(config, *, checkpoint_path, output_path, generator
                             attempts=attempts, sample_seed=sample_seed if split == "train" else None)
                         raw["swe_metadata"] = dict(version=1, fixture_only=task["fixture_only"],
                             task_digest=task["checksum"], manifest_digest=task["manifest_digest"],
-                            source=task["source"], image=task["image"], verifier_digest=task["verifier"]["digest"],
+                            source=task["source"], image=task["image"],
                             trial_seconds=time.monotonic() - trial_started,
-                            verifier_limits=task["verifier"]["limits"],
                             environment_resource_measurements=None,
                             candidate=getattr(trial, "swe_evidence", {}))
+                        if compactionrl_tasks:
+                            raw["swe_metadata"]["verifier_mode"] = task["verifier_mode"]
+                            if result.task_checksum != task["checksum"]:
+                                raise ValueError(f"Harbor task changed during collection: {task['name']}")
+                        else:
+                            raw["swe_metadata"].update(verifier_digest=task["verifier"]["digest"],
+                                                       verifier_limits=task["verifier"]["limits"])
                     row = apply_verifier_reward(raw, reward_profile=config.benchmark.reward_profile)
                     # One event-loop writer commits each completed trial exactly once.
                     append_jsonl(output, row)

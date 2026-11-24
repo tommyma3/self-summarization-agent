@@ -41,6 +41,8 @@ def prediction_metrics(
     residuals = [r - v for r, v in zip(rewards, values)]
     mse = mean([residual ** 2 for residual in residuals])
     reward_variance = variance(rewards)
+    predicted = "predicted_success" if reward_profile == BINARY_REWARD else "predicted_reward"
+    observed = "observed_success" if reward_profile == BINARY_REWARD else "observed_reward"
     bins = []
     for index in range(10 if detailed else 0):
         selected = [i for i, p in enumerate(values) if min(9, int(p * 10)) == index]
@@ -48,8 +50,8 @@ def prediction_metrics(
         bins.append({
             "lower": index / 10, "upper": (index + 1) / 10,
             "count": len(selected), "weight_mass": mass,
-            "predicted_success": math.fsum(weights[i] * values[i] for i in selected) / mass if mass else None,
-            "observed_success": math.fsum(weights[i] * rewards[i] for i in selected) / mass if mass else None,
+            predicted: math.fsum(weights[i] * values[i] for i in selected) / mass if mass else None,
+            observed: math.fsum(weights[i] * rewards[i] for i in selected) / mass if mass else None,
         })
     result = {
         "state_count": size,
@@ -64,13 +66,14 @@ def prediction_metrics(
         "value_std": math.sqrt(variance(values)),
         "value_min": min(values),
         "value_max": max(values),
-        "mean_success_probability": mean(values),
-        "classification_accuracy": mean([float((v >= 0.5) == (r == 1)) for v, r in zip(values, rewards)]),
+        "classification_accuracy": mean([float((v >= 0.5) == (r > 0)) for v, r in zip(values, rewards)]),
     }
+    if reward_profile == BINARY_REWARD:
+        result["mean_success_probability"] = result["mean_value"]
     if detailed:
         result.update({
             "calibration_error": math.fsum(
-                b["weight_mass"] * abs(b["predicted_success"] - b["observed_success"])
+                b["weight_mass"] * abs(b[predicted] - b[observed])
                 for b in bins if b["weight_mass"]
             ),
             "calibration_bins": bins,

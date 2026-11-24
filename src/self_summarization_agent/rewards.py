@@ -3,21 +3,25 @@ from typing import Literal
 
 
 BINARY_REWARD = "binary_zero_one"
+VOLUNTARY_STOPPING = "voluntary_stopping"
+CAP_ANSWER_REWARD = 0.9
 
 
 def reward_bounds(profile=BINARY_REWARD):
-    if profile != BINARY_REWARD:
+    if profile not in (BINARY_REWARD, VOLUNTARY_STOPPING):
         raise ValueError(f"Unknown reward profile: {profile}")
     return 0.0, 1.0
 
 
 def rollout_reward_values(profile=BINARY_REWARD) -> frozenset[float]:
+    if profile == VOLUNTARY_STOPPING:
+        return frozenset((0.0, CAP_ANSWER_REWARD, 1.0))
     return frozenset(reward_bounds(profile))
 
 
-def read_rollout_reward(reward):
+def read_rollout_reward(reward, profile=BINARY_REWARD):
     """Map historical failures to zero when reading saved reward labels."""
-    return 0.0 if reward == -1.0 else reward
+    return 0.0 if profile == BINARY_REWARD and reward == -1.0 else reward
 
 
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted", "overlong"]
@@ -67,17 +71,37 @@ def trainable_turn_ids_from_records(turn_records: Iterable[Mapping[str, object]]
     return turn_ids
 
 
+def artifact_reward_profile(row):
+    profile = row.get("reward_profile", BINARY_REWARD)
+    return BINARY_REWARD if profile == "signed_binary" else profile
+
+
+def validate_reward_profile(row, expected):
+    if artifact_reward_profile(row) != expected:
+        raise ValueError("Rollout reward profile differs from the configured reward profile")
+
+
+def correct_answer_reward(profile: str, forced_answer_reasons: Iterable[str]) -> float:
+    _, success = reward_bounds(profile)
+    if profile == VOLUNTARY_STOPPING and "max_compactions" in forced_answer_reasons:
+        return CAP_ANSWER_REWARD
+    return success
+
+
 def apply_terminal_reward(
     outcome: Outcome,
     summary_turn_ids: list[str] | None = None,
     final_answer_turn_id: str | None = None,
     trainable_turn_ids: list[str] | None = None,
     reward_profile: str = BINARY_REWARD,
+    forced_answer_reasons: Iterable[str] = (),
 ) -> dict[str, float]:
     if outcome not in {"correct_answer", "wrong_answer", "budget_exhausted", "overlong"}:
         raise ValueError(f"Unknown terminal outcome: {outcome}")
-    failure, success = reward_bounds(reward_profile)
-    reward = success if outcome == "correct_answer" else failure
+    if outcome == "correct_answer":
+        reward = correct_answer_reward(reward_profile, forced_answer_reasons)
+    else:
+        reward, _ = reward_bounds(reward_profile)
     if trainable_turn_ids is not None:
         return {turn_id: reward for turn_id in trainable_turn_ids}
     assigned = {turn_id: reward for turn_id in summary_turn_ids or []}

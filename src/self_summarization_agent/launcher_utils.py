@@ -50,6 +50,7 @@ def serialize_runtime_result(
     query_text: str,
     judge: dict[str, Any] | None = None,
     include_rewards: bool = True,
+    reward_profile: str = BINARY_REWARD,
 ) -> dict[str, Any]:
     payload = {
         "query_id": result.query_id,
@@ -65,7 +66,7 @@ def serialize_runtime_result(
         "judge": judge,
     }
     if include_rewards:
-        payload["reward_profile"] = BINARY_REWARD
+        payload["reward_profile"] = reward_profile
         payload["turn_rewards"] = dict(result.turn_rewards)
     return payload
 

@@ -112,6 +112,7 @@ def run_judge_worker(
                         judge_rollout_rows(
                             rows[batch_start : batch_start + batch_size],
                             judge=judge,
+                            reward_profile=config.benchmark.reward_profile,
                             examples_by_query_id=examples,
                             expected_checkpoint_id=expected_checkpoint_id,
                         )
@@ -127,6 +128,7 @@ def run_judge_worker(
                             judge_rollout_rows,
                             rows[batch_start : batch_start + batch_size],
                             judge=judge,
+                            reward_profile=config.benchmark.reward_profile,
                             examples_by_query_id=examples,
                             expected_checkpoint_id=expected_checkpoint_id,
                         )

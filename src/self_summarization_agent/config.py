@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from .rewards import BINARY_REWARD, reward_bounds
+from .rewards import BINARY_REWARD, VOLUNTARY_STOPPING, reward_bounds
 
 
 DEFAULT_TASK_PREFIX = (
@@ -46,17 +46,25 @@ class BenchmarkConfig:
     max_output_chars: int = 30000
     agent_timeout_seconds: float | None = None
     allow_benchmark_training: bool = False
+    prepared_task_root: str | None = None
 
     def __post_init__(self) -> None:
         if self.name not in {"browsecomp", "terminal-bench", "swe-dev"}:
             raise ValueError("benchmark.name must be browsecomp, terminal-bench or swe-dev")
         reward_bounds(self.reward_profile)
+        if self.environment == "local-tmux" and (self.name, self.dataset) != ("swe-dev", "compactionrl-swe-dev"):
+            raise ValueError("local-tmux requires the SWE-Dev CompactionRL reference dataset")
         if self.name == "swe-dev":
-            if not self.train_manifest_path or not self.eval_manifest_path or not self.dataset_revision:
+            if self.dataset == "compactionrl-swe-dev":
+                if not self.train_manifest_path or not self.prepared_task_root or self.environment not in {"docker", "local-tmux"}:
+                    raise ValueError("CompactionRL requires its train ID manifest, prepared_task_root and a Docker or local-tmux environment")
+                if self.eval_manifest_path:
+                    raise ValueError("CompactionRL training IDs have no eval split; use a separate eval config")
+            elif not self.train_manifest_path or not self.eval_manifest_path or not self.dataset_revision:
                 raise ValueError("SWE-Dev requires train/eval manifests and dataset_revision")
             if self.task_paths or self.train_task_paths or self.task_names or self.allow_benchmark_training:
                 raise ValueError("SWE task selection uses explicit manifests only")
-            if self.image_profile != "text-only" or self.environment not in {"docker", "local-fixture"}:
+            if self.image_profile != "text-only" or self.environment not in {"docker", "local-fixture", "local-tmux"}:
                 raise ValueError("SWE supports text-only Docker or deterministic local fixtures")
         if self.image_profile not in {"text-only", "local-vision"}:
             raise ValueError("benchmark.image_profile must be text-only or local-vision")
@@ -538,6 +546,11 @@ class TrainConfig:
             raise ValueError("Token MC requires BrowseComp and exact collection IDs")
         if self.training.value.reward_profile != self.benchmark.reward_profile:
             raise ValueError("Benchmark and value reward profiles disagree")
+        if self.benchmark.reward_profile == VOLUNTARY_STOPPING:
+            if self.benchmark.name != "browsecomp" or self.training.advantage_estimator == "token_mc_value":
+                raise ValueError("voluntary_stopping supports BrowseComp GRPO and interval value training")
+            if self.runtime.max_compactions is None or not self.runtime.force_answer_at_compaction_limit:
+                raise ValueError("voluntary_stopping requires runtime.max_compactions and runtime.force_answer_at_compaction_limit")
         self.training.persist_actor_optimizer = self.benchmark.name == "swe-dev"
         if self.benchmark.name == "swe-dev":
             if self.training.backend not in {"transformers", "verl_ray"}:
@@ -632,6 +645,7 @@ def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     value_section = training_section.pop("value", {})
     if not isinstance(value_section, dict):
         raise ValueError("Config section 'training.value' must be a mapping")
+    value_section = {"reward_profile": _require_section(raw, "benchmark").get("reward_profile", BINARY_REWARD), **value_section}
     pretraining_section = training_section.pop("value_pretraining", {})
     if not isinstance(pretraining_section, dict):
         raise ValueError("Config section 'training.value_pretraining' must be a mapping")

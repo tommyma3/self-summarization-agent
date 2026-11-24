@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from self_summarization_agent.chat_template import load_chat_template
 from self_summarization_agent.config import runtime_config_identity
+from self_summarization_agent.rewards import BINARY_REWARD
 from self_summarization_agent.token_stream import TITO_CONTRACT, TITO_COLLECTION_VERSION
 
 
@@ -13,6 +14,8 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
     identity = dict(contract=TITO_CONTRACT, template=load_chat_template(config.model.chat_template_path),
                     thinking=config.model.enable_thinking, backend=config.rollout.backend,
                     checkpoint=str(checkpoint), tokenizer_files={})
+    if config.rollout.backend == "transformers" and getattr(config.rollout, "require_exact_token_ids", False):
+        identity["transformers_token_stops"] = "model-eos-and-chat-end-v1"
     if getattr(config.rollout, "browsecomp_native_tools", False):
         from self_summarization_agent.prompts import ACTION_TOOLS, build_native_tool_system_prompt
         identity["browsecomp_native_tools"] = [build_native_tool_system_prompt(), ACTION_TOOLS]
@@ -43,6 +46,9 @@ def collection_profile_id(config: Any, checkpoint: Path) -> str:
             "train_limit": dataset.train_limit,
             "eval_limit": dataset.eval_limit,
         }
+    profile = getattr(getattr(config, "benchmark", None), "reward_profile", BINARY_REWARD)
+    if profile != BINARY_REWARD:
+        identity["reward_profile"] = profile
     runtime = getattr(config, "runtime", None)
     if getattr(runtime, "max_compactions", None) is not None and "runtime" not in identity:
         identity["runtime"] = dict(max_compactions=runtime.max_compactions,

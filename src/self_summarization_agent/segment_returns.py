@@ -41,7 +41,7 @@ def ordered_rollout_chains(rows, samples, reward_profile=BINARY_REWARD):
                     or not isinstance(segment, int) or segment != index + 1):
                 raise ValueError("Missing, duplicate, or out-of-order interval in return chain")
             sample = by_key[key]
-            reward = read_rollout_reward(row.get("turn_rewards", {}).get(key[1]))
+            reward = read_rollout_reward(row.get("turn_rewards", {}).get(key[1]), reward_profile)
             if (sample.query_id != row.get("query_id") or record.get("query_id") != sample.query_id
                     or isinstance(reward, bool) or reward not in allowed_rewards or reward != sample.reward):
                 raise ValueError("Inconsistent rollout identity or reward in return chain")

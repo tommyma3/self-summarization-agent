@@ -48,7 +48,7 @@ def benchmark_identity(config):
     scaffold = TerminusKiraScaffold(None, image_enabled=config.image_profile == "local-vision")
     config_identity = asdict(config)
     # Preserve historical Terminal-Bench lineage for unchanged configurations.
-    for key in ("reward_profile", "train_manifest_path", "eval_manifest_path"):
+    for key in ("reward_profile", "train_manifest_path", "eval_manifest_path", "prepared_task_root"):
         config_identity.pop(key, None)
     identity = dict(config=config_identity, harbor=HARBOR_VERSION, kira=KIRA_REVISION,
                     scaffold=SCAFFOLD_VERSION, scaffold_digest=scaffold.fingerprint,

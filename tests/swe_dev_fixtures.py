@@ -80,6 +80,9 @@ def outputs(compactions=2):
 def pilot_config(tmp_path, mode="grpo", compactions=2):
     manifest, evaluation = build_fixture("tests/fixtures/swe_dev/trim-name", tmp_path / "pilot")
     cfg = load_train_config(f"configs/train/swe_dev_{mode}.yaml", overrides={
+        "benchmark.dataset": "deterministic-local-fixture-v1", "benchmark.environment": "local-fixture",
+        "benchmark.dataset_revision": "local-fixture-v1", "benchmark.prepared_task_root": None,
+        "collection.train_task_count": 1,
         "benchmark.train_manifest_path": str(manifest), "benchmark.eval_manifest_path": str(evaluation),
         "runtime.context_threshold_tokens": 1 if compactions else 10000,
         "runtime.max_context_tokens": 12000, "rollout.max_model_len": 12000,

@@ -82,3 +82,62 @@ def test_eval_membership_and_order_ignore_iteration_seed(monkeypatch):
         collection=SimpleNamespace(train_task_count=4, eval_task_count=4))
     assert selected_tasks(cfg, split="eval", sample_seed=0) == selected_tasks(cfg, split="eval", sample_seed=999)
     assert selected_tasks(cfg, split="train", sample_seed=0) != selected_tasks(cfg, split="train", sample_seed=999)
+
+
+def test_compactionrl_reference_presets_require_complete_prepared_dataset(tmp_path):
+    from self_summarization_agent.config import load_train_config
+    from self_summarization_agent.benchmarks.swe_dev.compactionrl import REVISION
+
+    for path in Path("configs/train").glob("swe_dev_*.yaml"):
+        config = load_train_config(path)
+        assert config.benchmark.dataset_revision == REVISION
+        assert config.collection.train_task_count is None
+        if config.benchmark.environment == "local-tmux":
+            config.benchmark.prepared_task_root = str(tmp_path)
+            with pytest.raises(ValueError, match="prepare_tmux"):
+                selected_tasks(config, split="train")
+            continue
+        assert config.benchmark.environment == "docker"
+        config.benchmark.prepared_task_root = str(tmp_path)
+        with pytest.raises(ValueError, match="Missing 1105 of 1105"):
+            selected_tasks(config, split="train")
+
+    config = load_train_config("configs/train/swe_dev_grpo.yaml")
+    config.benchmark.train_manifest_path = str(tmp_path / "short.json")
+    Path(config.benchmark.train_manifest_path).write_text('["amalmurali47_swagroutes-2"]')
+    with pytest.raises(ValueError, match="differs from the pinned"):
+        selected_tasks(config, split="train")
+
+
+def test_compactionrl_selects_exact_ids_and_tracks_native_task_content(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from self_summarization_agent.config import load_train_config
+    from self_summarization_agent.benchmarks.swe_dev import compactionrl
+
+    config = load_train_config("configs/train/swe_dev_grpo.yaml")
+    ids = json.loads(Path(config.benchmark.train_manifest_path).read_bytes())
+    assert len(set(ids)) == len(ids) == 1105
+    ids = ids[:2]
+    # Exercise actual Harbor task parsing and hashing on two small task directories.
+    manifest = tmp_path / "subset.json"
+    manifest.write_text(json.dumps(ids))
+    monkeypatch.setattr(compactionrl, "MANIFEST_SHA256", sha256(manifest.read_bytes()).hexdigest())
+    config.benchmark.train_manifest_path = str(manifest)
+    config.benchmark.prepared_task_root = str(tmp_path)
+    for name in [*ids, "unlisted-task"]:
+        directory = tmp_path / name
+        (directory / "environment").mkdir(parents=True)
+        (directory / "tests").mkdir()
+        (directory / "tests/test.sh").write_text("exit 0")
+        (directory / "task.toml").write_text('version = "1.0"')
+        (directory / "instruction.md").write_text(name)
+    tasks = selected_tasks(config, split="train")
+    assert [t["name"] for t in tasks] == ids
+    assert all(t["verifier_mode"] == "harbor-task" for t in tasks)
+    assert selected_tasks(config, split="eval") == []
+    verifier_path = tmp_path / ids[0] / "tests/test.sh"
+    verifier_path.write_text("exit 1")
+    assert selected_tasks(config, split="train")[0]["checksum"] != tasks[0]["checksum"]
+    verifier_path.unlink()
+    with pytest.raises(ValueError, match="Incomplete CompactionRL Harbor task"):
+        selected_tasks(config, split="train")

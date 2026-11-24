@@ -3,7 +3,7 @@
 Full attention understands position resets and Ulysses, but the upstream
 GatedDeltaNet convolution/recurrence does not. Reassemble its input with a
 SUM-reducing autograd all-gather and run the original mixer independently on
-whole intervals. Only intervals overlapping this rank's output are evaluated.
+each overlapping interval's causal prefix through this rank's last output.
 No tokens, masks, rollout probabilities, or checkpoint parameters are changed.
 """
 from contextvars import ContextVar
@@ -57,8 +57,8 @@ def interval_linear_attention(original, module, hidden_states, position_ids, *,
         # Reuse the model's exact convolution, gates, normalization, and kernels.
         # A fresh invocation resets BOTH convolution and recurrence. Ulysses
         # alignment padding has its own position-zero span, so cannot leak.
-        output = original(module, hidden_states[:, start:end], cache_params=None, attention_mask=None)
-        pieces.append(output[:, left - start:right - start])
+        output = original(module, hidden_states[:, start:right], cache_params=None, attention_mask=None)
+        pieces.append(output[:, left - start:])
     return torch.cat(pieces, dim=1)
 
 

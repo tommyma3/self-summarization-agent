@@ -36,9 +36,11 @@ from self_summarization_agent.launcher_utils import (
     serialize_runtime_result,
 )
 from self_summarization_agent.rewards import (
+    BINARY_REWARD,
     apply_terminal_reward,
     assign_runtime_rewards,
     trainable_turn_ids_from_records,
+    validate_reward_profile,
 )
 from self_summarization_agent.trajectory import (
     COLLECTION_TOKEN_VERSION,
@@ -48,7 +50,7 @@ from self_summarization_agent.trajectory import (
 )
 
 
-def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str, Any]:
+def apply_judged_rewards(result, example: QueryExample, judge: Any, *, reward_profile=BINARY_REWARD) -> dict[str, Any]:
     trainable_turn_ids = trainable_turn_ids_from_records(result.trajectory_records)
     runtime_rewards = assign_runtime_rewards(result.status, trainable_turn_ids)
     if runtime_rewards is not None:
@@ -57,6 +59,8 @@ def apply_judged_rewards(result, example: QueryExample, judge: Any) -> dict[str,
     decision = judge.evaluate(example, result.status, result.final_answer or "")
     result.turn_rewards = apply_terminal_reward(
         outcome=decision.outcome,
+        reward_profile=reward_profile,
+        forced_answer_reasons=result.token_usage.get("forced_answer_reasons", ()),
         trainable_turn_ids=trainable_turn_ids,
     )
     return {
@@ -75,6 +79,7 @@ def _load_completed_rollout_keys(
     expected_sampling_profile_id: str | None = None,
     require_exact_token_ids: bool = False,
     expected_collection_profile_id: str | None = None,
+    expected_reward_profile: str | None = None,
 ) -> set[tuple[str, int]]:
     if not rollout_path.exists():
         return set()
@@ -90,6 +95,8 @@ def _load_completed_rollout_keys(
                 raise ValueError(f"Invalid rollout JSON on line {line_number}: {exc}") from exc
             if not isinstance(row, dict):
                 raise ValueError(f"Rollout row {line_number} must be a JSON object")
+            if expected_reward_profile is not None and "turn_rewards" in row:
+                validate_reward_profile(row, expected_reward_profile)
             row_checkpoint_id = row.get("policy_checkpoint_id")
             if row_checkpoint_id != checkpoint_id:
                 raise ValueError(
@@ -207,7 +214,8 @@ def _select_collection_examples(
 
 
 class _InProcessOverlapJudgeClient:
-    def __init__(self, *, judge: Any, checkpoint_id: str) -> None:
+    def __init__(self, *, judge: Any, checkpoint_id: str, reward_profile=BINARY_REWARD) -> None:
+        self.reward_profile = reward_profile
         self.judge = judge
         self.checkpoint_id = checkpoint_id
         self.completed_rows: list[dict[str, Any]] = []
@@ -218,6 +226,7 @@ class _InProcessOverlapJudgeClient:
             judge_rollout_rows(
                 rows,
                 judge=self.judge,
+                reward_profile=self.reward_profile,
                 examples_by_query_id=examples_by_query_id,
                 expected_checkpoint_id=self.checkpoint_id,
             )
@@ -470,9 +479,10 @@ def _build_overlap_judge_client(
     overrides: list[str],
     checkpoint_id: str,
     queue_max_batches: int = 8,
+    reward_profile=BINARY_REWARD,
 ) -> Any:
     if judge is not None:
-        return _InProcessOverlapJudgeClient(judge=judge, checkpoint_id=checkpoint_id)
+        return _InProcessOverlapJudgeClient(judge=judge, checkpoint_id=checkpoint_id, reward_profile=reward_profile)
     if config_path is None:
         raise ValueError("config_path is required when overlap judging without an injected judge")
     return _SubprocessOverlapJudgeClient(
@@ -642,6 +652,7 @@ def collect_rollouts(
             expected_keys=expected_keys,
             expected_sampling_profile_id=profile_id if split == "eval" else None,
             expected_collection_profile_id=collection_profile_id,
+            expected_reward_profile=config.benchmark.reward_profile,
             require_exact_token_ids=(
                 tito_collection or (
                     config.rollout.backend.lower().replace("-", "_") in {"openai", "openai_compatible"}
@@ -680,6 +691,7 @@ def collect_rollouts(
                 overrides=overrides,
                 checkpoint_id=checkpoint_id,
                 queue_max_batches=config.rollout.overlap_queue_max_batches,
+                reward_profile=config.benchmark.reward_profile,
             )
             owns_overlap_judge_client = True
     generator = generator or _build_rollout_generator(config, checkpoint, split=split)
@@ -702,12 +714,13 @@ def collect_rollouts(
                     trainable_sample_count = None
                     include_rewards = False
                     if judge_inline:
-                        judge_payload = apply_judged_rewards(result, example, judge)
+                        judge_payload = apply_judged_rewards(result, example, judge, reward_profile=config.benchmark.reward_profile)
                         include_rewards = True
                         trainable_sample_count = len(
                             extract_trainable_samples(
                                 result.trajectory_records,
                                 result.turn_rewards,
+                                reward_profile=config.benchmark.reward_profile,
                                 rollout_id=f"{example.query_id}:{rollout_index}",
                             )
                         )
@@ -731,6 +744,7 @@ def collect_rollouts(
                                 else None
                             ),
                             include_rewards=include_rewards,
+                            reward_profile=config.benchmark.reward_profile,
                         ),
                     }
                     append_jsonl(rollout_path, row)

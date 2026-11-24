@@ -12,6 +12,7 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.config import CompactionValueConfig, load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
+from self_summarization_agent.rewards import artifact_reward_profile, validate_reward_profile
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
     apply_training_loss_mask,
@@ -79,6 +80,7 @@ def _validate_cached_row(
     samples = extract_training_samples(
         row["trajectory_records"],
         row["turn_rewards"],
+        reward_profile=artifact_reward_profile(row),
         rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
         train_compaction_tokens=train_compaction_tokens,
         retain_critic_only_states=retain_critic_only_states,
@@ -225,6 +227,7 @@ def _attach_training_caches(
     row_samples = extract_trainable_samples(
         row["trajectory_records"],
         row["turn_rewards"],
+        reward_profile=artifact_reward_profile(row),
         rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
     )
     if len(cache_payloads) != len(row_samples):
@@ -360,6 +363,7 @@ def run_cache_step(
         if not selection_report["selected_groups"]:
             raise ValueError("No complete eligible SWE task groups; no training update")
     for index, row in enumerate(rows, start=1):
+        validate_reward_profile(row, config.benchmark.reward_profile)
         _validate_judged_row(row, index=index, expected_checkpoint_id=checkpoint_id)
 
     output = Path(output_path)
@@ -380,6 +384,8 @@ def run_cache_step(
             for key, cached in completed_rows.items():
                 if key not in sources or without_caches(cached) != without_caches(sources[key]):
                     raise ValueError("SWE cached evidence/rewards/selection changed during resume")
+        for row in completed_rows.values():
+            validate_reward_profile(row, config.benchmark.reward_profile)
         completed_keys = set(completed_rows)
         expected_keys = {_rollout_key(row, index=index) for index, row in enumerate(rows, start=1)}
         unexpected_keys = sorted(completed_keys - expected_keys)
@@ -423,6 +429,7 @@ def run_cache_step(
         samples = extract_trainable_samples(
             cache_candidate["trajectory_records"],
             cache_candidate["turn_rewards"],
+            reward_profile=artifact_reward_profile(cache_candidate),
             rollout_id=(
                 f"{cache_candidate.get('query_id')}:{cache_candidate.get('rollout_index')}"
             ),

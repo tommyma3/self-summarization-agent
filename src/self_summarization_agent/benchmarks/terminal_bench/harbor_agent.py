@@ -80,6 +80,9 @@ class TerminusKiraTito(BaseAgent):
         if self.benchmark_config.environment == "local-fixture":
             from ..swe_dev.local_fixture import FixtureSession
             session_class = FixtureSession
+        elif self.benchmark_config.environment == "local-tmux":
+            from ..swe_dev.local_tmux import LocalTmuxSession
+            session_class = LocalTmuxSession
         self.session = session_class(
             session_name="kira", environment=environment,
             logging_path=Path("/logs/agent/terminal.log"),
@@ -91,7 +94,8 @@ class TerminusKiraTito(BaseAgent):
         backend = TerminalBackend(self.session, loop=asyncio.get_running_loop(),
             logs_dir=self.logs_dir, timeout=self.runtime_config.tool_execution_timeout_seconds or 600,
             max_output_chars=self.benchmark_config.max_output_chars, vision=self.vision)
-        scaffold = TerminusKiraScaffold(backend, image_enabled=self.vision is not None)
+        scaffold = TerminusKiraScaffold(backend, image_enabled=self.vision is not None,
+                                        local_tmux=self.benchmark_config.environment == "local-tmux")
         rt = EpisodeRuntime(model=self.policy, backend=backend, scaffold=scaffold,
             reward_profile=self.benchmark_config.reward_profile,
             context_threshold_tokens=self.runtime_config.context_threshold_tokens,

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from self_summarization_agent.rewards import BINARY_REWARD, VOLUNTARY_STOPPING
 from self_summarization_agent.launcher_utils import append_jsonl, utc_timestamp
 
 
@@ -111,12 +112,14 @@ def write_eval_metrics(
     sampling_profile_id = _common_row_value(rows, "sampling_profile_id")
     sampling_profile = _common_row_value(rows, "sampling_profile")
     samples_per_task = _common_row_value(rows, "rollout_samples_per_task")
+    reward_profile = _common_row_value(rows, "reward_profile") or BINARY_REWARD
     if output.exists():
         for row in _load_rows(output):
             if (
                 row.get("iteration") == iteration
                 and row.get("policy_checkpoint_id") == policy_checkpoint_id
                 and row.get("eval_sampling_profile_id") == sampling_profile_id
+                and row.get("eval_reward_profile", BINARY_REWARD) == reward_profile
             ):
                 return row
 
@@ -196,6 +199,11 @@ def write_eval_metrics(
         "eval_correct_per_1k_total_generated_tokens": _per_1k(correct, total_generated_tokens),
         "eval_correct_per_1k_budget_consumed_tokens": _per_1k(correct, budget_consumed_tokens),
     }
+    if reward_profile == VOLUNTARY_STOPPING:
+        cap_rows = [row for row in rows if "max_compactions" in _token_usage(row).get("forced_answer_reasons", ())]
+        cap_correct = sum(row["judge"]["outcome"] == "correct_answer" for row in cap_rows)
+        record.update(eval_reward_profile=reward_profile, eval_compaction_cap_hits=len(cap_rows),
+                      eval_cap_forced_correct=cap_correct, eval_voluntary_correct=correct - cap_correct)
     append_jsonl(output, record)
     return record
 

@@ -10,7 +10,7 @@ from self_summarization_agent.cli import build_smoke_run_record
 from self_summarization_agent.launcher_utils import serialize_runtime_result
 from self_summarization_agent.generation import GenerationResult
 from self_summarization_agent.models import Message, ToolCall
-from self_summarization_agent.prompts import format_compacted_summary
+from self_summarization_agent.prompts import build_summary_prompt, format_compacted_summary
 from self_summarization_agent.runtime import EpisodeRuntime, ScriptedModel, extract_summary_output, parse_model_tool_call
 from self_summarization_agent.trajectory import (
     REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
@@ -203,7 +203,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
     assert summary_prompt.tool_choice == "none"
     assert summary_prompt.messages[0].content == model.prompts[0].messages[0].content
     assert summary_prompt.messages[-1].role == "user"
-    assert summary_prompt.messages[-1].content.startswith("<summary_request>")
+    assert summary_prompt.messages[-1].content == build_summary_prompt()
     acting_prompt_after_summary = model.prompts[2]
     assert [message.role for message in acting_prompt_after_summary.messages] == ["system", "user", "user"]
     assert acting_prompt_after_summary.messages[:2] == model.prompts[0].messages[:2]
@@ -869,8 +869,7 @@ def test_runtime_appends_compaction_instruction_then_resets_to_system_and_summar
     compaction_prompt = model.prompts[1]
     assert "retain this reasoning" in compaction_prompt
     assert '<information>[{"docid": "old-doc", "snippet": ""}]</information>' in compaction_prompt
-    assert "### USER\n<summary_request>" in compaction_prompt
-    assert compaction_prompt.rstrip().endswith("</summary_request>")
+    assert compaction_prompt.rstrip().endswith(f"### USER\n{build_summary_prompt().rstrip()}")
     acting_prompt_after_summary = model.prompts[2]
     assert "### SYSTEM" in acting_prompt_after_summary
     assert "### USER\nquestion" in acting_prompt_after_summary
@@ -993,7 +992,7 @@ def test_runtime_records_one_training_trajectory_per_interval() -> None:
         "system", "user", "assistant", "user", "user", "assistant"
     ]
     assert "retain" not in first_interval["messages"][0]["content"]
-    assert "Compact the agent history" in first_interval["messages"][-2]["content"]
+    assert first_interval["messages"][-2]["content"] == build_summary_prompt()
     second_interval = result.trajectory_records[1]
     assert second_interval["turn_ids"] == ["final-answer"]
     assert [message["role"] for message in second_interval["messages"]] == [

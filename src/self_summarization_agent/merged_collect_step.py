@@ -83,6 +83,7 @@ from self_summarization_agent.rollout_collection import (
     _select_collection_examples,
     _temporary_sampling_profile,
 )
+from self_summarization_agent.rewards import artifact_reward_profile
 from self_summarization_agent.trajectory import extract_trainable_samples
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,7 @@ def _run_cache_overlap_worker(
                 extract_trainable_samples(
                     row["trajectory_records"],
                     row["turn_rewards"],
+                    reward_profile=artifact_reward_profile(row),
                     rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
                 )
                 for row in rows

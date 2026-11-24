@@ -1,0 +1,82 @@
+{
+  "source_revision": "nebius/SWE-bench-extra@11dcbfb30e19552df2a2f8030bd764adc95c92a5",
+  "selection": "THUDM/CompactionRL@c0727751da3d1edfdfb5cc55fba5c6e30f67ce00",
+  "coverage": {
+    "reference_ids": 1105,
+    "matching_nebius_ids": 69,
+    "attempted": 68,
+    "validated": 35
+  },
+  "validated_ids": [
+    "adamchainz_apig-wsgi-118",
+    "allrod5_parameters-validation-9",
+    "arvkevi_kneed-53",
+    "astropenguin_pandas-dataclasses-120",
+    "dropbox_pyannotate-83",
+    "en0_dnry-config-4",
+    "fatiando_boule-83",
+    "google_mobly-134",
+    "gorakhargosh_watchdog-530",
+    "graphql-python_graphene-644",
+    "ilevkivskyi_typing_inspect-74",
+    "iris-hep_qastle-38",
+    "itamarst_eliot-458",
+    "janehmueller_python-json-config-3",
+    "jaraco_zipp-59",
+    "mdowds_python-mock-firestore-34",
+    "mycroftai_lingua-franca-23",
+    "nvidia_hpc-container-maker-368",
+    "oasis-open_cti-taxii-client-54",
+    "parquery_icontract-168",
+    "pckroon_pysmiles-13",
+    "pycqa_pyflakes-275",
+    "pycqa_pyflakes-374",
+    "pycqa_pyflakes-668",
+    "pydantic_pydantic-2282",
+    "pyfilesystem_pyfilesystem2-474",
+    "rapidpro_rapidpro-python-38",
+    "requests_requests-oauthlib-279",
+    "rping_influx-prompt-17",
+    "somm15_pyvicare-198",
+    "spdx_tools-python-588",
+    "tmbo_questionary-330",
+    "troycomi_reportseff-29",
+    "xknx_xknx-454",
+    "yukinarit_pyserde-229"
+  ],
+  "validation": "Two clean baseline and reference replays per task with identical named tests",
+  "qwen_9b_rollouts": {
+    "completed": {
+      "task_id": "en0_dnry-config-4",
+      "model": "Qwen3.5-9B",
+      "status": "completed",
+      "verifier_reward": 1,
+      "training_reward": 1.0,
+      "generations": 13,
+      "tests": {
+        "test/test_bugs.py::TestBugs::test_optional_flag": "passed",
+        "test/test_bugs.py::TestBugs::test_empty_yaml_file": "passed"
+      }
+    },
+    "malformed_final_call": {
+      "task_id": "en0_dnry-config-4",
+      "model": "Qwen3.5-9B",
+      "status": "malformed_tool_call",
+      "verifier_reward": 1,
+      "training_reward": 0.0,
+      "generations": 4,
+      "tests": {
+        "test/test_bugs.py::TestBugs::test_optional_flag": "passed",
+        "test/test_bugs.py::TestBugs::test_empty_yaml_file": "passed"
+      }
+    }
+  },
+  "small_value_mc": {
+    "policy_checkpoint_id": "Qwen3.5-0.8B",
+    "next_checkpoint_id": "iteration-00001",
+    "sample_count": 1,
+    "mean_reward": 0.0,
+    "loss": 0.8472219481910627,
+    "optimizer_step_count": 1
+  }
+}

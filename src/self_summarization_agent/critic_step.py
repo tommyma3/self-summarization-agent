@@ -75,8 +75,9 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     if not cached_rows:
         return {f"{EVALSET_PREFIX}_skipped": "no_eval_states",
                 f"{EVALSET_PREFIX}/native_cache_fail_count": native_cache_fail_count, **tags}
+    profile = getattr(getattr(critic, "config", None), "reward_profile", BINARY_REWARD)
     eval_samples = samples_from_rollout_rows(
-        cached_rows, expected_checkpoint_id=checkpoint_name, retain_critic_only_states=True)
+        cached_rows, expected_checkpoint_id=checkpoint_name, reward_profile=profile, retain_critic_only_states=True)
     if not eval_samples:
         return {f"{EVALSET_PREFIX}_skipped": "no_eval_states",
                 f"{EVALSET_PREFIX}/native_cache_fail_count": native_cache_fail_count, **tags}
@@ -85,7 +86,7 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     values, losses = critic.evaluate(eval_samples)
     inference_seconds = time.monotonic() - started
     started = time.monotonic()
-    metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX, reward_profile=getattr(getattr(critic, "config", None), "reward_profile", BINARY_REWARD))
+    metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX, reward_profile=profile)
     metrics.update({f"{EVALSET_PREFIX}/eval_scope": "same_policy_eval_collection",
                     f"{EVALSET_PREFIX}/prepare_seconds": prepare_seconds,
                     f"{EVALSET_PREFIX}/inference_seconds": inference_seconds,
@@ -108,7 +109,7 @@ def run(config, checkpoint, rollouts, output, output_id, progress=None):
         rollout_rows, selection_report = select_training_rows(rollout_rows, config)
         if not selection_report["selected_groups"]:
             raise ValueError("No complete eligible SWE task groups; no critic update")
-    samples = samples_from_rollout_rows(rollout_rows, expected_checkpoint_id=checkpoint.name,
+    samples = samples_from_rollout_rows(rollout_rows, expected_checkpoint_id=checkpoint.name, reward_profile=config.training.value.reward_profile,
                                        retain_critic_only_states=True)
     validate_samples(samples, config.training.max_sequence_length, config.training.value.reward_profile)
     estimator = config.training.advantage_estimator

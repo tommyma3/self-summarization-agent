@@ -38,10 +38,17 @@ Pause task execution now to compact the history. Do not call any tool, including
 </summary_request>"""
     forced_body_regex = r"<tool_call>\s*<function=task_complete>\s*</function>\s*</tool_call>"
 
-    def __init__(self, backend, *, image_enabled: bool = False):
+    def __init__(self, backend, *, image_enabled: bool = False, local_tmux: bool = False):
         self.backend = backend
         self.tools = [t for t in TOOLS if image_enabled or t["function"]["name"] != "image_read"]
         self.system_prompt = SYSTEM_PROMPT
+        if local_tmux:
+            self.system_prompt += (
+                '\nThe shell starts in the task checkout with its Python environment active. '
+                'Encode the commands parameter as a JSON array. For example, to inspect the working tree, '
+                'the parameter is <parameter=commands>[{"keystrokes":"git status --short\\n",'
+                '"duration":0.2}]</parameter>. Include the analysis and plan parameters in the same call.\n'
+            )
         self.fingerprint = sha256(json.dumps(
             [SCAFFOLD_VERSION, KIRA_REVISION, self.tools, self.system_prompt,
              self.forced_control, self.summary_control, self.forced_body_regex],

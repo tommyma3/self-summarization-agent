@@ -21,12 +21,8 @@ from self_summarization_agent.launcher_utils import (
     utc_timestamp,
     write_json,
 )
-from self_summarization_agent.rewards import (
-    apply_terminal_reward,
-    assign_runtime_rewards,
-    is_penalized_runtime_status,
-    trainable_turn_ids_from_records,
-)
+from self_summarization_agent.rewards import is_penalized_runtime_status
+from self_summarization_agent.rollout_collection import apply_judged_rewards as _apply_judged_rewards
 from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import TransformersPolicyTrainer
 from self_summarization_agent.trajectory import extract_training_samples
@@ -74,25 +70,6 @@ def _merge_launcher_overrides(args: argparse.Namespace) -> dict[str, Any]:
     if args.retrieval_backend is not None:
         overrides["retrieval.backend"] = args.retrieval_backend
     return overrides
-
-
-def _apply_judged_rewards(result, example: QueryExample, judge: RewardJudge) -> dict[str, Any]:
-    trainable_turn_ids = trainable_turn_ids_from_records(result.trajectory_records)
-    runtime_rewards = assign_runtime_rewards(result.status, trainable_turn_ids)
-    if runtime_rewards is not None:
-        result.turn_rewards = runtime_rewards
-        return {"outcome": result.status, "judge_prompt": None, "judge_response": None, "parse_error": False}
-    decision = judge.evaluate(example, result.status, result.final_answer or "")
-    result.turn_rewards = apply_terminal_reward(
-        outcome=decision.outcome,
-        trainable_turn_ids=trainable_turn_ids,
-    )
-    return {
-        "outcome": decision.outcome,
-        "judge_prompt": decision.judge_prompt,
-        "judge_response": decision.judge_response,
-        "parse_error": decision.parse_error,
-    }
 
 
 def _training_epoch_count(config) -> int:
@@ -193,7 +170,7 @@ def train_experiment(
         for request_batch in iter_batches(rollout_requests, config.rollout.max_concurrent_episodes):
             results = runtime.run_many((example.query_id, example.query) for example, _ in request_batch)
             for (example, rollout_index), result in zip(request_batch, results):
-                judge_payload = _apply_judged_rewards(result, example, judge)
+                judge_payload = _apply_judged_rewards(result, example, judge, reward_profile=config.benchmark.reward_profile)
                 if is_penalized_runtime_status(judge_payload["outcome"]):
                     malformed_count += 1
                 else:
@@ -202,6 +179,7 @@ def train_experiment(
                     extract_training_samples(
                         result.trajectory_records,
                         result.turn_rewards,
+                        reward_profile=config.benchmark.reward_profile,
                         rollout_id=f"{example.query_id}:{rollout_index}",
                         train_compaction_tokens=config.training.train_compaction_tokens,
                     )
@@ -211,6 +189,7 @@ def train_experiment(
                     serialize_runtime_result(
                         result,
                         query_text=example.query,
+                        reward_profile=config.benchmark.reward_profile,
                         judge={**judge_payload, "rollout_index": rollout_index},
                     ),
                 )

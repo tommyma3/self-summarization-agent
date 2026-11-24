@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 from safetensors.torch import load_file, save_file
-from .rewards import BINARY_REWARD, reward_bounds
+from .rewards import BINARY_REWARD, VOLUNTARY_STOPPING, CAP_ANSWER_REWARD, reward_bounds
 
 
 VALUE_HEAD_SUBDIR = "compaction_value"
@@ -61,14 +61,20 @@ def two_hot_targets(targets: torch.Tensor, num_bins: int, reward_profile=BINARY_
 
 
 def outcome_log_losses(logits: torch.Tensor, rewards: torch.Tensor, reward_profile=BINARY_REWARD) -> torch.Tensor:
-    """Cross-entropy on the implied binary outcome probabilities."""
-    targets = reward_class_indices(rewards, reward_profile)
-    if logits.shape[-1] == 2:
-        return torch.nn.functional.cross_entropy(logits.float(), targets, reduction="none")
+    """Score the implied expected reward with binary or fractional cross-entropy."""
+    if reward_profile == VOLUNTARY_STOPPING:
+        if not bool(((rewards == 0) | (rewards == CAP_ANSWER_REWARD) | (rewards == 1)).all()):
+            raise ValueError("Invalid voluntary stopping reward")
+    else:
+        targets = reward_class_indices(rewards, reward_profile)
+        if logits.shape[-1] == 2:
+            return torch.nn.functional.cross_entropy(logits.float(), targets, reduction="none")
     success = logits.new_tensor(value_support(logits.shape[-1], reward_profile), dtype=torch.float32)
     log_probs = logits.float().log_softmax(-1)
     positive = torch.logsumexp(log_probs + success.log(), dim=-1)
     negative = torch.logsumexp(log_probs + (1 - success).log(), dim=-1)
+    if reward_profile == VOLUNTARY_STOPPING:
+        return (-rewards * positive - (1 - rewards) * negative).clamp_min(0)
     return (-torch.where(targets.bool(), positive, negative)).clamp_min(0)
 
 

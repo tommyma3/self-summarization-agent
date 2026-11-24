@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import logging
 import math
 from typing import Any
-from self_summarization_agent.rewards import read_rollout_reward, rollout_reward_values
+from self_summarization_agent.rewards import BINARY_REWARD, read_rollout_reward, rollout_reward_values
 from self_summarization_agent.token_stream import TITO_COLLECTION_VERSION, TITO_CONTRACT
 
 
@@ -678,9 +678,10 @@ def extract_trainable_samples(
     rewards: dict[str, float],
     *,
     rollout_id: str | None = None,
+    reward_profile=BINARY_REWARD,
 ) -> list[RLSample]:
     validate_trajectory_schema(records, context="Trainable records")
-    allowed_rewards = rollout_reward_values()
+    allowed_rewards = rollout_reward_values(reward_profile)
     samples: list[RLSample] = []
     seen_record_ids: set[str] = set()
     skipped_history_rewrite_ids: set[str] = set()
@@ -701,7 +702,7 @@ def extract_trainable_samples(
         messages = _validate_messages(record.get("messages"), record_id=record_id)
         if record_id not in rewards:
             raise ValueError(f"Missing reward for trainable record: {record_id}")
-        reward = read_rollout_reward(rewards[record_id])
+        reward = read_rollout_reward(rewards[record_id], reward_profile)
         if not isinstance(reward, (int, float)) or isinstance(reward, bool):
             raise ValueError(f"Trainable record {record_id} has non-numeric reward")
         if not math.isfinite(float(reward)):
@@ -800,6 +801,7 @@ def extract_training_samples(
     rollout_id: str | None = None,
     train_compaction_tokens: bool = True,
     retain_critic_only_states: bool = False,
+    reward_profile=BINARY_REWARD,
 ) -> list[RLSample]:
     """Extract the samples that are trainable under the loss-mask policy.
 
@@ -808,7 +810,7 @@ def extract_training_samples(
     would empty out (summary-only intervals with no tool-call content).
     """
 
-    samples = extract_trainable_samples(records, rewards, rollout_id=rollout_id)
+    samples = extract_trainable_samples(records, rewards, rollout_id=rollout_id, reward_profile=reward_profile)
     if train_compaction_tokens or retain_critic_only_states:
         return samples
     record_by_turn_id = {

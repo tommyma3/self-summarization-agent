@@ -107,9 +107,11 @@ def _validate_raw_row(row: dict[str, Any], *, index: int, expected_checkpoint_id
         raise ValueError(f"Rollout row {index} is missing summary_turns")
 
 
-def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) -> dict[str, Any]:
+def apply_decision_to_rollout_row(
+    row: dict[str, Any], decision: JudgeDecision, *, reward_profile: str = BINARY_REWARD,
+) -> dict[str, Any]:
     status = row.get("status")
-    judged_row = dict(row, reward_profile=BINARY_REWARD)
+    judged_row = dict(row, reward_profile=reward_profile)
     trajectory_records = row["trajectory_records"]
     trainable_turn_ids = trainable_turn_ids_from_records(trajectory_records)
     rollout_id = f"{row.get('query_id')}:{row.get('rollout_index')}"
@@ -117,7 +119,7 @@ def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) 
     if turn_rewards is not None:
         judged_row["turn_rewards"] = turn_rewards
         judged_row["trainable_sample_count"] = len(
-            extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id)
+            extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id, reward_profile=reward_profile)
         )
         judged_row["judge"] = {
             "outcome": status,
@@ -130,11 +132,13 @@ def apply_decision_to_rollout_row(row: dict[str, Any], decision: JudgeDecision) 
 
     turn_rewards = apply_terminal_reward(
         outcome=decision.outcome,
+        reward_profile=reward_profile,
+        forced_answer_reasons=row.get("token_usage", {}).get("forced_answer_reasons", ()),
         trainable_turn_ids=trainable_turn_ids,
     )
     judged_row["turn_rewards"] = turn_rewards
     judged_row["trainable_sample_count"] = len(
-        extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id)
+        extract_trainable_samples(trajectory_records, turn_rewards, rollout_id=rollout_id, reward_profile=reward_profile)
     )
     judged_row["judge"] = {
         "outcome": decision.outcome,
@@ -152,6 +156,7 @@ def judge_rollout_rows(
     judge: RewardJudge,
     examples_by_query_id: dict[str, QueryExample],
     expected_checkpoint_id: str | None = None,
+    reward_profile=BINARY_REWARD,
 ) -> list[dict[str, Any]]:
     for index, row in enumerate(rows, start=1):
         _validate_raw_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
@@ -181,7 +186,10 @@ def judge_rollout_rows(
     for row_index, decision in zip(judge_row_indices, judge_decisions):
         decisions_by_row_index[row_index] = decision
 
-    return [apply_decision_to_rollout_row(row, decisions_by_row_index[index]) for index, row in enumerate(rows)]
+    return [
+        apply_decision_to_rollout_row(row, decisions_by_row_index[index], reward_profile=reward_profile)
+        for index, row in enumerate(rows)
+    ]
 
 
 def judge_rollouts(
@@ -229,6 +237,7 @@ def judge_rollouts(
     judged_rows = judge_rollout_rows(
         rows,
         judge=judge,
+        reward_profile=config.benchmark.reward_profile,
         examples_by_query_id=examples,
         expected_checkpoint_id=expected_checkpoint_id,
     )

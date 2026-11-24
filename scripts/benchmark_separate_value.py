@@ -48,7 +48,7 @@ def main():
                 else:
                     rows[slot] = row
     samples = samples_from_rollout_rows(rows, expected_checkpoint_id=args.checkpoint.name,
-                                       retain_critic_only_states=True)
+                                       reward_profile=config.training.value.reward_profile, retain_critic_only_states=True)
     if not samples:
         parser.error("selected rollout rows contain no eligible states")
     sample_load_seconds = time.monotonic() - started
