@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from self_summarization_agent.benchmarks.terminal_bench.scaffold import TerminusKiraScaffold
+from self_summarization_agent.chat_template import INITIAL_TEMPLATE_PATH
 from self_summarization_agent.generation import VLLMGenerator
 from self_summarization_agent.runtime import EpisodeRuntime
 from self_summarization_agent.trajectory import _extract_collection_tokens
@@ -28,7 +29,7 @@ def main():
         temperature=0, top_p=1, do_sample=False, tensor_parallel_size=1,
         max_model_len=16384, enable_thinking=True, language_model_only=True,
         gpu_memory_utilization=0.4, enable_prefix_caching=True,
-        chat_template_path="src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja")
+        chat_template_path=INITIAL_TEMPLATE_PATH)
     try:
         for name, threshold in (("no-compaction", 16000), ("compaction", 1)):
             backend = ProbeTerminal()

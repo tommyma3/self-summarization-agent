@@ -248,7 +248,7 @@ def test_complete_cached_rollouts_accepts_excluded_summary_only_rows(tmp_path: P
                             "completion_token_ids": [21],
                             "full_token_ids": [10, 11, 21],
                             "completion_token_logprobs": [-0.3],
-                            "logprobs_mode": "raw_logprobs",
+                            "logprobs_mode": "full_vocab_raw_logprobs",
                         },
                     ],
                 },

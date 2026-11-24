@@ -59,7 +59,8 @@ class ConstantCritic:
         self.calls.append("save")
         return "identity"
 
-    def evaluate(self, samples):
+    def evaluate(self, samples, *, require_reference_logprobs=True):
+        assert not require_reference_logprobs and all(s.reference_logprobs is None for s in samples)
         self.calls.append("evaluate")
         return [0.5] * len(samples), [math.log(2)] * len(samples)
 
@@ -80,6 +81,8 @@ def test_evalset_metrics_on_same_policy_eval_states(tmp_path):
     rollouts.mkdir()
     row_a = rollout_row("q-a", "iteration-00000", 1.0, compaction=1)
     row_b = rollout_row("q-b", "iteration-00000", -1.0, compaction=0)
+    for gen in row_a["trajectory_records"][0]["collection_tokens"]["generations"]:
+        gen["logprobs_mode"] = "grammar_masked_logprobs"
     eval_file = rollouts / "iteration-00000.eval.jsonl"
     write_jsonl(eval_file, [row_a, row_b])
     before = eval_file.read_bytes()

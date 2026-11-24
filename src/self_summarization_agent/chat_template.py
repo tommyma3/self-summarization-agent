@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 
+INITIAL_TEMPLATE_PATH = "src/self_summarization_agent/chat_templates/qwen3_5_initial.jinja"
+RETIRED_TEMPLATE_PATH = "src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 

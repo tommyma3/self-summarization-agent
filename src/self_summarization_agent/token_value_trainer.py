@@ -40,8 +40,8 @@ class TokenValueForward(torch.nn.Module):
 
 
 class TokenValueTrainerMixin:
-    def _prepare_tokens(self, samples, max_sequence_length=None):
-        validate_token_samples(samples, max_sequence_length)
+    def _prepare_tokens(self, samples, max_sequence_length=None, *, require_reference_logprobs=True):
+        validate_token_samples(samples, max_sequence_length, require_reference_logprobs=require_reference_logprobs)
         capacity = self.model.config.max_position_embeddings
         vocab = self.model.get_input_embeddings().num_embeddings
         if any(
@@ -81,8 +81,8 @@ class TokenValueTrainerMixin:
         logits = forward(ids, lengths, sampled_positions)
         return [logits[row, :len(prepared.positions[i])] for row, i in enumerate(indices)]
 
-    def evaluate_tokens(self, samples):
-        prepared = self._prepare_tokens(samples)
+    def evaluate_tokens(self, samples, *, require_reference_logprobs=True):
+        prepared = self._prepare_tokens(samples, require_reference_logprobs=require_reference_logprobs)
         return self._evaluate_tokens(samples, prepared)
 
     def _evaluate_tokens(self, samples, prepared):

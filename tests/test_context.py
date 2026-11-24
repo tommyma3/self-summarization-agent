@@ -1,6 +1,6 @@
 from self_summarization_agent.context import ContextManager
 from self_summarization_agent.models import EpisodeState, Message
-from self_summarization_agent.prompts import build_initial_messages
+from self_summarization_agent.prompts import build_initial_messages, build_summary_prompt
 
 
 def test_threshold_counts_raw_reasoning_and_tool_results() -> None:
@@ -38,11 +38,8 @@ def test_summary_instruction_is_appended_to_unchanged_context() -> None:
 
     assert list(prompt.messages[:-1]) == state.messages
     assert prompt.messages[-1].role == "user"
-    assert prompt.messages[-1].content.startswith("<summary_request>")
-    assert prompt.messages[-1].content.endswith("</summary_request>")
-    assert "Compact the agent history" in prompt.messages[-1].content
-    assert "continuing the original user query" in prompt.messages[-1].content
-    assert "32" not in prompt.messages[-1].content
+    assert prompt.messages[-1].content == build_summary_prompt()
+    assert prompt.generation_kind == "summary"
 
 
 def test_assert_fits_clamps_effective_limit_when_margin_is_too_large() -> None:

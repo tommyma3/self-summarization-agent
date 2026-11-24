@@ -6,6 +6,11 @@ from typing import Any, Iterable
 TITO_CONTRACT = "qwen-agent-tito-v2"
 TITO_COLLECTION_VERSION = 3
 
+# vLLM's engine-level "raw_logprobs" alone does not establish whether it
+# normalized over the full vocabulary: grammar masking precedes the sampler.
+FULL_VOCAB_LOGPROBS = "full_vocab_raw_logprobs"
+GRAMMAR_MASKED_LOGPROBS = "grammar_masked_logprobs"
+
 
 def token_ids(values: Iterable[int]) -> tuple[int, ...]:
     result = tuple(values)

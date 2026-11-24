@@ -9,7 +9,7 @@ import time
 from uuid import uuid4
 
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
-from self_summarization_agent.collection_contract import collection_profile_id
+from self_summarization_agent.collection_contract import collection_profile_id, saved_collection_profile
 from self_summarization_agent.config import resolved_rollout_sampling_profile, sampling_profile_id
 from self_summarization_agent.launcher_utils import append_jsonl
 from self_summarization_agent.token_stream import TITO_CONTRACT
@@ -53,7 +53,8 @@ def collect_terminal_rollouts(config, *, checkpoint_path, output_path, generator
     if config.benchmark.name == "swe-dev":
         from ..swe_dev.checkpoint import validate_checkpoint
         validate_checkpoint(checkpoint, config)
-    profile = collection_profile_id(config, checkpoint)
+    profile = collection_profile_id(config, checkpoint,
+        existing_id=saved_collection_profile(Path(output_path)) if resume else None)
     checkpoint_id = checkpoint_id_from_path(checkpoint)
     sampling = resolved_rollout_sampling_profile(config, split=split)
     output = Path(output_path)

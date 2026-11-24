@@ -37,8 +37,8 @@ def test_cache_overlap_worker_microbatches_samples_across_judged_rows(monkeypatc
     )
     monkeypatch.setattr(
         merged_collect_step,
-        "extract_trainable_samples",
-        lambda records, _rewards, rollout_id, reward_profile: [records[0]["sample"]],
+        "_samples_to_rescore",
+        lambda row: [row["trajectory_records"][0]["sample"]],
     )
     monkeypatch.setattr(
         merged_collect_step,

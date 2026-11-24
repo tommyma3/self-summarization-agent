@@ -22,7 +22,7 @@ model:
   dtype: bfloat16
   max_new_tokens: 4096
   enable_thinking: true
-  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
+  chat_template_path: src/self_summarization_agent/chat_templates/qwen3_5_initial.jinja
   temperature: 0.6
   top_p: 0.95
   do_sample: true

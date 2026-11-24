@@ -151,7 +151,7 @@ def samples_from_rollout_rows(
         ]
         if incompatible_cache_turn_ids:
             raise ValueError(
-                f"Rollout row {index} has caches with the wrong loss-mask policy: "
+                f"Rollout row {index} has caches with the wrong loss-mask policy or unverified full-vocabulary logprobs: "
                 f"{', '.join(incompatible_cache_turn_ids)}"
             )
         missing_cache_turn_ids = [sample.turn_id for sample in row_samples if not sample.has_training_cache]

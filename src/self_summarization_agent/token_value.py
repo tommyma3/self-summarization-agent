@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 from .separate_value import sample_key, validate_samples
+from .token_stream import FULL_VOCAB_LOGPROBS
 from .trajectory import (
     REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
     REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
@@ -16,17 +17,18 @@ def token_positions(sample):
     return tuple(i for i, enabled in enumerate(sample.completion_mask) if enabled)
 
 
-def validate_token_samples(samples, max_sequence_length=None):
-    validate_samples(samples, max_sequence_length)
+def validate_token_samples(samples, max_sequence_length=None, *, require_reference_logprobs=True):
+    validate_samples(samples, max_sequence_length, require_reference_logprobs=require_reference_logprobs)
     for s in samples:
-        if s.reference_logprob_source not in {
+        if require_reference_logprobs and s.reference_logprob_source not in {
             REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
             REFERENCE_LOGPROB_SOURCE_POLICY_RESCORE,
         }:
             raise ValueError("Token MC requires behavior-logprob provenance")
         if (
-            s.reference_logprob_source == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
-            and s.reference_logprobs_mode != "raw_logprobs"
+            require_reference_logprobs
+            and s.reference_logprob_source == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+            and s.reference_logprobs_mode != FULL_VOCAB_LOGPROBS
         ):
             raise ValueError("Token MC requires raw rollout log probabilities")
         if (

@@ -23,7 +23,7 @@ disjoint ``judge.gpu_ids`` / ``rollout.gpu_ids`` or reduced
 """
 
 from __future__ import annotations
-from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
+from self_summarization_agent.collection_contract import collection_profile_id, saved_collection_profile, validate_artifact_lineage
 from self_summarization_agent.token_stream import TITO_CONTRACT
 
 import argparse
@@ -41,6 +41,7 @@ from typing import Any
 
 from self_summarization_agent.cache_step import (
     _attach_training_caches,
+    _samples_to_rescore,
     _completed_cached_rows,
     _load_rollout_rows,
     _materialize_rollout_native_training_caches,
@@ -83,8 +84,6 @@ from self_summarization_agent.rollout_collection import (
     _select_collection_examples,
     _temporary_sampling_profile,
 )
-from self_summarization_agent.rewards import artifact_reward_profile
-from self_summarization_agent.trajectory import extract_trainable_samples
 
 # ---------------------------------------------------------------------------
 # Cache fallback worker (spawned process on GPU 0 after judging)
@@ -122,15 +121,7 @@ def _run_cache_overlap_worker(
         try:
             rows = message["rows"]
             expected_checkpoint_id = message["expected_checkpoint_id"]
-            samples_by_row = [
-                extract_trainable_samples(
-                    row["trajectory_records"],
-                    row["turn_rewards"],
-                    reward_profile=artifact_reward_profile(row),
-                    rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
-                )
-                for row in rows
-            ]
+            samples_by_row = [_samples_to_rescore(row) for row in rows]
             all_samples = [sample for row_samples in samples_by_row for sample in row_samples]
             all_cache_payloads: list[dict[str, Any]] = []
             cache_microbatch_size = max(
@@ -151,6 +142,7 @@ def _run_cache_overlap_worker(
                 cached_row = _attach_training_caches(
                     row,
                     cache_payloads=cache_payloads,
+                    row_samples=row_samples,
                     checkpoint_id=expected_checkpoint_id,
                     train_compaction_tokens=config.training.train_compaction_tokens,
                     **_critic_only_cache_kwargs(config),
@@ -567,7 +559,10 @@ def _collect_split(
     expected_keys = {(example.query_id, rollout_index) for example, rollout_index in rollout_requests}
     completed_raw_keys: set[tuple[str, int]] = set()
     tito = hasattr(generator, "create_token_renderer")
-    collection_identity = collection_profile_id(config, checkpoint_path) if tito else None
+    collection_identity = None
+    if tito:
+        existing_id = saved_collection_profile(raw_output_path) if resume else None
+        collection_identity = collection_profile_id(config, checkpoint_path, existing_id=existing_id)
 
     if resume:
         completed_raw_keys = _load_completed_rollout_keys(
@@ -1446,10 +1441,9 @@ def _run_cache_inline(
                 and (row["query_id"], row["rollout_index"]) in completed_rows
             )
         ]
-        if ordered:
-            cached_output_path.unlink(missing_ok=True)
-            for r in ordered:
-                append_jsonl(cached_output_path, r)
+        cached_output_path.unlink(missing_ok=True)
+        for r in ordered:
+            append_jsonl(cached_output_path, r)
     elif cached_output_path.exists():
         cached_output_path.unlink()
 

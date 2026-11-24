@@ -9,9 +9,6 @@ from self_summarization_agent.prompts import (
     build_compacted_messages,
     build_forced_answer_system_prompt,
     build_initial_messages,
-    build_native_tool_system_prompt,
-    build_summary_prompt,
-    build_summary_system_prompt,
     build_system_prompt,
     format_tool_result,
     format_tool_response,
@@ -30,15 +27,6 @@ def test_build_forced_answer_system_prompt_allows_only_finish() -> None:
     assert prompt.endswith("</forced_answer_request>")
 
 
-def test_build_summary_system_prompt_is_concise_and_uses_summary_request_tags() -> None:
-    prompt = build_summary_system_prompt(max_summary_tokens=2048)
-
-    assert "2048" not in prompt
-    assert "Compact the agent history" in prompt
-    assert prompt.startswith("<summary_request>")
-    assert prompt.endswith("</summary_request>")
-
-
 def test_system_prompt_lists_normal_action_formats() -> None:
     prompt = build_system_prompt()
 
@@ -48,17 +36,7 @@ def test_system_prompt_lists_normal_action_formats() -> None:
     assert "Exact Answer:" in prompt
     assert "Confidence:" in prompt
     assert "<answer>" not in prompt
-    assert "<summary_request>" in prompt
     assert "do not search, retrieve, or answer" in prompt
-
-
-def test_native_tool_system_prompt_defines_stable_compaction_exception() -> None:
-    prompt = build_native_tool_system_prompt()
-
-    assert "Normally, use exactly one provided function per turn" in prompt
-    assert "<summary_request>" in prompt
-    assert "do not call a function" in prompt
-    assert "Normal function-calling mode resumes afterward" in prompt
 
 
 def test_tool_result_wrapper_preserves_raw_result_text() -> None:

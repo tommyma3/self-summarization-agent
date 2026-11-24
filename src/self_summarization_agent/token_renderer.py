@@ -1,10 +1,10 @@
-"""Explicit continuation renderer for the repository-owned Qwen agent template."""
+"""Render interval starts and append-only continuations for Qwen."""
 from hashlib import sha256
 import json
 import re
 from typing import Any
 
-from self_summarization_agent.chat_template import load_chat_template
+from self_summarization_agent.chat_template import INITIAL_TEMPLATE_PATH as TEMPLATE_PATH, load_chat_template
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import (
     DOCUMENT_ID_ARGUMENT,
@@ -15,8 +15,6 @@ from self_summarization_agent.prompts import (
 )
 from self_summarization_agent.token_stream import TITO_CONTRACT, token_ids
 
-
-TEMPLATE_PATH = "src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja"
 
 _NATIVE_CALL = re.compile(
     r"<tool_call>\s*<function=(search|get_document|finish)>\s*(.*?)\s*</function>\s*</tool_call>\s*",
@@ -73,7 +71,7 @@ class QwenAgentTokenRenderer:
         self.summary_control = summary_control or build_summary_prompt()
         approved = load_chat_template(TEMPLATE_PATH)
         if tokenizer.chat_template != approved:
-            raise ValueError("TITO requires the repository qwen3_5_agent.jinja template")
+            raise ValueError("TITO requires the repository qwen3_5_initial.jinja template")
         self.im_start = self._special("<|im_start|>")
         self.im_end = self._special("<|im_end|>")
         # Include the actual vocabulary/segmentation rules, not just a model path.

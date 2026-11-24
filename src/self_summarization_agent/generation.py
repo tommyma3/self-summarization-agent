@@ -21,7 +21,7 @@ from self_summarization_agent.config import JudgeConfig, ModelConfig
 from self_summarization_agent.chat_template import configure_tokenizer_chat_template
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
-from self_summarization_agent.token_stream import TokenRequest
+from self_summarization_agent.token_stream import FULL_VOCAB_LOGPROBS, GRAMMAR_MASKED_LOGPROBS, TokenRequest
 from self_summarization_agent.token_renderer import QwenAgentTokenRenderer, parse_native_completion
 
 
@@ -647,6 +647,12 @@ class VLLMGenerator(TokenInputGenerator):
             sampling_kwargs["logprobs"] = 0
         return sampling_kwargs
 
+    @staticmethod
+    def _decode_logprobs_mode(sampling_kwargs: dict[str, Any]) -> str:
+        if sampling_kwargs.get("structured_outputs") is not None:
+            return GRAMMAR_MASKED_LOGPROBS
+        return FULL_VOCAB_LOGPROBS
+
     def generate_batch(self, prompts: list[str]) -> list[str]:
         outputs = self.llm.generate(
             [self._format_prompt(prompt) for prompt in prompts],
@@ -661,9 +667,11 @@ class VLLMGenerator(TokenInputGenerator):
         return completions
 
     def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
+        kwargs = self._sampling_kwargs(include_logprobs=True)
+        mode = self._decode_logprobs_mode(kwargs)
         outputs = self.llm.generate(
             [self._format_prompt(prompt) for prompt in prompts],
-            self._sampling_params_cls(**self._sampling_kwargs(include_logprobs=True)),
+            self._sampling_params_cls(**kwargs),
         )
         completions: list[GenerationResult] = []
         for output in outputs:
@@ -684,7 +692,7 @@ class VLLMGenerator(TokenInputGenerator):
                     if cumulative_logprob is not None
                     else None,
                     token_logprobs=token_logprobs,
-                    token_logprobs_mode="raw_logprobs" if token_logprobs is not None else None,
+                    token_logprobs_mode=mode if token_logprobs is not None else None,
                 )
             )
         return completions
@@ -698,6 +706,7 @@ class VLLMGenerator(TokenInputGenerator):
         if not sampling_kwargs.get("stop"):
             sampling_kwargs.setdefault("detokenize", False)
         params = []
+        logprob_modes = []
         for request in requests:
             regex = request.response_regex
             if self.supports_native_tools and request.generation_kind in {"summary", "forced_answer"}:
@@ -707,6 +716,7 @@ class VLLMGenerator(TokenInputGenerator):
             if regex:
                 from vllm.sampling_params import StructuredOutputsParams
                 kwargs["structured_outputs"] = StructuredOutputsParams(regex=regex)
+            logprob_modes.append(self._decode_logprobs_mode(kwargs))
             params.append(self._sampling_params_cls(**kwargs))
         outputs = self.llm.generate(
             [{"prompt_token_ids": list(r.prompt_token_ids)} for r in requests],
@@ -715,7 +725,7 @@ class VLLMGenerator(TokenInputGenerator):
         results = []
         if len(outputs) != len(requests):
             raise RuntimeError("vLLM returned the wrong number of token generations")
-        for request, output in zip(requests, outputs):
+        for request, output, mode in zip(requests, outputs, logprob_modes, strict=True):
             prompt_ids = list(output.prompt_token_ids)
             if prompt_ids != list(request.prompt_token_ids) or len(output.outputs) != 1:
                 raise RuntimeError("vLLM changed the submitted token prompt or response count")
@@ -728,7 +738,7 @@ class VLLMGenerator(TokenInputGenerator):
             results.append(GenerationResult(
                 text=raw, message=message,
                 prompt_token_ids=prompt_ids, completion_token_ids=ids,
-                token_logprobs=logprobs, token_logprobs_mode="raw_logprobs" if logprobs is not None else None,
+                token_logprobs=logprobs, token_logprobs_mode=mode if logprobs is not None else None,
                 cumulative_logprob=getattr(completion, "cumulative_logprob", None),
                 finish_reason=getattr(completion, "finish_reason", None)))
         return results
@@ -938,8 +948,6 @@ def _extract_completion_token_logprobs(completion: Any) -> list[float] | None:
             candidate = candidates.get(token_id)
             if candidate is None:
                 candidate = candidates.get(str(token_id))
-            if candidate is None and len(candidates) == 1:
-                candidate = next(iter(candidates.values()))
         else:
             candidate = candidates
         logprob = getattr(candidate, "logprob", candidate)

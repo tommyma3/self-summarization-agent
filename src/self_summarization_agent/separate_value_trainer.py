@@ -203,10 +203,10 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
         prepared = self._prepare(samples)
         return self._logits_prepared(prepared, list(range(len(samples))))
 
-    def evaluate(self, samples):
+    def evaluate(self, samples, *, require_reference_logprobs=True):
         if self.method["estimator"] == "token_mc_value":
-            return self.evaluate_tokens(samples)
-        validate_samples(samples, reward_profile=self.config.reward_profile)
+            return self.evaluate_tokens(samples, require_reference_logprobs=require_reference_logprobs)
+        validate_samples(samples, reward_profile=self.config.reward_profile, require_reference_logprobs=require_reference_logprobs)
         return self._evaluate_prepared(self._prepare(samples))[:2]
 
     def _evaluate_prepared(self, prepared):

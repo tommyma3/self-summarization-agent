@@ -126,14 +126,14 @@ def summary_interval_row(query_id: str = "q1") -> dict:
                 "completion_token_ids": [11],
                 "full_token_ids": [10, 11],
                 "completion_token_logprobs": [-0.1],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             },
             {
                 "prompt_token_ids": [10, 11, 20],
                 "completion_token_ids": [21],
                 "full_token_ids": [10, 11, 20, 21],
                 "completion_token_logprobs": [-0.3],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             },
         ],
     }
@@ -213,7 +213,7 @@ def summary_only_row(query_id: str = "q1") -> dict:
                 "completion_token_ids": [21],
                 "full_token_ids": [10, 11, 21],
                 "completion_token_logprobs": [-0.3],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             },
         ],
     }
@@ -354,7 +354,7 @@ def test_cache_step_reuses_rollout_native_cache_without_rescoring(tmp_path: Path
                 "completion_token_ids": [2],
                 "full_token_ids": [1, 2],
                 "completion_token_logprobs": [-0.25],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             }
         ],
     }
@@ -533,3 +533,51 @@ def test_build_cache_scorer_rejects_unsupported_verl_worker_backend(tmp_path: Pa
         assert "training.verl.worker_backend='transformers' or 'verl_fsdp'" in str(exc)
     else:
         raise AssertionError("Expected unsupported verl worker backend to be rejected")
+
+
+
+def test_resume_rescores_legacy_cache_and_keeps_trusted_interval(tmp_path):
+    from copy import deepcopy
+    import pytest
+    from self_summarization_agent.train_step import samples_from_rollout_rows
+    from self_summarization_agent.trajectory import build_rollout_native_training_cache
+
+    row = summary_interval_row()
+    stale = row["trajectory_records"][0]
+    evidence = stale["collection_tokens"]
+    stale["training_cache"] = build_rollout_native_training_cache(evidence)
+    trusted = deepcopy(stale)
+    trusted["turn_id"] = "trajectory-2"
+    row["trajectory_records"].append(trusted)
+    row["turn_rewards"]["trajectory-2"] = 1.0
+    row["trainable_sample_count"] = 2
+    stale["training_cache"]["logprobs_mode"] = "raw_logprobs"
+    for generation in evidence["generations"]:
+        generation["logprobs_mode"] = "raw_logprobs"
+    assert build_rollout_native_training_cache(evidence) is None
+    assert not _row_has_current_training_cache(row)
+    with pytest.raises(ValueError, match="unverified full-vocabulary"):
+        samples_from_rollout_rows([row], expected_checkpoint_id="step-00001")
+
+    class ExactScorer:
+        def cache_samples(self, samples):
+            sample, = samples
+            assert sample.turn_id == stale["turn_id"] and sample.collection_full_token_ids == [10, 11, 20, 21]
+            return [{**trusted["training_cache"], "reference_logprob_source": "policy_rescore",
+                     "reference_logprobs": [-1.0, 0.0, -3.0], "reference_logprob": -2.0}]
+
+    checkpoint = tmp_path / "step-00001"
+    checkpoint.mkdir()
+    judged, cached = tmp_path / "judged", tmp_path / "cached"
+    write_jsonl(judged, [row])
+    write_jsonl(cached, [row])
+    original = judged.read_bytes()
+    run_cache_step(train_config(tmp_path), checkpoint_path=checkpoint, rollout_path=judged,
+                   output_path=cached, scorer=ExactScorer(), resume=True)
+    repaired = json.loads(cached.read_text())
+    first, second = samples_from_rollout_rows([repaired], expected_checkpoint_id=checkpoint.name)
+    assert first.reference_logprobs == [-1.0, 0.0, -3.0]
+    assert first.reference_logprob_source == "policy_rescore"
+    assert second.reference_logprob_source == "vllm_raw_rollout"
+    assert repaired["trajectory_records"][0]["collection_tokens"] == evidence
+    assert judged.read_bytes() == original

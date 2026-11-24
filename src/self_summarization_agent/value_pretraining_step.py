@@ -54,10 +54,12 @@ def _run(config, actor, output, resume, command_runner, fitter, allowed_queries)
     complete = completed_pretraining(config, actor, output)
     if complete is not None:
         return complete
-    request = initialization_binding(config, actor)
     request_path = output / "request.json"
+    previous = json.loads(request_path.read_text()) if request_path.exists() else None
+    existing_id = previous.get("collection_profile_id") if isinstance(previous, dict) else None
+    request = initialization_binding(config, actor, existing_id=existing_id)
     if request_path.exists():
-        if json.loads(request_path.read_text()) != request:
+        if previous != request:
             raise ValueError("Pretraining collection inputs changed; use a fresh output")
         if not resume:
             raise ValueError("Interrupted pretraining exists; use --resume")

@@ -686,7 +686,7 @@ Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel`
 - Summarization happens only after a completed tool round.
 - `runtime.generated_token_budget` limits `budget_consumed_tokens`: all model completion tokens, including thinking, actions, summaries, and forced answers, plus each raw appended tool result counted once. `total_generated_tokens` remains model-output-only for reporting. Budget exhaustion takes priority over compaction.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
-- `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template permits a tagged summary user control or forced-answer system control at the end of an interval and preserves all reasoning since the interval's real user query.
+- `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template formats the initial system and user messages, including tool definitions and any carried summary. During the interval, the runtime appends generated tokens, tool results, and controls to the token ledger.
 - A successful compaction starts a fresh interval with the unchanged system instructions, unchanged original user request, and the latest `<summary>...</summary>`-wrapped compressed agent history; no raw assistant/tool tail is retained.
 - RL training data is produced as one sparse-masked sample per interval: action, tool-call, summary, and final-answer tokens are trainable, while tool results and runtime-control prompts are context-only.
 - Malformed tool calls terminate the rollout immediately and assign negative reward to every interval in that failed rollout.

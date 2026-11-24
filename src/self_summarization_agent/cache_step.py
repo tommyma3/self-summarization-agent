@@ -15,6 +15,8 @@ from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, 
 from self_summarization_agent.rewards import artifact_reward_profile, validate_reward_profile
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
+    REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
+    RLSample,
     apply_training_loss_mask,
     build_rollout_native_training_cache,
     extract_trainable_samples,
@@ -154,6 +156,10 @@ def _materialize_rollout_native_training_caches(
             cache,
             train_compaction_tokens=train_compaction_tokens,
         ) and isinstance(record, dict):
+            if (isinstance(cache, dict)
+                    and cache.get("reference_logprob_source") == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+                    and record.get("collection_tokens") is None):
+                raise ValueError("Rescoring a rollout cache requires exact collected tokens")
             cache = build_rollout_native_training_cache(record.get("collection_tokens"))
             if cache is not None:
                 cache = apply_training_loss_mask(
@@ -216,20 +222,29 @@ def _write_cached_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         append_jsonl(path, row)
 
 
+def _samples_to_rescore(row: dict[str, Any]) -> list[RLSample]:
+    samples = extract_trainable_samples(
+        row["trajectory_records"], row["turn_rewards"],
+        reward_profile=artifact_reward_profile(row),
+        rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+    )
+    return [sample for sample in samples if not sample.has_training_cache]
+
+
 def _attach_training_caches(
     row: dict[str, Any],
     *,
     cache_payloads: list[dict[str, Any]],
+    row_samples: list[RLSample] | None = None,
     checkpoint_id: str,
     train_compaction_tokens: bool = True,
     retain_critic_only_states: bool = False,
 ) -> dict[str, Any]:
-    row_samples = extract_trainable_samples(
-        row["trajectory_records"],
-        row["turn_rewards"],
-        reward_profile=artifact_reward_profile(row),
-        rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
-    )
+    if row_samples is None:
+        row_samples = extract_trainable_samples(
+            row["trajectory_records"], row["turn_rewards"], reward_profile=artifact_reward_profile(row),
+            rollout_id=f"{row.get('query_id')}:{row.get('rollout_index')}",
+        )
     if len(cache_payloads) != len(row_samples):
         raise ValueError(
             f"Scorer returned {len(cache_payloads)} cache payloads for {len(row_samples)} trainable samples"
@@ -426,18 +441,12 @@ def run_cache_step(
             continue
         if active_scorer is None:
             active_scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
-        samples = extract_trainable_samples(
-            cache_candidate["trajectory_records"],
-            cache_candidate["turn_rewards"],
-            reward_profile=artifact_reward_profile(cache_candidate),
-            rollout_id=(
-                f"{cache_candidate.get('query_id')}:{cache_candidate.get('rollout_index')}"
-            ),
-        )
+        samples = _samples_to_rescore(cache_candidate)
         cache_payloads = active_scorer.cache_samples(samples)
         cached_row = _attach_training_caches(
             cache_candidate,
             cache_payloads=cache_payloads,
+            row_samples=samples,
             checkpoint_id=checkpoint_id,
             train_compaction_tokens=config.training.train_compaction_tokens,
             retain_critic_only_states=config.training.value.enabled,

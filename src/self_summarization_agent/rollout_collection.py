@@ -22,7 +22,7 @@ from self_summarization_agent.config import (
 )
 from self_summarization_agent.dataset import QueryExample, load_query_examples, split_train_eval_examples
 from self_summarization_agent.generation import build_generator
-from self_summarization_agent.collection_contract import collection_profile_id as _collection_profile_id
+from self_summarization_agent.collection_contract import collection_profile_id as _collection_profile_id, saved_collection_profile
 from self_summarization_agent.token_stream import TITO_CONTRACT, TITO_COLLECTION_VERSION
 from self_summarization_agent.trajectory import _extract_collection_tokens
 from self_summarization_agent.judge import RewardJudge
@@ -638,7 +638,10 @@ def collect_rollouts(
     sampling_profile = resolved_rollout_sampling_profile(config, split=split)
     profile_id = sampling_profile_id(sampling_profile)
     tito_collection = generator is None or hasattr(generator, "create_token_renderer")
-    collection_profile_id = _collection_profile_id(config, checkpoint) if tito_collection else None
+    collection_profile_id = None
+    if tito_collection:
+        existing_id = saved_collection_profile(rollout_path) if resume else None
+        collection_profile_id = _collection_profile_id(config, checkpoint, existing_id=existing_id)
     rollout_requests = [
         (example, rollout_index)
         for example in selected_examples

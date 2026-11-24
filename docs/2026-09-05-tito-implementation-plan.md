@@ -47,7 +47,7 @@ Primary files: new `token_stream.py`, new `token_renderer.py`, `generation.py`, 
 
 ## 3. Build an explicit append-only renderer for the project template
 
-Primary files: new `token_renderer.py`, new `token_stream.py`, `chat_template.py`, `chat_templates/qwen3_5_agent.jinja`, `prompts.py`.
+Primary files: new `token_renderer.py`, new `token_stream.py`, `chat_template.py`, `chat_templates/qwen3_5_initial.jinja`, `prompts.py`.
 
 Implement one renderer for the repository-owned Qwen agent template, shared by all token-capable collection backends. Define its supported tokenizer, special tokens, template revision, thinking modes, and action protocols explicitly. Supporting arbitrary external templates is outside this change; a new template requires an explicit renderer implementation or verified compatibility with the existing one.
 

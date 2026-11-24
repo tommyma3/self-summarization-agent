@@ -45,7 +45,7 @@ class CompactModel(TokenModel):
             text = next(self.outputs)
             ids = self.tokenizer.encode(text)
             result = GenerationResult(text, list(request.prompt_token_ids), ids,
-                                      token_logprobs=[-.25] * len(ids), token_logprobs_mode="raw_logprobs",
+                                      token_logprobs=[-.25] * len(ids), token_logprobs_mode="full_vocab_raw_logprobs",
                                       finish_reason="stop")
             self.requests.append(request)
             self.results.append(result)

@@ -1143,45 +1143,51 @@ class TransformersPolicyTrainer:
             tensors.append(torch.tensor(values, dtype=torch.float32, device=device))
         return _pad_1d_tensors(tensors, pad_value=0.0)
 
+    @torch.inference_mode()
     def cache_samples(self, samples: list[RLSample]) -> list[dict[str, Any]]:
         if not samples:
             return []
         device = self._model_device()
-        max_len = getattr(self.training_config, "max_sequence_length", None)
-        encoded = [
-            _encode_shifted_sample_from_text(
-                sample,
-                tokenizer=self.tokenizer,
-                device=device,
-                max_sequence_length=max_len,
-                enable_thinking=self.model_config.enable_thinking,
-            )
-            for sample in samples
-        ]
-        token_logprobs, completion_mask = self._sequence_token_logprobs_and_mask(samples)
-        reference_logprobs = _mean_from_token_logprobs(token_logprobs, completion_mask).detach().cpu().tolist()
-        reference_token_logprobs = token_logprobs.detach().cpu()
-        return [
-            _training_cache_payload(
-                input_ids=input_ids,
-                labels=labels,
-                completion_mask=completion_mask,
-                reference_logprob=float(reference_logprob),
-                reference_logprobs=token_reference_logprobs[: input_ids.numel()],
-                state_prefix_length=_exact_state_prefix_length(
-                    sample,
-                    tokenizer=self.tokenizer,
-                    input_ids=input_ids,
+        forward_params = inspect.signature(self.model.forward).parameters
+        was_training = self.model.training
+        self.model.eval()
+        payloads = []
+        try:
+            for sample in samples:
+                ids, labels, mask = _encode_shifted_sample_from_text(
+                    sample, tokenizer=self.tokenizer, device=device,
+                    max_sequence_length=self.training_config.max_sequence_length,
                     enable_thinking=self.model_config.enable_thinking,
-                ),
-            )
-            for sample, (input_ids, labels, completion_mask), reference_logprob, token_reference_logprobs in zip(
-                samples,
-                encoded,
-                reference_logprobs,
-                reference_token_logprobs,
-            )
-        ]
+                )
+                # Keep the complete causal input. Qwen can project just the
+                # positions predicting sampled targets, even for a 27k interval.
+                positions = mask.nonzero(as_tuple=True)[0]
+                kwargs = {"use_cache": False} if "use_cache" in forward_params else {}
+                if "logits_to_keep" in forward_params:
+                    kwargs["logits_to_keep"] = positions.tolist()
+                logits = self.model(input_ids=ids.unsqueeze(0), **kwargs).logits.squeeze(0)
+                positions = positions.to(logits.device)
+                if "logits_to_keep" not in forward_params:
+                    logits = logits.index_select(0, positions)
+                targets = labels.to(logits.device).index_select(0, positions)
+                scores = torch.zeros_like(labels, dtype=torch.float32, device=logits.device)
+                for start in range(0, len(positions), _CE_SEQUENCE_CHUNK_TOKENS):
+                    span = slice(start, start + _CE_SEQUENCE_CHUNK_TOKENS)
+                    scores[positions[span]] = -torch.nn.functional.cross_entropy(
+                        logits[span].float(), targets[span], reduction="none",
+                    )
+                del logits
+                payloads.append(_training_cache_payload(
+                    input_ids=ids, labels=labels, completion_mask=mask,
+                    reference_logprob=float(scores.sum() / max(1, positions.numel())), reference_logprobs=scores,
+                    state_prefix_length=_exact_state_prefix_length(
+                        sample, tokenizer=self.tokenizer, input_ids=ids,
+                        enable_thinking=self.model_config.enable_thinking,
+                    ),
+                ))
+        finally:
+            self.model.train(was_training)
+        return payloads
 
     def step(self, grouped_samples: dict[str, list[RLSample]], *, fixed_advantages=None) -> UpdateMetrics:
         update_epochs, minibatch_size, microbatch_size, clip_range = _validate_grpo_training_config(

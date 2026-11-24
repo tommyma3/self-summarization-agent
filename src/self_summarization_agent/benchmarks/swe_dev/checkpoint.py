@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from .dataset import benchmark_identity
+from ...collection_contract import equivalent_initial_templates
 from ...chat_template import load_chat_template
 from ...config import resolved_rollout_sampling_profile, runtime_config_identity
 from ...separate_value import digest, method_spec, atomic_json
@@ -30,7 +31,11 @@ def validate_checkpoint(path, config):
     path = Path(path)
     artifact = path / CONTRACT_FILE
     if artifact.is_file():
-        if json.loads(artifact.read_text()) != training_contract(config):
+        previous = json.loads(artifact.read_text())
+        expected = training_contract(config)
+        if isinstance(previous, dict) and equivalent_initial_templates(expected["template"], previous.get("template")):
+            expected["template"] = previous["template"]
+        if previous != expected:
             raise ValueError("SWE checkpoint reward/method/task/runtime contract changed")
         native = config.training.backend == "verl_ray" and config.training.verl.worker_backend == "verl_fsdp"
         if native:

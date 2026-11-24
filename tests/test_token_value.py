@@ -58,7 +58,7 @@ def sample(rollout="r", turn="0", reward=1.0, mask=None):
         reference_logprobs=[-2.0] * 6,
         state_prefix_length=2,
         reference_logprob_source="vllm_raw_rollout",
-        reference_logprobs_mode="raw_logprobs",
+        reference_logprobs_mode="full_vocab_raw_logprobs",
     )
 
 

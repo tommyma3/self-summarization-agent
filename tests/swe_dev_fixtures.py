@@ -49,7 +49,7 @@ class FixturePolicy(TokenModel):
             ids = [3] + self.tokenizer.encode(next(self.outputs))
             result = GenerationResult(self.tokenizer.decode(ids), list(request.prompt_token_ids), ids,
                 token_logprobs=[-0.25] * len(ids) if self.raw_logprobs else None,
-                token_logprobs_mode="raw_logprobs" if self.raw_logprobs else None, finish_reason="stop")
+                token_logprobs_mode="full_vocab_raw_logprobs" if self.raw_logprobs else None, finish_reason="stop")
             results.append(result)
             self.results.append(result)
         return results

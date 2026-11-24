@@ -68,8 +68,7 @@ src/self_summarization_agent/benchmarks/terminal_bench/resources/NOTICE
 src/self_summarization_agent/benchmarks/terminal_bench/resources/dataset.json
 src/self_summarization_agent/benchmarks/terminal_bench/resources/system.txt
 src/self_summarization_agent/benchmarks/terminal_bench/resources/tools.json
-src/self_summarization_agent/chat_templates/qwen3_5_agent.jinja
-tests/test_agent_chat_template.py
+src/self_summarization_agent/chat_templates/qwen3_5_initial.jinja
 tests/test_bcplus_backend.py
 tests/test_cache_step.py
 tests/test_checkpoints.py

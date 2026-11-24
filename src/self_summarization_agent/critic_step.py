@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -10,7 +9,7 @@ import re
 import time
 
 from self_summarization_agent.config import load_train_config
-from self_summarization_agent.rewards import BINARY_REWARD
+from self_summarization_agent.rewards import BINARY_REWARD, validate_reward_profile
 from self_summarization_agent.separate_value import (
     ADVANTAGES, CRITIC_DIR, atomic_json, digest, sample_fingerprint, sample_key,
     validate_resume_checkpoint, validate_samples, FROZEN_TARGETS, frozen_target_artifact,
@@ -35,11 +34,10 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
 
     A value network corresponds to the behavior checkpoint it was fit against;
     ``iteration-<name>.eval.jsonl`` holds checkpoint-evaluation rollouts generated
-    by that same policy. Diagnostic only: rows are deep-copied and native training
-    caches are attached in memory, never persisted; records on disk are untouched.
+    by that same policy. The critic consumes exact state IDs and rewards.
     """
-    from self_summarization_agent.train_step import _load_rollout_rows, samples_from_rollout_rows
-    from self_summarization_agent.trajectory import build_rollout_native_training_cache
+    from self_summarization_agent.train_step import _load_rollout_rows
+    from self_summarization_agent.trajectory import _extract_collection_tokens, extract_trainable_samples
     from self_summarization_agent.value_diagnostics import value_diagnostics
 
     started = time.monotonic()
@@ -54,36 +52,38 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     if not rows:
         return {f"{EVALSET_PREFIX}_skipped": "no_rows_for_policy", **tags}
     native_cache_fail_count = 0
-    cached_rows = []
-    for row in rows:
-        row = deepcopy(row)
-        kept_records = []
-        rewards = dict(row.get("turn_rewards") or {})
-        for record in row.get("trajectory_records") or []:
-            if isinstance(record, dict) and record.get("training_cache") is None:
-                cache = build_rollout_native_training_cache(record.get("collection_tokens"))
-                if cache is None:
-                    native_cache_fail_count += 1
-                    rewards.pop(record.get("turn_id"), None)
-                    continue
-                record["training_cache"] = cache
-            kept_records.append(record)
-        row["trajectory_records"] = kept_records
-        row["turn_rewards"] = rewards
-        if kept_records:
-            cached_rows.append(row)
-    if not cached_rows:
-        return {f"{EVALSET_PREFIX}_skipped": "no_eval_states",
-                f"{EVALSET_PREFIX}/native_cache_fail_count": native_cache_fail_count, **tags}
+    eval_samples = []
     profile = getattr(getattr(critic, "config", None), "reward_profile", BINARY_REWARD)
-    eval_samples = samples_from_rollout_rows(
-        cached_rows, expected_checkpoint_id=checkpoint_name, reward_profile=profile, retain_critic_only_states=True)
+    for row in rows:
+        validate_reward_profile(row, profile)
+        if row.get("trainable_sample_count") == 0:
+            continue
+        records = []
+        rewards = dict(row["turn_rewards"])
+        for record in row["trajectory_records"]:
+            turn_id = record["turn_id"]
+            try:
+                ids, _, _ = _extract_collection_tokens(record, turn_id=turn_id)
+            except ValueError:
+                ids = None
+            if ids is None:
+                native_cache_fail_count += 1
+                rewards.pop(turn_id, None)
+                continue
+            records.append({**record, "training_cache": None})
+        eval_samples.extend(extract_trainable_samples(
+            records, rewards, rollout_id=f"{row['query_id']}:{row['rollout_index']}", reward_profile=profile,
+        ))
+    for sample in eval_samples:
+        sample.input_ids = sample.collection_full_token_ids[:-1]
+        sample.labels = sample.collection_full_token_ids[1:]
+        sample.completion_mask = sample.collection_assistant_token_mask[1:]
     if not eval_samples:
         return {f"{EVALSET_PREFIX}_skipped": "no_eval_states",
                 f"{EVALSET_PREFIX}/native_cache_fail_count": native_cache_fail_count, **tags}
     prepare_seconds = time.monotonic() - started
     started = time.monotonic()
-    values, losses = critic.evaluate(eval_samples)
+    values, losses = critic.evaluate(eval_samples, require_reference_logprobs=False)
     inference_seconds = time.monotonic() - started
     started = time.monotonic()
     metrics = value_diagnostics(eval_samples, values, losses, prefix=EVALSET_PREFIX, reward_profile=profile)

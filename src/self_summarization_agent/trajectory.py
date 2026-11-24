@@ -5,7 +5,7 @@ import logging
 import math
 from typing import Any
 from self_summarization_agent.rewards import BINARY_REWARD, read_rollout_reward, rollout_reward_values
-from self_summarization_agent.token_stream import TITO_COLLECTION_VERSION, TITO_CONTRACT
+from self_summarization_agent.token_stream import FULL_VOCAB_LOGPROBS, TITO_COLLECTION_VERSION, TITO_CONTRACT
 
 
 LOGGER = logging.getLogger(__name__)
@@ -162,7 +162,7 @@ def is_training_cache_current(
         and source in _REFERENCE_LOGPROB_SOURCES
         and (
             source != REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
-            or cache.get("logprobs_mode") == "raw_logprobs"
+            or cache.get("logprobs_mode") == FULL_VOCAB_LOGPROBS
         )
         and cached_loss_mask_policy
         == loss_mask_policy(train_compaction_tokens=train_compaction_tokens)
@@ -342,7 +342,7 @@ def _extract_training_cache(
         )
     if (
         reference_logprob_source == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
-        and cache.get("logprobs_mode") != "raw_logprobs"
+        and cache.get("logprobs_mode") != FULL_VOCAB_LOGPROBS
     ):
         raise ValueError(
             f"Trainable record {turn_id} has non-raw rollout reference logprobs"
@@ -599,7 +599,7 @@ def build_rollout_native_training_cache(
         prompt_ids = generation.get("prompt_token_ids")
         completion_ids = generation.get("completion_token_ids")
         completion_logprobs = generation.get("completion_token_logprobs")
-        if generation.get("logprobs_mode") != "raw_logprobs":
+        if generation.get("logprobs_mode") != FULL_VOCAB_LOGPROBS:
             return None
         if (
             not isinstance(prompt_ids, list)
@@ -668,7 +668,7 @@ def build_rollout_native_training_cache(
         "reference_logprob": sum(masked_logprobs) / len(masked_logprobs),
         "reference_logprobs": reference_logprobs,
         "reference_logprob_source": REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
-        "logprobs_mode": "raw_logprobs",
+        "logprobs_mode": FULL_VOCAB_LOGPROBS,
         "state_prefix_length": len(first_prompt_ids),
     }
 
@@ -699,6 +699,16 @@ def extract_trainable_samples(
         query_id = record.get("query_id")
         if not isinstance(query_id, str):
             raise ValueError(f"Trainable record {record_id} has non-string query_id")
+        cache = record.get(TOKEN_CACHE_FIELD)
+        if (isinstance(cache, Mapping)
+                and cache.get("reference_logprob_source") == REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT
+                and cache.get("logprobs_mode") == "raw_logprobs"):
+            # Older vLLM caches did not record whether a grammar was active.
+            # Judging may still read the trajectory; training must rebuild its
+            # cache from the original checkpoint and collected token evidence.
+            if record.get("collection_tokens") is None:
+                raise ValueError(f"Legacy rollout cache for {record_id} requires exact collected tokens")
+            record = {**record, TOKEN_CACHE_FIELD: None}
         messages = _validate_messages(record.get("messages"), record_id=record_id)
         if record_id not in rewards:
             raise ValueError(f"Missing reward for trainable record: {record_id}")

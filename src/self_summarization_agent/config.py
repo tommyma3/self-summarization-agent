@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from .chat_template import INITIAL_TEMPLATE_PATH, RETIRED_TEMPLATE_PATH
 from .rewards import BINARY_REWARD, VOLUNTARY_STOPPING, reward_bounds
 
 
@@ -141,6 +142,11 @@ class ModelConfig:
     require_exact_token_ids: bool = True
     # Optional vLLM memory fraction; None keeps the engine default.
     gpu_memory_utilization: float | None = None
+
+    def __post_init__(self) -> None:
+        # Saved collection configs may still name the retired bundled file.
+        if self.chat_template_path == RETIRED_TEMPLATE_PATH:
+            self.chat_template_path = INITIAL_TEMPLATE_PATH
 
 
 @dataclass(slots=True)

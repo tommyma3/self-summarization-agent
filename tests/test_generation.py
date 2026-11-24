@@ -306,7 +306,7 @@ def test_vllm_generator_can_return_generation_metadata(monkeypatch) -> None:
     assert outputs[0].completion_token_ids == [11, 12]
     assert outputs[0].cumulative_logprob == -2.0
     assert outputs[0].token_logprobs == [-0.75, -1.25]
-    assert outputs[0].token_logprobs_mode == "raw_logprobs"
+    assert outputs[0].token_logprobs_mode == "full_vocab_raw_logprobs"
     assert generator.llm.params.kwargs == {
         "max_tokens": 16,
         "temperature": 0.7,
@@ -419,3 +419,11 @@ def test_openai_compatible_generator_preserves_native_tools_and_exact_ids(monkey
     assert requests[0]["extra_body"]["return_token_ids"] is True
     assert requests[0]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
     assert requests[0]["extra_body"]["chat_template"] == "custom agent template"
+
+
+def test_missing_sampled_token_score_cannot_use_an_alternative():
+    from types import SimpleNamespace
+    from self_summarization_agent.generation import _extract_completion_token_logprobs
+
+    completion = SimpleNamespace(token_ids=[11], logprobs=[{12: -0.25}])
+    assert _extract_completion_token_logprobs(completion) is None

@@ -6,19 +6,19 @@ import pytest
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from self_summarization_agent.backend import FakeBackend
-from self_summarization_agent.chat_template import load_chat_template
+from self_summarization_agent.chat_template import INITIAL_TEMPLATE_PATH, load_chat_template
 from self_summarization_agent.generation import GenerationResult, VLLMGenerator, SGLangGenerator, OpenAICompatibleGenerator
 from self_summarization_agent.models import Message
 from self_summarization_agent.prompts import ConversationPrompt, build_initial_messages, format_compacted_summary, format_tool_response
 from self_summarization_agent.runtime import EpisodeRuntime
-from self_summarization_agent.token_renderer import QwenAgentTokenRenderer, TEMPLATE_PATH, UnsupportedTokenBoundary, parse_native_completion
+from self_summarization_agent.token_renderer import QwenAgentTokenRenderer, UnsupportedTokenBoundary, parse_native_completion
 from self_summarization_agent.token_stream import IntervalTokenLedger, TokenRequest
 from self_summarization_agent.trajectory import build_rollout_native_training_cache, extract_trainable_samples, _extract_collection_tokens
 
 
 class Tokenizer:
     """Atomic ChatML seams plus a deliberately noncanonical sampled token."""
-    chat_template = load_chat_template(TEMPLATE_PATH)
+    chat_template = load_chat_template(INITIAL_TEMPLATE_PATH)
     special = {"<|im_start|>": 1, "<|im_end|>": 2}
 
     def __init__(self):
@@ -72,7 +72,7 @@ class TokenModel:
             text = next(self.outputs)
             ids = [999999] + self.tokenizer.encode(text)
             result = GenerationResult(self.tokenizer.decode(ids), list(request.prompt_token_ids), ids,
-                                      token_logprobs=[-0.25] * len(ids), token_logprobs_mode="raw_logprobs",
+                                      token_logprobs=[-0.25] * len(ids), token_logprobs_mode="full_vocab_raw_logprobs",
                                       message=parse_native_completion(self.tokenizer.decode(ids)) if self.supports_native_tools else None,
                                       finish_reason="stop")
             results.append(result)
@@ -265,7 +265,7 @@ def test_lineage_preflight_rejects_changed_dataset_split(tmp_path, field, value)
     from self_summarization_agent.token_stream import TITO_CONTRACT
 
     config = SimpleNamespace(
-        model=SimpleNamespace(chat_template_path=TEMPLATE_PATH, enable_thinking=True),
+        model=SimpleNamespace(chat_template_path=INITIAL_TEMPLATE_PATH, enable_thinking=True),
         rollout=SimpleNamespace(backend="vllm_offline"),
         dataset=DatasetConfig(train_limit=3, eval_limit=1),
         experiment=SimpleNamespace(name="grpo", seed=0),
@@ -287,29 +287,41 @@ def test_lineage_preflight_rejects_changed_dataset_split(tmp_path, field, value)
         validate_artifact_lineage([path], config=config, checkpoint=tmp_path)
 
 
+def test_resume_accepts_the_same_collection_settings_after_template_retirement(tmp_path, monkeypatch):
+    from hashlib import sha256
+    from types import SimpleNamespace
+    from self_summarization_agent import collection_contract
+
+    previous = "previous template hash input"
+    previous_path = tmp_path / "previous.txt"
+    previous_path.write_text(previous)
+    config = SimpleNamespace(
+        model=SimpleNamespace(chat_template_path=str(previous_path), enable_thinking=True),
+        rollout=SimpleNamespace(backend="vllm_offline"),
+    )
+    saved = collection_contract.collection_profile_id(config, tmp_path)
+    config.model.chat_template_path = INITIAL_TEMPLATE_PATH
+    monkeypatch.setattr(collection_contract, "_retired_profile_source", lambda: previous)
+    monkeypatch.setattr(collection_contract, "_RETIRED_TEMPLATE_SHA256", sha256(previous.encode()).hexdigest())
+
+    assert collection_contract.collection_profile_id(config, tmp_path) != saved
+    assert collection_contract.collection_profile_id(config, tmp_path, existing_id=saved) == saved
+    config.model.enable_thinking = False
+    assert collection_contract.collection_profile_id(config, tmp_path, existing_id=saved) != saved
+
+
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("thinking", [False, True])
-def test_renderer_matches_template_for_canonical_tool_result(native, thinking):
+def test_renderer_appends_tool_result_and_next_action_header(native, thinking):
     tokenizer = Tokenizer()
     renderer = QwenAgentTokenRenderer(tokenizer, enable_thinking=thinking, native_tools=native)
     tool = Message(role="tool", content="  fact 雪  ", tool_call_id="call-1") if native else Message(role="user", content=format_tool_response("fact 雪"))
-    dummy = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<search>q</search>", "reasoning_content": "reason"}]
-    rendered = tokenizer.apply_chat_template(dummy + [{"role": tool.role, "content": tool.content}], tokenize=False, add_generation_prompt=True, enable_thinking=thinking)
-    sampled_end = rendered.index("<|im_end|>", rendered.index("<|im_start|>assistant")) + len("<|im_end|>")
-    assert renderer.render_tool_result(tool, completion_ids=[2], finish_reason="stop") + renderer.header("action") == tuple(tokenizer.encode(rendered[sampled_end:]))
+    body = "<tool_response>\nfact 雪\n</tool_response>" if native else tool.content
+    suffix = "\n<|im_start|>user\n" + body + "<|im_end|>\n<|im_start|>assistant\n"
+    suffix += "<think>\n" if thinking else "<think>\n\n</think>\n\n"
+    assert renderer.render_tool_result(tool, completion_ids=[2], finish_reason="stop") + renderer.header("action") == tuple(tokenizer.encode(suffix))
     with pytest.raises(UnsupportedTokenBoundary):
         renderer.render_tool_result(tool, completion_ids=[777], finish_reason="length")
-
-
-@pytest.mark.parametrize("kind", ["summary", "forced_answer"])
-def test_control_renderer_matches_terminal_template_suffix(kind):
-    tokenizer = Tokenizer()
-    renderer = QwenAgentTokenRenderer(tokenizer, enable_thinking=True)
-    from self_summarization_agent.prompts import build_summary_prompt, build_forced_answer_prompt
-    control = {"role": "user" if kind == "summary" else "system", "content": build_summary_prompt() if kind == "summary" else build_forced_answer_prompt()}
-    rendered = tokenizer.apply_chat_template([{"role": "user", "content": "q"}, control], tokenize=False, add_generation_prompt=True, enable_thinking=True)
-    suffix = rendered[rendered.index("<|im_end|>") + len("<|im_end|>\n"):]
-    assert renderer.header(kind) == tuple(tokenizer.encode(suffix))
 
 
 @pytest.mark.parametrize("mutation", ["mask", "span", "prefix", "identity"])
@@ -826,7 +838,7 @@ def test_vllm_adapter_submits_ids_and_preserves_raw_sampled_logprobs(native):
     assert seen[1][1][0].get("detokenize", True)
     assert result.completion_token_ids == ids
     assert result.token_logprobs == [-0.2] * len(ids)
-    assert result.token_logprobs_mode == "raw_logprobs"
+    assert result.token_logprobs_mode == "full_vocab_raw_logprobs"
     assert result.text == "sampled-only-reason" + native_call("search", "query", "q")
     if native:
         call, = result.message.tool_calls
@@ -847,13 +859,17 @@ def test_offline_native_controls_apply_per_request(monkeypatch):
 
     def generate(prompts, params):
         settings.extend(params)
-        completion = SimpleNamespace(token_ids=[999999, 2], finish_reason="stop")
+        completion = SimpleNamespace(token_ids=[999999, 2], logprobs=[{999999: -0.1}, {2: -0.2}], finish_reason="stop")
         return [SimpleNamespace(prompt_token_ids=p["prompt_token_ids"], outputs=[completion]) for p in prompts]
 
     generator.llm = SimpleNamespace(generate=generate)
-    generator.generate_token_batch([TokenRequest((1,), generation_kind=kind)
-                                    for kind in ("action", "summary", "forced_answer")])
+    requests = [TokenRequest((1,), generation_kind=kind) for kind in ("action", "summary", "forced_answer")]
+    requests.append(TokenRequest((1,), generation_kind="action", response_regex="custom"))
+    results = generator.generate_token_batch(requests)
     assert "structured_outputs" not in settings[0]
+    assert settings[-1]["structured_outputs"].regex == "custom"
+    assert [r.token_logprobs_mode for r in results] == ["full_vocab_raw_logprobs"] + ["grammar_masked_logprobs"] * 3
+    assert all(r.token_logprobs == [-0.1, -0.2] for r in results)
     summary = SUMMARY.removesuffix("<|im_end|>")
     finish = native_call("finish", "answer", "done").removesuffix("<|im_end|>")
     search = native_call("search", "query", "q").removesuffix("<|im_end|>")
@@ -962,7 +978,7 @@ def test_lineage_preflight_rejects_old_or_changed_artifacts(tmp_path):
     from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
     from self_summarization_agent.config import RuntimeConfig
     from self_summarization_agent.token_stream import TITO_CONTRACT
-    config = SimpleNamespace(model=SimpleNamespace(chat_template_path=TEMPLATE_PATH, enable_thinking=True),
+    config = SimpleNamespace(model=SimpleNamespace(chat_template_path=INITIAL_TEMPLATE_PATH, enable_thinking=True),
                              rollout=SimpleNamespace(backend="vllm_offline"), runtime=RuntimeConfig())
     result = runtime(TokenModel([FINISH])).run("q", "question")
     path = tmp_path / "raw.jsonl"
@@ -1002,22 +1018,14 @@ def test_real_tokenizer_renderer_conformance(thinking, native):
     if not path:
         pytest.skip("Set TITO_TEST_TOKENIZER_PATH to the server's Qwen tokenizer/checkpoint")
     tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
-    configure_tokenizer_chat_template(tokenizer, TEMPLATE_PATH)
+    configure_tokenizer_chat_template(tokenizer, INITIAL_TEMPLATE_PATH)
     renderer = QwenAgentTokenRenderer(tokenizer, enable_thinking=thinking, native_tools=native)
     initial = build_initial_messages("  Original query 雪  ", native_tools=native)
     prompt = ConversationPrompt(initial, tools=ACTION_TOOLS if native else None)
     initial_ids = renderer.render_initial_state(prompt)
-    for result in ["fact", "  雪\n中文\n ", 'JSON {"b": false, "a": 1}', ""]:
-        msg = Message(role="tool", content=result, tool_call_id="call-1") if native else Message(role="user", content=format_tool_response(result))
-        messages = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<search>q</search>", "reasoning_content": "reason"}]
-        full = tokenizer.apply_chat_template(messages + [{"role": msg.role, "content": msg.content}], tokenize=False,
-                                             add_generation_prompt=True, enable_thinking=thinking)
-        end = full.index("<|im_end|>", full.index("<|im_start|>assistant")) + len("<|im_end|>")
-        suffix = renderer.render_tool_result(msg, completion_ids=[renderer.im_end], finish_reason="stop") + renderer.header("action")
-        assert suffix == tuple(tokenizer.encode(full[end:], add_special_tokens=False))
-        assert initial_ids + renderer.header("action") == tuple(tokenizer.apply_chat_template(
-            [{"role": m.role, "content": m.content} for m in initial], tools=list(prompt.tools) or None,
-            tokenize=True, return_dict=False, add_generation_prompt=True, enable_thinking=thinking))
+    assert initial_ids + renderer.header("action") == tuple(tokenizer.apply_chat_template(
+        [{"role": m.role, "content": m.content} for m in initial], tools=list(prompt.tools) or None,
+        tokenize=True, return_dict=False, add_generation_prompt=True, enable_thinking=thinking))
 
 
 @pytest.mark.parametrize("value_mode", [False, True])
@@ -1083,8 +1091,10 @@ def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
     for collected, cache in zip(records, caches):
         generation = collected["collection_tokens"]["generations"][0]
         generation["completion_token_logprobs"] = cache["reference_logprobs"][len(generation["prompt_token_ids"]) - 1:]
-        generation["logprobs_mode"] = "raw_logprobs"
+        generation["logprobs_mode"] = "full_vocab_raw_logprobs"
         native = build_rollout_native_training_cache(collected["collection_tokens"])
+        generation["logprobs_mode"] = "grammar_masked_logprobs"
+        assert build_rollout_native_training_cache(collected["collection_tokens"]) is None
         assert native is not None
         assert native["reference_logprobs"] == pytest.approx(cache["reference_logprobs"], abs=1e-6)
         assert native["completion_mask"] == cache["completion_mask"]

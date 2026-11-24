@@ -73,7 +73,7 @@ def sample_key(sample):
     return (str(sample.rollout_id), sample.turn_id)
 
 
-def validate_samples(samples, max_sequence_length=None, reward_profile=BINARY_REWARD):
+def validate_samples(samples, max_sequence_length=None, reward_profile=BINARY_REWARD, *, require_reference_logprobs=True):
     seen, rewards = set(), {}
     allowed_rewards = rollout_reward_values(reward_profile)
     for sample in samples:
@@ -84,16 +84,18 @@ def validate_samples(samples, max_sequence_length=None, reward_profile=BINARY_RE
         if (isinstance(sample.reward, bool) or sample.reward not in allowed_rewards
                 or rewards.setdefault(sample.rollout_id, sample.reward) != sample.reward):
             raise ValueError("Separate critic requires consistent valid rollout rewards")
-        if not sample.has_exact_collection_tokens or not sample.has_token_reference_logprobs:
+        if not sample.has_exact_collection_tokens or (require_reference_logprobs and not sample.has_token_reference_logprobs):
             raise ValueError("Separate critic requires exact collected IDs and cached token log probabilities")
         ids, labels, mask = sample.input_ids, sample.labels, sample.completion_mask
-        if not ids or labels is None or mask is None or not (len(ids) == len(labels) == len(mask) == len(sample.reference_logprobs)):
+        if not ids or labels is None or mask is None or not (len(ids) == len(labels) == len(mask)):
             raise ValueError("Misaligned exact interval tensors")
         if ids != sample.collection_full_token_ids[:-1] or labels != sample.collection_full_token_ids[1:]:
             raise ValueError("Cached IDs differ from collected interval")
         if mask != sample.collection_assistant_token_mask[1:]:
             raise ValueError("Separate MC requires the exact all-assistant mask")
-        if not all(math.isfinite(x) for x in sample.reference_logprobs):
+        if require_reference_logprobs and len(sample.reference_logprobs) != len(ids):
+            raise ValueError("Misaligned exact interval tensors")
+        if require_reference_logprobs and not all(math.isfinite(x) for x in sample.reference_logprobs):
             raise ValueError("Nonfinite behavior log probabilities")
         anchor = sample.state_prefix_length
         if isinstance(anchor, bool) or not isinstance(anchor, int) or not 1 <= anchor <= len(ids):

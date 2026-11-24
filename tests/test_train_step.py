@@ -376,7 +376,7 @@ def summary_only_record(record_id: str) -> dict:
                 "completion_token_ids": [21],
                 "full_token_ids": [10, 11, 21],
                 "completion_token_logprobs": [-0.3],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             },
         ],
     }

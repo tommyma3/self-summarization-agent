@@ -72,7 +72,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
                 completion_token_ids=[10, 11],
                 cumulative_logprob=-0.3,
                 token_logprobs=[-0.1, -0.2],
-                token_logprobs_mode="raw_logprobs",
+                token_logprobs_mode="full_vocab_raw_logprobs",
                 message=Message(
                     role="assistant",
                     reasoning_content="search first",
@@ -86,7 +86,7 @@ def test_native_runtime_links_tools_and_persists_exact_collection_ids() -> None:
                 completion_token_ids=[30, 31],
                 cumulative_logprob=-0.7,
                 token_logprobs=[-0.3, -0.4],
-                token_logprobs_mode="raw_logprobs",
+                token_logprobs_mode="full_vocab_raw_logprobs",
                 message=Message(
                     role="assistant",
                     reasoning_content="answer",
@@ -153,7 +153,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 completion_token_ids=[10],
                 cumulative_logprob=-0.1,
                 token_logprobs=[-0.1],
-                token_logprobs_mode="raw_logprobs",
+                token_logprobs_mode="full_vocab_raw_logprobs",
                 message=Message(
                     role="assistant",
                     tool_calls=[ToolCall(id="call-search", name="search", arguments={"query": "q"})],
@@ -165,7 +165,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 completion_token_ids=[11],
                 cumulative_logprob=-0.2,
                 token_logprobs=[-0.2],
-                token_logprobs_mode="raw_logprobs",
+                token_logprobs_mode="full_vocab_raw_logprobs",
                 message=Message(
                     role="assistant",
                     reasoning_content="compact",
@@ -178,7 +178,7 @@ def test_native_summary_appends_user_control_without_changing_tools_and_keeps_ex
                 completion_token_ids=[12],
                 cumulative_logprob=-0.3,
                 token_logprobs=[-0.3],
-                token_logprobs_mode="raw_logprobs",
+                token_logprobs_mode="full_vocab_raw_logprobs",
                 message=Message(
                     role="assistant",
                     tool_calls=[ToolCall(id="call-finish", name="finish", arguments={"answer": "done"})],
@@ -254,13 +254,13 @@ def test_rollout_native_cache_rejects_completion_without_exact_conditioning_pref
                 "prompt_token_ids": [9],
                 "completion_token_ids": [10],
                 "completion_token_logprobs": [-0.1],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             },
             {
                 "prompt_token_ids": [1, 10, 2],
                 "completion_token_ids": [11],
                 "completion_token_logprobs": [-0.2],
-                "logprobs_mode": "raw_logprobs",
+                "logprobs_mode": "full_vocab_raw_logprobs",
             },
         ],
     }

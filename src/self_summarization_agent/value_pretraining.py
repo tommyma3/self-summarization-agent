@@ -50,7 +50,7 @@ def file_digest(path):
     return result.hexdigest()
 
 
-def initialization_binding(config, actor):
+def initialization_binding(config, actor, *, existing_id=None):
     from self_summarization_agent.dataset import default_decrypted_path
 
     actor = Path(actor).resolve()
@@ -63,7 +63,7 @@ def initialization_binding(config, actor):
         "actor_digest": source_critic_identity(actor, resume=False),
         "critic_path": str(Path(config.training.value.model_path).resolve()),
         "critic_digest": source_critic_identity(config.training.value.model_path, resume=False),
-        "collection_profile_id": collection_profile_id(config, actor),
+        "collection_profile_id": collection_profile_id(config, actor, existing_id=existing_id),
         "sampling_profile_id": sampling_profile_id(resolved_rollout_sampling_profile(config, split="train")),
         "pretraining": asdict(config.training.value_pretraining), "online_value_config": online_value_config,
         "runtime": runtime_config_identity(config.runtime), "dataset": asdict(config.dataset),
@@ -83,7 +83,8 @@ def prepare_dataset(config, actor, path, allowed_queries):
     if len(rows) != settings.task_count * settings.samples_per_task:
         raise ValueError("Pretraining requires exactly task_count * samples_per_task rollouts")
     profile = resolved_rollout_sampling_profile(config, split="train")
-    profile_id, collection_id = sampling_profile_id(profile), collection_profile_id(config, actor)
+    profile_id, collection_id = sampling_profile_id(profile), collection_profile_id(
+        config, actor, existing_id=rows[0].get("collection_profile_id") if rows else None)
     checkpoint_id = checkpoint_id_from_path(actor)
     queries, keys, samples = {}, set(), []
     for row in rows:
@@ -180,7 +181,7 @@ def completed_pretraining(config, actor, output):
         return None
     manifest = json.loads((output / MANIFEST).read_text())
     dataset = _read_dataset(output)
-    binding = initialization_binding(config, actor)
+    binding = initialization_binding(config, actor, existing_id=dataset["collection_profile_id"])
     fingerprint = digest({"binding": binding, "dataset": dataset["digest"]})
     marker = json.loads((output / ".complete").read_text())
     if (manifest.get("fingerprint") != fingerprint or manifest.get("binding") != binding
@@ -274,7 +275,7 @@ def fit_pretraining(config, actor, rollout_path, output, allowed_queries, *, res
         if (output / "epochs").exists():
             raise ValueError("Refusing to reuse an unmanaged pretraining checkpoint directory")
         atomic_json(output / DATASET, dataset)
-    binding = initialization_binding(config, actor)
+    binding = initialization_binding(config, actor, existing_id=dataset["collection_profile_id"])
     fingerprint = digest({"binding": binding, "dataset": dataset["digest"]})
     state = json.loads((output / STATE).read_text()) if (output / STATE).exists() else None
     if state is not None:
