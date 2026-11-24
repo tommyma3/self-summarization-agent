@@ -86,7 +86,7 @@ def train_config(tmp_path: Path) -> TrainConfig:
         experiment=ExperimentConfig(name="demo", seed=1, output_root=str(tmp_path), bc_plus_root=str(tmp_path)),
         dataset=DatasetConfig(limit=1),
         retrieval=RetrievalConfig(backend="faiss", index_path="unused"),
-        model=ModelConfig(backend="transformers", model_path="unused"),
+        model=ModelConfig(model_path="unused"),
         rollout=RolloutConfig(backend="vllm_offline"),
         runtime=RuntimeConfig(context_threshold_tokens=1000, max_context_tokens=1024, tool_budget=4),
         judge=JudgeConfig(enabled=True),

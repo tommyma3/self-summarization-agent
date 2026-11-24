@@ -206,39 +206,6 @@ def _train_dir(config) -> Path:
     return Path(config.experiment.output_root) / "artifacts" / "train" / config.experiment.name
 
 
-def _train_step_command_prefix(
-    config,
-    python_executable: str,
-    *,
-    module_name: str = "self_summarization_agent.train_step",
-) -> list[str]:
-    if config.training.backend == "fsdp2_context_parallel":
-        command = [
-            "accelerate",
-            "launch",
-            "--num_processes",
-            str(len(config.training.gpu_ids) or config.training.context_parallel_size),
-            "--num_machines",
-            "1",
-            "--machine_rank",
-            "0",
-            "--main_process_port",
-            "0",
-            "--use-fsdp",
-            "--fsdp_version",
-            str(config.training.fsdp_version or 2),
-            "--fsdp_auto_wrap_policy",
-            "transformer_based_wrap",
-            "--parallelism-config-cp-size",
-            str(config.training.context_parallel_size),
-        ]
-        if config.training.activation_checkpointing:
-            command.append("--fsdp_activation_checkpointing=true")
-        command.extend(["-m", module_name])
-        return command
-    return [python_executable, "-m", module_name]
-
-
 def _append_cli_overrides(command: list[str], overrides: Sequence[str]) -> None:
     for override in overrides:
         command.extend(["--set", override])
@@ -1294,11 +1261,7 @@ def run_training_iteration(
         )
 
         cache_command = [
-            *_train_step_command_prefix(
-                config,
-                python_executable,
-                module_name="self_summarization_agent.cache_step",
-            ),
+            python_executable, "-m", "self_summarization_agent.cache_step",
             "--config",
             str(config_path),
             "--checkpoint",
@@ -1365,7 +1328,7 @@ def run_training_iteration(
         _move_incomplete_checkpoint_aside(next_checkpoint)
 
     train_command = [
-        *_train_step_command_prefix(config, python_executable),
+        python_executable, "-m", "self_summarization_agent.train_step",
         "--config",
         str(config_path),
         "--checkpoint",

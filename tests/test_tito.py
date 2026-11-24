@@ -7,7 +7,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from self_summarization_agent.backend import FakeBackend
 from self_summarization_agent.chat_template import INITIAL_TEMPLATE_PATH, load_chat_template
-from self_summarization_agent.generation import GenerationResult, VLLMGenerator, SGLangGenerator, OpenAICompatibleGenerator
+from self_summarization_agent.generation import GenerationResult, VLLMGenerator, OpenAICompatibleGenerator
 from self_summarization_agent.models import Message
 from self_summarization_agent.prompts import ConversationPrompt, build_initial_messages, format_compacted_summary, format_tool_response
 from self_summarization_agent.runtime import EpisodeRuntime
@@ -878,24 +878,6 @@ def test_offline_native_controls_apply_per_request(monkeypatch):
         assert re.fullmatch(regex, expected) and not re.fullmatch(regex, search)
 
 
-def test_sglang_adapter_submits_ids_without_claiming_raw_logprobs():
-    from types import SimpleNamespace
-    generator = SGLangGenerator.__new__(SGLangGenerator)
-    generator.tokenizer = Tokenizer()
-    generator.max_new_tokens = 99
-    generator.do_sample = False
-    seen = []
-    def generate(**kwargs):
-        seen.append(kwargs)
-        return [{"meta_info": {"output_token_logprobs": [[-0.2, 999999], [-0.3, 2]], "finish_reason": {"type": "stop"}}}]
-    generator.engine = SimpleNamespace(generate=generate)
-    result = generator.generate_token_batch([TokenRequest((1, 999999, 2), max_new_tokens=8)])[0]
-    assert seen[0]["input_ids"] == [[1, 999999, 2]]
-    assert "prompt" not in seen[0]
-    assert result.prompt_token_ids == [1, 999999, 2]
-    assert result.token_logprobs_mode is None
-
-
 def test_api_adapter_uses_completions_tokens_and_controls():
     from types import SimpleNamespace
     generator = OpenAICompatibleGenerator.__new__(OpenAICompatibleGenerator)
@@ -939,30 +921,6 @@ def test_native_parser_requires_the_prompt_opened_thinking_block_to_close():
     second = parse_native_completion(raw, require_thinking_close=True, call_id="round-2")
     assert first.tool_calls[0].id != second.tool_calls[0].id
     assert first.tool_calls[0].arguments == second.tool_calls[0].arguments
-
-
-def test_transformers_adapter_preserves_exact_inputs_and_sampled_stop():
-    import torch
-    from types import SimpleNamespace
-    from self_summarization_agent.generation import TransformersGenerator
-    seen = []
-    def generate(**kwargs):
-        seen.append(kwargs)
-        return torch.cat([kwargs["input_ids"], torch.tensor([[999999, 2]])], dim=1)
-    tokenizer = Tokenizer()
-    adapter = SimpleNamespace(model=SimpleNamespace(device="cpu", generate=generate,
-        generation_config=SimpleNamespace(eos_token_id=7)),
-        tokenizer=SimpleNamespace(pad_token_id=0, decode=tokenizer.decode,
-                                  convert_tokens_to_ids=lambda token: 2, convert_ids_to_tokens=lambda _: "<|im_end|>"),
-        max_new_tokens=99, do_sample=True, temperature=0.6, top_p=1.0,
-        sampling_extra={"presence_penalty": 0.0})
-    result = TransformersGenerator.generate_token_batch(adapter, [TokenRequest((1, 999999, 2), max_new_tokens=8)])[0]
-    assert seen[0]["input_ids"].tolist() == [[1, 999999, 2]]
-    assert seen[0]["max_new_tokens"] == 8
-    assert seen[0]["eos_token_id"] == [7, 2]
-    assert "presence_penalty" not in seen[0]
-    assert result.completion_token_ids == [999999, 2]
-    assert result.finish_reason == "stop"
 
 
 def test_non_thinking_mode_compacts_without_a_sampled_thinking_close():
@@ -1028,13 +986,11 @@ def test_real_tokenizer_renderer_conformance(thinking, native):
         tokenize=True, return_dict=False, add_generation_prompt=True, enable_thinking=thinking))
 
 
-@pytest.mark.parametrize("value_mode", [False, True])
-def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
+def test_exact_tito_segments_rescore_on_cpu():
     import torch
     from types import SimpleNamespace
-    from self_summarization_agent.config import ModelConfig, TrainingConfig, CompactionValueConfig
-    from self_summarization_agent.trainer import TransformersPolicyTrainer
-    from self_summarization_agent.value_model import CompactionValueHead
+    from self_summarization_agent.config import ModelConfig
+    from self_summarization_agent.cache_scorer import PolicyCacheScorer
     from self_summarization_agent.cache_step import _attach_training_caches
     from self_summarization_agent.trajectory import TRAJECTORY_SCHEMA_VERSION
 
@@ -1071,23 +1027,16 @@ def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
                 "messages": [{"role": "system", "content": "policy"}, {"role": "user", "content": "state"}, {"role": "assistant", "content": "output"}],
                 "collection_tokens": payload}
 
-    trainer = TransformersPolicyTrainer.__new__(TransformersPolicyTrainer)
-    trainer.model = TinyPolicy()
-    trainer.tokenizer = SimpleNamespace(pad_token_id=0)  # No encode/template method: rescoring must use IDs.
-    trainer.model_config = ModelConfig(model_path="unused")
-    trainer.training_config = TrainingConfig(update_epochs=1, minibatch_size=3,
-        gradient_accumulation_microbatch_size=1, target_kl=None,
-        advantage_estimator="compaction_mc_value" if value_mode else "group_relative",
-        value=CompactionValueConfig(enabled=value_mode))
-    trainer.value_head = CompactionValueHead(4, zero_initialize=True) if value_mode else None
-    trainer.value_head_loaded = False
-    parameters = list(trainer.model.parameters()) + (list(trainer.value_head.parameters()) if value_mode else [])
-    trainer.optimizer = torch.optim.SGD(parameters, lr=0.01)
+    scorer = PolicyCacheScorer.__new__(PolicyCacheScorer)
+    scorer.model = TinyPolicy()
+    scorer.tokenizer = SimpleNamespace(pad_token_id=0)  # No encode/template method: rescoring must use IDs.
+    scorer.model_config = ModelConfig(model_path="unused")
+    scorer.max_sequence_length = None
     records = [record(1, [1, 2], [4, 5]), record(2, [1, 6], [7, 5])]
     row = {"query_id": "q", "rollout_index": 0, "trajectory_records": records,
            "turn_rewards": {"trajectory-1": 1.0, "trajectory-2": 1.0}}
     samples = extract_trainable_samples(records, row["turn_rewards"], rollout_id="q:0")
-    caches = trainer.cache_samples(samples)
+    caches = scorer.cache_samples(samples)
     for collected, cache in zip(records, caches):
         generation = collected["collection_tokens"]["generations"][0]
         generation["completion_token_logprobs"] = cache["reference_logprobs"][len(generation["prompt_token_ids"]) - 1:]
@@ -1100,18 +1049,8 @@ def test_exact_tito_segments_rescore_and_update_on_cpu(value_mode):
         assert native["completion_mask"] == cache["completion_mask"]
     row = _attach_training_caches(row, cache_payloads=caches, checkpoint_id="tiny")
     samples = extract_trainable_samples(row["trajectory_records"], row["turn_rewards"], rollout_id="q:0")
-    negative = deepcopy(samples[0])
-    negative.rollout_id, negative.reward = "q:1", 0.0
-    samples.append(negative)
-    before = [p.detach().clone() for p in parameters]
-    metrics = trainer.step({"q": samples})
-    assert metrics.sample_count == 3
-    assert metrics.optimizer_step_count == 1
-    assert any(not torch.equal(a, b) for a, b in zip(before, parameters))
-    if value_mode:
-        assert metrics.mean_advantage == pytest.approx(1 / 6)
-        assert metrics.extra_metrics["value/state_count"] == 3
-        assert metrics.extra_metrics["value/rollout_count"] == 2
+    assert len(samples) == 2
+    assert all(sample.has_training_cache for sample in samples)
 
 
 @pytest.mark.parametrize(("outputs", "limit", "outcome", "expected"), [

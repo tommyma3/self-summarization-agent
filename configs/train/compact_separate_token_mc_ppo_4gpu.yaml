@@ -33,7 +33,6 @@ retrieval:
   dataset_name: /124090467/hf_datasets/Tevatron/browsecomp-plus-corpus
   max_length: 16384
 model:
-  backend: transformers
   model_path: /124090467/Qwen/Qwen3.5-9B
   dtype: bfloat16
   device_map: auto

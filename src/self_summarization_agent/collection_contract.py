@@ -55,8 +55,6 @@ def collection_profile_id(config: Any, checkpoint: Path, *, existing_id: str | N
     identity = dict(contract=TITO_CONTRACT, template=load_chat_template(config.model.chat_template_path),
                     thinking=config.model.enable_thinking, backend=config.rollout.backend,
                     checkpoint=str(checkpoint), tokenizer_files={})
-    if config.rollout.backend == "transformers" and getattr(config.rollout, "require_exact_token_ids", False):
-        identity["transformers_token_stops"] = "model-eos-and-chat-end-v1"
     if getattr(config.rollout, "browsecomp_native_tools", False):
         from self_summarization_agent.prompts import ACTION_TOOLS, build_native_tool_system_prompt
         identity["browsecomp_native_tools"] = [build_native_tool_system_prompt(), ACTION_TOOLS]

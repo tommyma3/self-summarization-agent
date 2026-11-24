@@ -48,7 +48,7 @@ def train_config(tmp_path: Path) -> TrainConfig:
         experiment=ExperimentConfig(name="demo", seed=1, output_root=str(tmp_path), bc_plus_root=str(tmp_path)),
         dataset=DatasetConfig(limit=1),
         retrieval=RetrievalConfig(backend="faiss", index_path="unused"),
-        model=ModelConfig(backend="transformers", model_path="unused"),
+        model=ModelConfig(model_path="unused"),
         rollout=RolloutConfig(backend="vllm_offline"),
         runtime=RuntimeConfig(context_threshold_tokens=1000, max_context_tokens=1024, tool_budget=4),
         judge=JudgeConfig(enabled=True),
@@ -472,68 +472,14 @@ def test_cache_step_rejects_raw_unjudged_rows(tmp_path: Path) -> None:
         raise AssertionError("Expected raw rows to be rejected")
 
 
-def test_build_cache_scorer_accepts_verl_ray_with_transformers_worker(tmp_path: Path, monkeypatch) -> None:
-    checkpoint = tmp_path / "checkpoints" / "step-00001"
-    checkpoint.mkdir(parents=True)
+def test_build_cache_scorer_uses_behavior_checkpoint_and_training_limit(tmp_path, monkeypatch):
     config = train_config(tmp_path)
-    config.training.backend = "verl_ray"
-    config.training.verl.worker_backend = "transformers"
-    created = {}
-
-    class FakeTransformersPolicyTrainer:
-        def __init__(self, model_config, training_config) -> None:
-            created["model_path"] = model_config.model_path
-            created["backend"] = training_config.backend
-
-    monkeypatch.setattr(
-        "self_summarization_agent.cache_step.TransformersPolicyTrainer",
-        FakeTransformersPolicyTrainer,
-    )
-
-    scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
-
-    assert isinstance(scorer, FakeTransformersPolicyTrainer)
-    assert created == {"model_path": str(checkpoint.resolve()), "backend": "transformers"}
-
-
-def test_build_cache_scorer_accepts_verl_fsdp_worker_with_transformers_cache(tmp_path: Path, monkeypatch) -> None:
-    checkpoint = tmp_path / "checkpoints" / "step-00001"
-    checkpoint.mkdir(parents=True)
-    config = train_config(tmp_path)
-    config.training.backend = "verl_ray"
-    config.training.verl.worker_backend = "verl_fsdp"
-    created = {}
-
-    class FakeTransformersPolicyTrainer:
-        def __init__(self, model_config, training_config) -> None:
-            created["model_path"] = model_config.model_path
-            created["backend"] = training_config.backend
-
-    monkeypatch.setattr(
-        "self_summarization_agent.cache_step.TransformersPolicyTrainer",
-        FakeTransformersPolicyTrainer,
-    )
-
-    scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
-
-    assert isinstance(scorer, FakeTransformersPolicyTrainer)
-    assert created == {"model_path": str(checkpoint.resolve()), "backend": "transformers"}
-
-
-def test_build_cache_scorer_rejects_unsupported_verl_worker_backend(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "checkpoints" / "step-00001"
-    checkpoint.mkdir(parents=True)
-    config = train_config(tmp_path)
-    config.training.backend = "verl_ray"
-    config.training.verl.worker_backend = "fsdp2_context_parallel"
-
-    try:
-        build_cache_scorer(config, checkpoint_path=checkpoint)
-    except NotImplementedError as exc:
-        assert "training.verl.worker_backend='transformers' or 'verl_fsdp'" in str(exc)
-    else:
-        raise AssertionError("Expected unsupported verl worker backend to be rejected")
-
+    config.training.max_sequence_length = 1024
+    monkeypatch.setattr("self_summarization_agent.cache_step.PolicyCacheScorer",
+                        lambda model, limit: (model, limit))
+    model, limit = build_cache_scorer(config, checkpoint_path=tmp_path)
+    assert model.model_path == str(tmp_path.resolve())
+    assert limit == 1024
 
 
 def test_resume_rescores_legacy_cache_and_keeps_trusted_interval(tmp_path):

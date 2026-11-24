@@ -1,21 +1,18 @@
 from copy import deepcopy
-from dataclasses import replace
 import json
 from pathlib import Path
 import runpy
 
 import pytest
 import torch
-from transformers import GPT2LMHeadModel
+from transformers import LlamaConfig, LlamaForCausalLM
 
 from swe_dev_fixtures import pilot_config, FixturePolicy, outputs
 from self_summarization_agent.benchmarks.terminal_bench.collection import collect_terminal_rollouts
 from self_summarization_agent.benchmarks.swe_dev.checkpoint import validate_checkpoint
-from self_summarization_agent.cache_step import run_cache_step
+from self_summarization_agent.cache_step import build_cache_scorer, run_cache_step
 from self_summarization_agent.judge_step import judge_rollouts
 from self_summarization_agent.train_step import run_train_step, samples_from_rollout_rows
-from self_summarization_agent.trainer import TransformersPolicyTrainer
-from self_summarization_agent.trajectory import extract_trainable_samples
 from self_summarization_agent.separate_value import separate_checkpoint_complete, CRITIC_DIR, CRITIC_STATE
 
 
@@ -48,14 +45,17 @@ def test_executable_fixture_collection_verification_tokens_and_resume(tmp_path, 
         collect_terminal_rollouts(cfg, checkpoint_path=base, output_path=raw, split="train", resume=True)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="verl FSDP requires a GPU")
 @pytest.mark.parametrize("mode", ["grpo", "value_mc", "separate_mc_ppo", "separate_gae_ppo"])
 def test_four_profiles_rescore_update_and_checkpoint_resume(tmp_path, monkeypatch, mode):
     cfg, base = pilot_config(tmp_path, mode)
-    # The fixture uses a real tiny causal LM; production uses the configured Qwen model.
-    import self_summarization_agent.trainer as module
-    monkeypatch.setattr(module, "AutoModelForMultimodalLM", GPT2LMHeadModel)
-    # Keep process isolation in production, but run the real critic phase on CPU
-    # in this test without requiring a GPU or spawning an unpatched model loader.
+    # Use a tiny supported architecture for the real single-GPU FSDP worker.
+    LlamaForCausalLM(LlamaConfig(vocab_size=2048, hidden_size=64, intermediate_size=128,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=2,
+        max_position_embeddings=12000)).save_pretrained(base)
+    import self_summarization_agent.cache_scorer as cache_module
+    monkeypatch.setattr(cache_module, "AutoModelForMultimodalLM", LlamaForCausalLM)
+    # Run the separate critic locally on CPU while Ray owns the actor GPU.
     import self_summarization_agent.train_step as step
     from self_summarization_agent import critic_step
     from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
@@ -75,6 +75,7 @@ def test_four_profiles_rescore_update_and_checkpoint_resume(tmp_path, monkeypatc
         return original_init(self, *args, **kwargs)
     monkeypatch.setattr(SeparateValueTrainer, "__init__", cpu_init)
 
+    cfg.training.verl.num_cpus = 10  # CPU slots in one verl Ray resource bundle.
     checkpoint = base
     prior_actor_steps = 0
     for iteration in range(2):
@@ -84,7 +85,7 @@ def test_four_profiles_rescore_update_and_checkpoint_resume(tmp_path, monkeypatc
         judge_rollouts(cfg, checkpoint_path=checkpoint, rollout_path=raw, output_path=judged, split="train")
         before = deepcopy(rows(judged))
         # This frozen scorer computes probabilities of exact saved IDs, never tokenizes history.
-        scorer = TransformersPolicyTrainer(replace(cfg.model, model_path=str(checkpoint)), cfg.training)
+        scorer = build_cache_scorer(cfg, checkpoint_path=checkpoint)
         run_cache_step(cfg, checkpoint_path=checkpoint, rollout_path=judged, output_path=cached, scorer=scorer)
         cached_rows = rows(cached)
         for old, new in zip(before, cached_rows):
@@ -100,9 +101,8 @@ def test_four_profiles_rescore_update_and_checkpoint_resume(tmp_path, monkeypatc
             output_checkpoint_path=target, metrics_path=metric)
         metrics = json.loads(metric.read_text())
         assert metrics["optimizer_step_count"] > 0 and torch.isfinite(torch.tensor(metrics["loss"]))
-        assert (target / "actor_training_state.pt").is_file()
-        state = torch.load(target / "actor_training_state.pt", weights_only=True)
-        steps = [v["step"].item() for v in state["optimizer"]["state"].values()]
+        state = torch.load(target / "optim_world_size_1_rank_0.pt", map_location="cpu", weights_only=True)
+        steps = [v["step"].item() for v in state["state"].values()]
         assert min(steps) == prior_actor_steps + metrics["optimizer_step_count"]
         prior_actor_steps = min(steps)
         from safetensors.torch import load_file

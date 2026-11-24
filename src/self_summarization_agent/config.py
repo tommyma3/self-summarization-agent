@@ -113,9 +113,18 @@ class RetrievalConfig:
     max_length: int = 8192
 
 
+OFFLINE_VLLM_BACKENDS = frozenset({"vllm", "vllm_offline"})
+VLLM_SERVER_BACKENDS = frozenset({"openai", "openai_compatible", "openai-compatible"})
+
+
+def _validate_generation_backend(backend: str, field_name: str) -> None:
+    if not isinstance(backend, str) or backend.lower() not in OFFLINE_VLLM_BACKENDS | VLLM_SERVER_BACKENDS:
+        raise ValueError(f"Unsupported {field_name}: {backend!r}. Use vllm_offline or openai_compatible for vLLM serving.")
+
+
 @dataclass(slots=True)
 class ModelConfig:
-    backend: str = "transformers"
+    backend: str = "vllm_offline"
     model_path: str = ""
     judge_model_path: str | None = None
     dtype: str = "auto"
@@ -144,6 +153,7 @@ class ModelConfig:
     gpu_memory_utilization: float | None = None
 
     def __post_init__(self) -> None:
+        _validate_generation_backend(self.backend, "model.backend")
         # Saved collection configs may still name the retired bundled file.
         if self.chat_template_path == RETIRED_TEMPLATE_PATH:
             self.chat_template_path = INITIAL_TEMPLATE_PATH
@@ -151,7 +161,7 @@ class ModelConfig:
 
 @dataclass(slots=True)
 class RolloutConfig:
-    backend: str = "transformers"
+    backend: str = "vllm_offline"
     gpu_ids: list[int] = field(default_factory=lambda: [2, 3])
     tensor_parallel_size: int = 2
     attention_backend: str | None = None
@@ -189,6 +199,7 @@ class RolloutConfig:
                 isinstance(self.sampling_seed, bool) or not isinstance(self.sampling_seed, int)
                 or not 0 <= self.sampling_seed < 2**32 or self.backend != "vllm_offline"):
             raise ValueError("rollout.sampling_seed requires vllm_offline and an integer in [0, 2**32)")
+        _validate_generation_backend(self.backend, "rollout.backend")
         if self.max_concurrent_episodes < 1:
             raise ValueError("rollout.max_concurrent_episodes must be at least 1")
         if self.overlap_queue_max_batches < 1:
@@ -261,6 +272,8 @@ class JudgeConfig:
     batch_timeout_seconds: float = 600
 
     def __post_init__(self) -> None:
+        if self.backend is not None:
+            _validate_generation_backend(self.backend, "judge.backend")
         if self.batch_size < 1:
             raise ValueError("judge.batch_size must be at least 1")
         if self.batch_wait_ms < 0:
@@ -294,11 +307,15 @@ class VerlRayConfig:
     num_cpus: int | None = None
     num_gpus_per_worker: float | None = None
     runtime_env: dict[str, Any] = field(default_factory=dict)
-    worker_backend: str = "transformers"
+    worker_backend: str = "verl_fsdp"
     fsdp: VerlFSDPConfig = field(default_factory=VerlFSDPConfig)
     ignore_reinit_error: bool = True
     log_to_driver: bool = True
     shutdown_ray: bool = True
+
+    def __post_init__(self) -> None:
+        if self.worker_backend != "verl_fsdp":
+            raise ValueError(f"training.verl.worker_backend must be 'verl_fsdp', got {self.worker_backend!r}")
 
 
 @dataclass(slots=True)
@@ -451,7 +468,7 @@ class ValuePretrainingConfig:
 
 @dataclass(slots=True)
 class TrainingConfig:
-    backend: str = "transformers"
+    backend: str = "verl_ray"
     gpu_ids: list[int] = field(default_factory=list)
     fsdp_version: int | None = None
     context_parallel_size: int = 1
@@ -483,15 +500,12 @@ class TrainingConfig:
     persist_actor_optimizer: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.backend != "verl_ray":
+            raise ValueError(f"training.backend must be 'verl_ray', got {self.backend!r}")
         if self.value_pretraining.enabled and not self.value.separate:
             raise ValueError("Value pretraining requires an enabled separate critic")
-        if self.value.separate:
-            if self.backend not in {"transformers", "verl_ray"} or (
-                self.backend == "verl_ray" and self.verl.worker_backend not in {"transformers", "verl_fsdp"}
-            ):
-                raise ValueError("Separate critic supports transformers or verl_ray with transformers/verl_fsdp")
-            if not self.train_compaction_tokens:
-                raise ValueError("Separate MC preset requires all assistant tokens, including compactions")
+        if self.value.separate and not self.train_compaction_tokens:
+            raise ValueError("Separate MC preset requires all assistant tokens, including compactions")
         supported = {"group_relative", "compaction_mc_value", "compaction_gae_value", "token_mc_value"}
         if self.advantage_estimator not in supported:
             raise ValueError(
@@ -542,7 +556,7 @@ class TrainConfig:
     def __post_init__(self):
         if self.rollout.browsecomp_native_tools and (
             self.benchmark.name != "browsecomp"
-            or self.rollout.backend not in {"vllm", "vllm_offline"}
+            or self.rollout.backend not in OFFLINE_VLLM_BACKENDS
             or not self.rollout.require_exact_token_ids
         ):
             raise ValueError("rollout.browsecomp_native_tools requires BrowseComp and exact offline vLLM collection")
@@ -559,8 +573,6 @@ class TrainConfig:
                 raise ValueError("voluntary_stopping requires runtime.max_compactions and runtime.force_answer_at_compaction_limit")
         self.training.persist_actor_optimizer = self.benchmark.name == "swe-dev"
         if self.benchmark.name == "swe-dev":
-            if self.training.backend not in {"transformers", "verl_ray"}:
-                raise ValueError("SWE checkpoint resume supports transformers or verl_ray training")
             if not self.training.train_compaction_tokens or not self.rollout.require_exact_token_ids:
                 raise ValueError("SWE requires exact IDs and trainable summary tokens")
             if self.training.value_pretraining.enabled:
@@ -632,20 +644,6 @@ def load_run_config(path: str | Path, overrides: dict[str, Any] | None = None) -
     )
 
 
-def _derive_rollout_config(raw: dict[str, Any], training: TrainingConfig) -> RolloutConfig:
-    rollout_section = _require_section(raw, "rollout")
-    if rollout_section:
-        return RolloutConfig(**rollout_section)
-    if training.backend == "fsdp2_context_parallel":
-        return RolloutConfig(
-            backend="vllm_offline",
-            gpu_ids=list(training.gpu_ids),
-            tensor_parallel_size=training.context_parallel_size,
-            max_model_len=65536,
-        )
-    return RolloutConfig()
-
-
 def _load_training_config(raw: dict[str, Any]) -> TrainingConfig:
     training_section = dict(_require_section(raw, "training"))
     value_section = training_section.pop("value", {})
@@ -703,7 +701,7 @@ def load_train_config(path: str | Path, overrides: dict[str, Any] | None = None)
     if training.value_pretraining.enabled and raw.get("benchmark", {}).get("name", "browsecomp") != "browsecomp":
         raise ValueError("Value pretraining currently supports BrowseComp only")
     runtime = RuntimeConfig(**_require_section(raw, "runtime"))
-    rollout = _derive_rollout_config(raw, training)
+    rollout = RolloutConfig(**_require_section(raw, "rollout"))
     _validate_exact_token_sequence_ceiling(training, rollout, runtime)
     return TrainConfig(
         experiment=ExperimentConfig(**_require_section(raw, "experiment")),

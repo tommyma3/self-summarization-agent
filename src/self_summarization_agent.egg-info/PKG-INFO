@@ -40,11 +40,7 @@ Current scope:
 - BrowseComp-style run export
 - smoke and unit-test entrypoints
 
-Partially implemented / still minimal:
-- the legacy training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
-- retrieval and judge dependencies still come from the local `bc-plus` environment
-- process-isolated rollout/training orchestration supports OpenAI-compatible vLLM serving, plus legacy offline vLLM or SGLang collection
-- the FSDP2/context-parallel full-training backend is represented in config and launcher contracts, but must be run in the GPU training environment
+Policy rollouts use vLLM, either in-process with `vllm_offline` or through a vLLM server with `openai_compatible`. Policy updates run on verl FSDP workers managed by Ray.
 
 ## Setup
 
@@ -54,16 +50,10 @@ Python requirement:
 Install dependencies with `uv`:
 
 ```powershell
-uv sync --group dev
+uv sync --locked
 ```
 
-The default Qwen3.5 rollout path expects an OpenAI-compatible vLLM server. The server must support native chat tool calls and vLLM's `return_token_ids` Chat Completions extension. The GPU training environment also needs an Accelerate release with FSDP2/context-parallel support available to the Python environment used for training subprocesses.
-
-For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
-
-```powershell
-uv sync --extra verl --group dev
-```
+The training presets load vLLM offline. The standalone run preset connects to a vLLM server that supports token-ID prompts and returns sampled token IDs.
 
 If you prefer the project virtualenv directly:
 
@@ -173,21 +163,21 @@ Expected output shape:
 For remote validation, run:
 
 ```powershell
-uv run --group dev pytest -q
+uv run pytest -q
 ```
 
 If you want to focus on the runtime path first:
 
 ```powershell
-uv run --group dev pytest tests/test_runtime.py -q
+uv run pytest tests/test_runtime.py -q
 ```
 
 Other useful subsets:
 
 ```powershell
-uv run --group dev pytest tests/test_context.py -q
-uv run --group dev pytest tests/test_rewards.py -q
-uv run --group dev pytest tests/test_export.py -q
+uv run pytest tests/test_context.py -q
+uv run pytest tests/test_rewards.py -q
+uv run pytest tests/test_export.py -q
 ```
 
 ## Current Experiment Workflow
@@ -195,9 +185,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated API rollout collection, judging, and clipped GRPO training updates
-
-The legacy `train_launcher` remains available only for `training.backend: transformers`.
+- `iteration_launcher` for process-isolated vLLM rollout collection, judging, and clipped GRPO training updates
 
 The runtime modules are still reusable directly if you want a custom server-side driver.
 
@@ -244,10 +232,12 @@ grouped = group_samples_by_query(samples)
 What the runtime returns:
 - `turn_records` as generation-level diagnostics for tool-call, summary, and final-answer steps
 - `trajectory_records` as the actual RL samples, one per compaction/final-answer interval
-- `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout
+- `turn_rewards` aligned with trajectory ids and shared across every interval in a rollout. By default, success earns 1 and failure earns 0, including malformed output, budget exhaustion, and overlong rollouts.
 - `summary_turns`, `retrieved_docids`, and `tool_call_counts`
 
 Each training interval begins with the same system instructions and the same original user request. After the first compaction, the latest compressed agent history is appended as a separate conditioning-only user message wrapped in `<summary>...</summary>`. On the OpenAI-compatible path, `search`, `get_document`, and `finish` are native function tools and tool results are linked `role: tool` messages. Summary boundaries are terminal runtime-control `user` messages, while forced-answer boundaries remain terminal runtime-control `system` messages; both are appended without changing the earlier interval prefix. API `tool_choice` disables tools for a summary or requires `finish` for a forced answer. The generated summary remains a normal assistant message and must contain `<summary>...</summary>`. The runtime stores its extracted body for metrics and diagnostics, then rewraps that body when constructing the next interval after the unchanged task prefix. The runtime preserves the structured assistant reasoning, tool calls, tool-call IDs, and full raw sampled completion.
+
+The default training preset enables `rollout.browsecomp_native_tools` for offline vLLM BrowseComp-Plus rollouts. Native mode renders the three function schemas once at each interval start, dispatches calls parsed from sampled IDs, and appends linked tool results. Summary and forced-answer generations use constrained decoding. Use a fresh output directory when changing formats because the collection profiles differ.
 
 This context contract is trajectory schema version 3. Older rollout rows must be recollected under a fresh artifact root rather than resumed or mixed with schema-v3 data.
 
@@ -277,45 +267,16 @@ python -m self_summarization_agent.run_launcher --config configs/run/default.yam
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml --model-path /models/qwen
 ```
 
-### Legacy train launcher
+### Training rollout configuration
 
-Example:
+Training uses offline vLLM by default. To collect through a vLLM server, set `rollout.backend: openai_compatible` and `rollout.api_base_url`. BrowseComp presets with `rollout.browsecomp_native_tools: true` require offline vLLM.
 
-```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers
-```
-
-Outputs:
-
-- `artifacts/train/<experiment_name>/metrics.jsonl`
-- `artifacts/train/<experiment_name>/accuracy_history.jsonl`
-- `artifacts/train/<experiment_name>/rollouts/step-xxxxx.jsonl`
-- `artifacts/train/<experiment_name>/checkpoints/...`
-- `artifacts/train/<experiment_name>/manifest.json`
-
-Typical overrides:
-
-```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers --set training.epochs=20
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers --set training.group_size=4
-python scripts/plot_accuracy.py artifacts/train/qwen-bcplus-train/accuracy_history.jsonl
-```
-
-Training notes:
-
-- the default training config uses queries 1-780 for training and 781-830 for evaluation
-- reward verification is done in-process with the same local base model family as judge
-- `bm25` and `faiss` retrieval are both supported from config
-- legacy `train_launcher` expects `training.backend: transformers`
-- the default `rollout.backend: openai_compatible` uses Chat Completions against `rollout.api_base_url`; `openai`, `openai-compatible`, and `openai_compatible` are accepted aliases
 - `rollout.api_model` must be the model name exposed by the server; when it is unset the resolved checkpoint path is sent as the model name
 - `rollout.enable_prefix_caching` defaults to `true`; `vllm_offline` passes it directly to the owned vLLM engine
 - the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning, native tool parsing, and `--enable-prefix-caching`; prefix caching is an engine-startup option and cannot be enabled by a Chat Completions request, while restarting or hot-swapping that server at an iteration boundary remains an external orchestration responsibility
-- legacy `rollout.backend: vllm_offline` and `rollout.backend: sglang` remain available; SGLang is an optional runtime dependency and must be installed separately
-- the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` consume the same cached trajectory contract
 - each iteration evaluates the selected checkpoint, collects its training trajectories, caches the exact collected token sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
-Before collection, verify the server with the included compatibility probe:
+For server-based collection, verify the server with the included compatibility probe:
 
 ```powershell
 uv run python scripts/probe_openai_compatible_runtime.py --base-url http://127.0.0.1:8000/v1 --model /path/to/checkpoint --tokenizer /path/to/checkpoint
@@ -344,7 +305,7 @@ For the intended GPU run:
 - exact `vllm_offline` training generations retain raw sampled-token logprobs and assemble v6 training caches directly from authoritative collection IDs and assistant masks before the policy process exits
 - after both raw artifacts are complete and policy/retrieval teardown is confirmed, one judge vLLM loads on GPUs 0-3 with tensor parallel size 4 and judges all pending eval rows followed by all pending training rows
 - `rollout.overlap_judge: true` instead overlaps merged collection with judging: the collection-scoped retrieval worker starts first, the judge engine loads before the policy children and sizes its GPU budget around the resident retrieval footprint, streamed raw rows are judged as they complete, and the post-collection judge phase only catches rows the stream missed; this requires the judge and policy engines to fit in GPU memory simultaneously (disjoint `judge.gpu_ids`/`rollout.gpu_ids` or reduced `judge.gpu_memory_utilization`) and falls back to sequential judging if the judge worker fails to start
-- `evaluation` owns checkpoint-eval sampling independently from the GRPO rollout policy; its generator is constructed from the resolved evaluation profile instead of mutating the training generator
+- `rollout.extra_sampling_params` supplies backend sampling options for training and evaluation; `evaluation.extra_sampling_params` overrides individual options for checkpoint evaluation, whose generator is constructed from the resolved evaluation profile instead of mutating the training generator
 - raw and judged rollout rows record the resolved sampling profile and its SHA-256 ID; eval metrics copy that identity, and resume rejects eval artifacts produced by a different profile
 - `judge_step` remains the resume/fallback path when only raw rollout artifacts exist; it can use a different judge model from `judge.model_path` and writes judged rollouts with `turn_rewards`
 - `cache_step` preserves complete rollout-native v6 caches without loading a model; when fallback rescoring is required, a GPU-0 policy scorer starts only after the judge process exits. Resume preserves completed v6 rows and regenerates older cache versions as v6
@@ -355,6 +316,25 @@ For the intended GPU run:
 - iteration `N` evaluates checkpoint `N-1` before collecting the training batch for update `N`; eval artifacts and `eval_metrics.jsonl` retain the evaluated checkpoint's `N-1` label
 - after the last requested update, run `iteration_launcher --iteration N --eval-only --resume` to evaluate final checkpoint `N`, because there is no following training iteration to evaluate it
 - the launcher advances `latest` only after the next checkpoint is complete and vLLM-loadable
+
+The checked-in training and evaluation configs use Qwen3.5 thinking-mode
+sampling: BrowseComp uses temperature 1.0 and presence penalty 1.5; SWE-dev and
+Terminal-Bench use temperature 0.6 and presence penalty 0.0. Both presets enable
+sampling with top-p 0.95, top-k 20, min-p 0.0, and repetition penalty 1.0.
+These settings affect generation; training still uses raw policy logprobs.
+
+The default BrowseComp-Plus preset checks the 16,000-token threshold after each
+tool round. It allows four successful compactions and ends the rollout with
+reward 0 if another tool round reaches the threshold. The compaction limit
+disables the episode budgets that trigger forced answers.
+
+Initialize a fresh run's `latest` pointer to the starting policy with
+`write_latest_checkpoint`, then run the default preset with the wrapper.
+
+```bash
+scripts/train_iterations.sh --iterations 1 \
+  --latest-root artifacts/train/qwen-bcplus-native-compaction-train
+```
 
 The `scripts/train_iterations.sh` wrapper reads the config with all `--set`
 overrides and automatically enables value pretraining for a separate critic
@@ -372,7 +352,7 @@ pass `--set training.value_pretraining.enabled=false` explicitly. Direct
 ### Segment GAE with a categorical critic
 
 [`configs/train/compact_separate_gae_ppo.yaml`](configs/train/compact_separate_gae_ppo.yaml)
-uses the separate critic with 51 evenly spaced value bins on `[-1, 1]`,
+uses the separate critic with 51 evenly spaced value bins on `[0, 1]`,
 `gae_lambda: 0.95`, and undiscounted returns (`gamma = 1`). Each segment is one
 existing compaction interval. Its value is the probability-weighted mean of the
 bin supports, evaluated at the exact first-generation prompt boundary.
@@ -395,14 +375,19 @@ the updated critic and bind the frozen targets to the ordered collection.
 Retries restart fitting from the committed input critic and reuse verified
 frozen targets. Start a fresh experiment when changing head support, baseline
 timing, or estimator; ordinary resume rejects incompatible method changes.
-Historical two-class MC checkpoints remain supported by the original preset.
+Value checkpoints record their reward support. Start a fresh value run when
+switching from a signed-reward checkpoint. Existing judged token caches can be
+reused. Training reads historical failure labels of `-1` as `0`.
 
-Use the existing launcher with a fresh artifact root and the GAE preset:
+For a matched comparison with native-tool GRPO, initialize both runs from the
+same starting policy. Use a fresh GAE artifact directory and disable the
+wrapper's critic warmup so GAE uses the same rollout budget as the baseline.
 
 ```bash
 scripts/train_iterations.sh --iterations 1 \
-  --latest-root /path/to/separate-gae-run \
-  --config configs/train/compact_separate_gae_ppo.yaml
+  --latest-root artifacts/train/qwen-bcplus-native-compact-separate-gae-ppo \
+  --config configs/train/compact_separate_gae_ppo.yaml \
+  --set training.value_pretraining.enabled=false
 ```
 
 For matched controls, set `training.value.num_bins=2` on the GAE preset, or also
@@ -579,8 +564,7 @@ silently reinitializes it. An incomplete update restarts from the prior
 committed pair. Critic optimizer state persists across iterations; the actor
 retains the existing per-iteration optimizer reset behavior.
 
-The local Transformers actor and `verl_ray` Transformers/FSDP actor backends
-support this mode. Training consumes exact token caches and never truncates or
+The verl FSDP actor consumes exact token caches and never truncates or
 retokenizes interval histories. The existing read-only `evaluate_value` command
 also supports paired separate-critic checkpoints and loads only the small
 critic. Same-collection critic metrics remain labeled as training metrics.
@@ -605,7 +589,7 @@ Missing optional metrics remain gaps. Use `--artifacts-dir`, `--default-run`,
 
 [`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
 
-Both value backends exploit causal prefix equivalence for the frozen `V_old` pass and evaluate only through the exact state anchor. The Transformers compatibility backend additionally uses Qwen's `logits_to_keep` path to materialize vocabulary logits only for the state anchor and trainable assistant-token positions. The distributed backend uses verl's packed remove-padding/Ulysses log-probability path. The value-specific changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing loss path.
+The verl FSDP worker evaluates frozen `V_old` through the exact state anchor and uses verl’s packed remove-padding/Ulysses path for policy log probabilities. The value-specific changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing loss path.
 
 The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved in a `compaction_value/` sidecar subdirectory as `compaction_value/compaction_value_head.safetensors` plus `compaction_value/compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: verl_fsdp`. A repository-owned verl actor adds the shared-backbone value loss while the four FSDP/Ulysses ranks keep the exported policy namespace unchanged. Frozen values are evaluated from exact causal prefixes, and alignment padding is explicitly zero-weighted instead of dropping intervals. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
 
@@ -634,12 +618,6 @@ python -m self_summarization_agent.evaluate_value \
 
 Both query manifests are JSON arrays of string IDs and must cover the full intended splits, not just one collection batch. The evaluator rejects overlap and missing exact token evidence, records the generating policy separately from the evaluated checkpoint, and never calls an optimizer update or saves weights. Fixed outcome labels belong to the generating policy, so account for their staleness when evaluating later checkpoints. Compare against a constant predictor estimated from training outcomes; keep final policy evaluation separate.
 
-To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
-
-```powershell
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer
-```
-
 ### Qwen3.5 recurrent interval isolation
 
 All repository-owned verl FSDP actors (GRPO, shared value, and separate value) install
@@ -660,9 +638,9 @@ so its memory and runtime costs are higher than the incorrect shard-local path.
 This adapter supports the text-only, cache-free training path and rejects
 ambiguous packed position metadata.
 
-### Optional verl/Ray training backend
+### Policy training with verl FSDP
 
-The `training.backend: verl_ray` path is an optional infrastructure path for running the policy update through Ray while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray worker, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
+The iteration launcher uses `training.backend: verl_ray` and `training.verl.worker_backend: verl_fsdp`. The driver packs cached intervals into verl batches, dispatches them to the FSDP worker group, and exports the updated policy as a vLLM-loadable checkpoint. When updating an older training YAML, remove any `model.backend: transformers` line so the model inherits the vLLM default.
 
 Example override:
 
@@ -674,19 +652,93 @@ Useful `training.verl` knobs:
 
 - `address`: connect to an existing Ray cluster; leave unset for local Ray initialization inside the remote training job.
 - `num_gpus_per_worker`: GPU resources requested by the training actor; defaults to `len(training.gpu_ids)` or `training.data_parallel_size`.
-- `worker_backend`: `transformers` runs the compatibility Ray actor around the existing trainer; `verl_fsdp` uses official verl's Ray WorkerGroup plus `ActorRolloutRefWorker` for the policy update.
 - `fsdp`: native verl/FSDP knobs such as `strategy`, per-GPU microbatch/token limits, remove-padding, torch compile, Ulysses sequence parallelism, and CPU offload.
 - `shutdown_ray`: shuts down Ray after checkpoint save when the train step owns Ray initialization.
-
-Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel` or `transformers`.
 
 ## Notes
 
 - The summarization trigger is runtime-controlled, not model-controlled.
 - Summarization happens only after a completed tool round.
 - `runtime.generated_token_budget` limits `budget_consumed_tokens`: all model completion tokens, including thinking, actions, summaries, and forced answers, plus each raw appended tool result counted once. `total_generated_tokens` remains model-output-only for reporting. Budget exhaustion takes priority over compaction.
+- Set `runtime.max_compactions` to a nonnegative integer (for example, `--set runtime.max_compactions=2`) to disable tool and generated-token budgets and their forced answers. After that many successful compactions, reaching `runtime.context_threshold_tokens` after a tool round ends the rollout as `overlong` with reward 0 on every interval by default. Add `--set runtime.force_answer_at_compaction_limit=true` to request one final answer at that boundary and judge it normally. With `max_compactions=0`, this boundary applies to the initial interval.
+- To test voluntary stopping on BrowseComp, use a fresh output directory and add `--set benchmark.reward_profile=voluntary_stopping` to a force-answer training run, such as `configs/train/native_segment_gae_force_answer.yaml`. A judged correct answer earns 1 when submitted voluntarily and 0.9 when requested at the compaction cap. All failures earn 0. Every interval shares the rollout label, and both kinds of correct answer count fully toward evaluation accuracy. The profile supports GRPO and interval value training.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
 - `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template formats the initial system and user messages, including tool definitions and any carried summary. During the interval, the runtime appends generated tokens, tool results, and controls to the token ledger.
 - A successful compaction starts a fresh interval with the unchanged system instructions, unchanged original user request, and the latest `<summary>...</summary>`-wrapped compressed agent history; no raw assistant/tool tail is retained.
 - RL training data is produced as one sparse-masked sample per interval: action, tool-call, summary, and final-answer tokens are trainable, while tool results and runtime-control prompts are context-only.
-- Malformed tool calls terminate the rollout immediately and assign negative reward to every interval in that failed rollout.
+- Malformed tool calls terminate the rollout immediately and assign reward 0 to every interval.
+
+Token Monte Carlo critic for BrowseComp-Plus
+-------------------------------------------
+
+`configs/train/compact_separate_token_mc_ppo.yaml` adds `token_mc_value` with an
+independent Qwen3.5-0.8B causal critic and the existing Qwen3.5-9B actor/FSDP
+configuration. The benchmark remains `browsecomp`, with the fixed seed-zero
+730/100 question split and 50 training questions with four attempts per update.
+The two classes are ordered `[0, 1]`. The success-class probability estimates the
+final rollout reward immediately **before each sampled assistant token**.
+Every sampled token, including reasoning, tool syntax, summaries and sampled
+stop tokens, uses the same rollout outcome. Conditioning tokens have no loss.
+The training view consumes exact cached IDs and masks without changing any
+interval evidence or the token-cache version.
+
+Before critic fitting, the carried critic freezes `A = R - V_old` in float32.
+The actor uses these fixed token arrays for every PPO epoch. Critic cross-entropy
+averages tokens within each nonempty interval, intervals within a rollout, and
+rollouts within each optimizer minibatch. Empty intervals retain their evidence
+but have no critic target. Zero advantages still participate in actor accounting.
+The actor keeps its existing token reduction, clipping and behavior logprobs.
+
+The launcher automatically warms up the token critic using 50 training questions
+and four attempts, with a query-disjoint 40/10 fit/validation split. It selects the
+checkpoint with the best rollout/interval/token-weighted validation Brier score;
+the actor stays unchanged. Set `training.value_pretraining.enabled=false` for a
+cold critic. Interval GAE retains its existing interval-MC warmup.
+
+Token mode derives its anchor from the estimator: `before_each_sampled_token`.
+The legacy `training.value.state_anchor` default belongs to interval estimators;
+it does not select token granularity. Other anchor overrides are rejected.
+Token mode requires two bins, pre-fit timing, exact collection,
+all compaction tokens, and the `verl_fsdp` worker. Token and interval critic checkpoints and warmup
+artifacts cannot be interchanged, even when their heads have the same shape.
+
+Full intervals cost more critic compute than interval-start prefixes. The preset
+starts with fit/eval microbatch one, activation checkpointing, and a 27,000-token
+batching budget. Longer intervals are rejected at the training/model capacity;
+no context is truncated or split into independently conditioned windows.
+Frozen token values and advantages use a digest-checked safetensors shard and a
+version-three JSON manifest. Shards live under `token_values/` so vLLM never
+interprets them as actor weights. They are bound to the source critic, behavior checkpoint,
+tokenizer signature, method, and exact cached evidence. Retries reuse a validated
+frozen shard and restart fitting from the committed input actor/critic pair.
+
+Initialize a fresh run's `latest` pointer to the chosen base actor using the
+existing `write_latest_checkpoint` helper, then launch:
+
+```bash
+/124090467/self-summarization-agent/scripts/train_iterations.sh \
+  --iterations 1 \
+  --latest-root /124090467/self-summarization-agent/experiments/token-mc-bcplus \
+  --config /124090467/self-summarization-agent/configs/train/compact_separate_token_mc_ppo.yaml
+```
+
+The matched control is `configs/train/compact_separate_mc_prefit_control.yaml`:
+pre-fit, two-bin interval MC with the same backbone, optimizer, warmup budget,
+actor objective and data split. Use its separate output root and compare task
+success at matched generated-token budgets, reporting critic compute/memory
+separately. `compact_separate_token_mc_smoke.yaml` uses two training questions and
+shorter budgets solely for integration validation; it is not a benchmark result.
+
+Use the existing explicit `iteration_launcher --eval-only --iteration 1` flow to
+evaluate the final checkpoint with the same config and latest root. The separate
+`evaluate_value` command also supports frozen token predictions and reports
+weighted CE, Brier, calibration, explained variance, token counts and rollout
+counts. Research/tool, summary and final-answer strata use authoritative ledger
+spans and terminal metadata. Strata are marked unavailable when the training view
+has no authoritative token-span metadata. Greedy benchmark evaluation and
+sampling-policy calibration probes answer different questions; keep their query
+sets disjoint from warmup fitting and selection.
+
+Measured feasibility and release status are recorded in
+[`docs/token-mc-validation.md`](docs/token-mc-validation.md). A synthetic critic
+memory probe and CPU tests alone do not establish production actor support.

@@ -4,7 +4,6 @@ import argparse
 from dataclasses import replace
 import json
 import os
-import warnings
 import subprocess
 import sys
 import tempfile
@@ -22,11 +21,8 @@ from self_summarization_agent.separate_value import (
 from self_summarization_agent.config import load_train_config, parse_cli_overrides, config_to_dict
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.train_grpo import group_samples_by_query
-from self_summarization_agent.trainer import (
-    FSDP2ContextParallelPolicyTrainer,
-    TransformersPolicyTrainer,
-    _write_training_progress,
-)
+from self_summarization_agent.trainer import _write_training_progress
+from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
 from self_summarization_agent.rewards import BINARY_REWARD, validate_reward_profile
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
@@ -279,59 +275,33 @@ def run_train_step(
 
     if trainer is None:
         model_config = replace(config.model, model_path=str(checkpoint))
-        if config.training.backend == "verl_ray":
-            from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
+        # Shutdown any stale Ray instance from a previous failed run
+        # so orphaned actors don't hold GPU memory.
+        try:
+            import ray  # type: ignore[import-untyped]
+            if ray.is_initialized():
+                ray.shutdown()
+        except ImportError:
+            pass
 
-            # Shutdown any stale Ray instance from a previous failed run
-            # so orphaned actors don't hold GPU memory.
-            try:
-                import ray  # type: ignore[import-untyped]
-                if ray.is_initialized():
-                    ray.shutdown()
-            except ImportError:
-                pass
-
-            if config.training.gpu_ids:
-                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-                    str(gpu_id) for gpu_id in config.training.gpu_ids
-                )
-
-            # Release fragmented GPU memory from prior phases (FAISS
-            # embedding model, cache step, etc.) before the memory-
-            # intensive FSDP training phase begins.
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            trainer = VerlRayPolicyTrainer(
-                model_config,
-                config.training,
-                checkpoint_id=checkpoint_id,
-                progress_path=progress,
+        if config.training.gpu_ids:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                str(gpu_id) for gpu_id in config.training.gpu_ids
             )
-        elif config.training.backend == "fsdp2_context_parallel":
-            if config.training.value.enabled:
-                raise NotImplementedError(
-                    "Shared-backbone compaction value training is not implemented for "
-                    "fsdp2_context_parallel; use transformers or verl_ray/transformers."
-                )
-            if os.environ.get("RANK") is None:
-                warnings.warn(
-                    "training.backend='fsdp2_context_parallel' requires accelerate launch. "
-                    "Falling back to 'transformers' backend for single-process execution.",
-                    stacklevel=2,
-                )
-                trainer = TransformersPolicyTrainer(model_config, config.training, progress_path=progress)
-            else:
-                trainer = FSDP2ContextParallelPolicyTrainer(model_config, config.training)
-        elif config.training.backend == "transformers":
-            trainer = TransformersPolicyTrainer(model_config, config.training, progress_path=progress)
-        else:
-            raise NotImplementedError(
-                "The local environment cannot execute backend="
-                f"{config.training.backend!r}. Supported backends are 'transformers', "
-                "'fsdp2_context_parallel', and 'verl_ray'."
-            )
+
+        # Release fragmented GPU memory from prior phases (FAISS
+        # embedding model, cache step, etc.) before the memory-
+        # intensive FSDP training phase begins.
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        trainer = VerlRayPolicyTrainer(
+            model_config,
+            config.training,
+            checkpoint_id=checkpoint_id,
+            progress_path=progress,
+        )
 
     _write_training_progress(progress, "update_start", sample_count=len(samples), **diagnostics)
     if fixed_advantages is not None:

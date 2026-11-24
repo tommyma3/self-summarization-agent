@@ -6,6 +6,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from self_summarization_agent import iteration_launcher as launcher
 from self_summarization_agent import value_pretraining as core
@@ -16,7 +17,9 @@ from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
 from value_pretraining_fixtures import make_batch
 
 
-def test_reuse_skips_collection_and_completed_retry_skips_fitter(tmp_path):
+def test_reuse_skips_collection_and_completed_retry_skips_fitter(tmp_path, monkeypatch):
+    # The pretraining entry point sets the critic GPU mask inside its subprocess.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     batch = make_batch(tmp_path)
     batch.config.training.value_pretraining.reuse_rollouts_path = str(batch.path)
     output = tmp_path / 'warmup'
@@ -29,7 +32,9 @@ def test_reuse_skips_collection_and_completed_retry_skips_fitter(tmp_path):
         fitter=lambda *a, **k: pytest.fail('already complete')) == best
 
 
-def test_collect_exact_budget_no_eval_and_resume_forwarding(tmp_path):
+def test_collect_exact_budget_no_eval_and_resume_forwarding(tmp_path, monkeypatch):
+    # The pretraining entry point sets the critic GPU mask inside its subprocess.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     batch = make_batch(tmp_path)
     # Default production budget, but inject collection/fitting so no model work occurs.
     batch.config.training.value_pretraining = replace(batch.config.training.value_pretraining,
@@ -52,6 +57,12 @@ def test_collect_exact_budget_no_eval_and_resume_forwarding(tmp_path):
         with pytest.raises(RuntimeError, match='interrupted fitter'):
             step.run_value_pretraining(batch.config, checkpoint_path=batch.actor, output_path=output,
                 allowed_queries=allowed, command_runner=collect, fitter=fit, resume=resume)
+        if not resume:
+            # Previous vLLM presets named an unused model backend in this saved file.
+            collection_path = output / "collection_config.yaml"
+            saved = yaml.safe_load(collection_path.read_text())
+            saved["model"]["backend"] = "transformers"
+            collection_path.write_text(yaml.safe_dump(saved))
     assert '--resume' not in calls[0] and '--resume' in calls[1]
     assert batch.config.collection.train_task_count == 50
     assert batch.config.training.group_size == 4

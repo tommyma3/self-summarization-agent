@@ -65,7 +65,9 @@ runtime:
 judge:
   enabled: false
 training:
-  backend: transformers
+  backend: verl_ray
+  verl:
+    worker_backend: verl_fsdp
   max_sequence_length: 32768
   group_size: 4
   train_compaction_tokens: true

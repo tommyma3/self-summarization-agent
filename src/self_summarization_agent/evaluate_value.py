@@ -74,14 +74,8 @@ def evaluate_value_checkpoint(
     else:
         if config.training.gpu_ids:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, config.training.gpu_ids))
-        if config.training.backend == "transformers":
-            from self_summarization_agent.trainer import TransformersPolicyTrainer
-            trainer = TransformersPolicyTrainer(model_config, config.training)
-        elif config.training.backend == "verl_ray":
-            from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
-            trainer = VerlRayPolicyTrainer(model_config, config.training, checkpoint_id=checkpoint.name)
-        else:
-            raise ValueError("Critic evaluation supports transformers and verl_ray")
+        from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
+        trainer = VerlRayPolicyTrainer(model_config, config.training, checkpoint_id=checkpoint.name)
     try:
         values, losses = trainer.evaluate_compaction_values(
             samples, microbatch_size=config.training.gradient_accumulation_microbatch_size,

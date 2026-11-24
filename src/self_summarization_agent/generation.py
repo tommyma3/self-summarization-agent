@@ -9,15 +9,9 @@ import os
 import sys
 from typing import Any, Protocol
 
-import torch
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoTokenizer
 
-try:
-    from transformers import AutoModelForMultimodalLM
-except ImportError:
-    AutoModelForMultimodalLM = AutoModel  # type: ignore[misc,assignment]
-
-from self_summarization_agent.config import JudgeConfig, ModelConfig
+from self_summarization_agent.config import JudgeConfig, ModelConfig, OFFLINE_VLLM_BACKENDS, VLLM_SERVER_BACKENDS
 from self_summarization_agent.chat_template import configure_tokenizer_chat_template
 from self_summarization_agent.models import Message, ToolCall
 from self_summarization_agent.prompts import ConversationPrompt, serialize_messages
@@ -49,18 +43,6 @@ class GenerationResult:
     usage: dict[str, Any] | None = None
 
 
-def _resolve_torch_dtype(dtype_name: str):
-    mapping = {
-        "auto": "auto",
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }
-    if dtype_name not in mapping:
-        raise ValueError(f"Unsupported dtype: {dtype_name}")
-    return mapping[dtype_name]
-
-
 def _native_routing_message(raw: str, prompt_ids: list[int], completion_ids: list[int], *, thinking: bool) -> Message | None:
     call_id = "call_" + sha256(json.dumps([prompt_ids, completion_ids]).encode()).hexdigest()[:24]
     return parse_native_completion(raw, require_thinking_close=thinking, call_id=call_id)
@@ -76,122 +58,6 @@ class TokenInputGenerator:
     def create_token_renderer(self) -> QwenAgentTokenRenderer:
         return QwenAgentTokenRenderer(self.tokenizer, enable_thinking=self.enable_thinking,
                                      native_tools=bool(getattr(self, "supports_native_tools", False)))
-
-
-@dataclass(slots=True)
-class TransformersGenerator(TokenInputGenerator):
-    model_path: str
-    max_new_tokens: int
-    temperature: float
-    top_p: float
-    do_sample: bool
-    sampling_extra: dict[str, Any] = field(default_factory=dict)
-    dtype: str = "auto"
-    device_map: str = "auto"
-    trust_remote_code: bool = False
-    enable_thinking: bool = False
-    chat_template_path: str | None = None
-    require_exact_token_ids: bool = True
-    max_model_len: int | None = None
-    tokenizer: Any = field(init=False)
-    model: Any = field(init=False)
-
-    def __post_init__(self) -> None:
-        torch_dtype = _resolve_torch_dtype(self.dtype)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_path,
-            trust_remote_code=self.trust_remote_code,
-        )
-        configure_tokenizer_chat_template(self.tokenizer, self.chat_template_path)
-        if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        self.model = _load_transformers_model(
-            self.model_path,
-            torch_dtype=torch_dtype,
-            device_map=self.device_map,
-            trust_remote_code=self.trust_remote_code,
-        )
-        self.model.eval()
-
-    def count_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=False))
-
-    def count_prompt_tokens(self, prompt: str) -> int:
-        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
-
-    def _format_prompt(self, prompt: str) -> str:
-        if not getattr(self.tokenizer, "chat_template", None):
-            return prompt
-        if isinstance(prompt, ConversationPrompt):
-            messages = serialize_messages(prompt.messages)
-        else:
-            messages = [{"role": "user", "content": prompt}]
-        try:
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=self.enable_thinking,
-            )
-        except TypeError:
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-
-    def generate(self, prompt: str) -> str:
-        encoded = self.tokenizer(self._format_prompt(prompt), return_tensors="pt")
-        encoded = {name: tensor.to(self.model.device) for name, tensor in encoded.items()}
-        generation_kwargs = {
-            "max_new_tokens": self.max_new_tokens,
-            "do_sample": self.do_sample,
-            "pad_token_id": self.tokenizer.pad_token_id,
-        }
-        if self.do_sample:
-            generation_kwargs["temperature"] = self.temperature
-            generation_kwargs["top_p"] = self.top_p
-            generation_kwargs.update(self.sampling_extra)
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                **encoded,
-                **generation_kwargs,
-            )
-        generated_ids = output_ids[0, encoded["input_ids"].shape[1] :]
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-    def generate_batch(self, prompts: list[str]) -> list[str]:
-        return [self.generate(prompt) for prompt in prompts]
-
-    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
-        results = []
-        for request in requests:
-            inputs = torch.tensor([request.prompt_token_ids], dtype=torch.long, device=self.model.device)
-            cap = request.max_new_tokens or self.max_new_tokens
-            # Some Qwen checkpoints set the model EOS to endoftext. Stop at
-            # the sampled chat boundary as well, without slicing the completion.
-            turn_end = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-            eos = self.model.generation_config.eos_token_id
-            stop_ids = list(eos) if isinstance(eos, (list, tuple)) else ([eos] if eos is not None else [])
-            if turn_end is not None and self.tokenizer.convert_ids_to_tokens(turn_end) == "<|im_end|>" and turn_end not in stop_ids:
-                stop_ids.append(turn_end)
-            kwargs = dict(max_new_tokens=cap, do_sample=self.do_sample,
-                          pad_token_id=self.tokenizer.pad_token_id)
-            if stop_ids:
-                kwargs["eos_token_id"] = stop_ids
-            if self.do_sample:
-                extra = self.sampling_extra.copy()
-                if extra.get("presence_penalty") == 0:
-                    del extra["presence_penalty"]  # vLLM's neutral default has no HF equivalent.
-                kwargs.update(temperature=self.temperature, top_p=self.top_p, **extra)
-            with torch.inference_mode():
-                output = self.model.generate(input_ids=inputs, attention_mask=torch.ones_like(inputs), **kwargs)
-            ids = output[0, inputs.shape[1]:].tolist()
-            results.append(GenerationResult(
-                text=self.tokenizer.decode(ids, skip_special_tokens=False),
-                prompt_token_ids=list(request.prompt_token_ids), completion_token_ids=ids,
-                finish_reason="stop" if ids and ids[-1] == self.tokenizer.convert_tokens_to_ids("<|im_end|>") else "length"))
-        return results
 
 
 def _object_payload(value: Any) -> dict[str, Any]:
@@ -744,194 +610,6 @@ class VLLMGenerator(TokenInputGenerator):
         return results
 
 
-@dataclass(slots=True)
-class SGLangGenerator(TokenInputGenerator):
-    model_path: str
-    max_new_tokens: int
-    temperature: float
-    top_p: float
-    do_sample: bool
-    sampling_extra: dict[str, Any] = field(default_factory=dict)
-    dtype: str = "auto"
-    tensor_parallel_size: int = 1
-    attention_backend: str | None = None
-    max_model_len: int | None = None
-    trust_remote_code: bool = False
-    enable_thinking: bool = False
-    chat_template_path: str | None = None
-    require_exact_token_ids: bool = True
-    tokenizer: Any = field(init=False)
-    engine: Any = field(init=False)
-
-    def __post_init__(self) -> None:
-        try:
-            import sglang as sgl
-        except ImportError as exc:
-            raise ImportError(
-                "SGLang is not installed. Install it in the remote environment to use backend='sglang'."
-            ) from exc
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_path,
-            trust_remote_code=self.trust_remote_code,
-        )
-        configure_tokenizer_chat_template(self.tokenizer, self.chat_template_path)
-        engine_kwargs = {
-            "model_path": self.model_path,
-            "dtype": self.dtype,
-            "tp_size": self.tensor_parallel_size,
-            "attention_backend": self.attention_backend,
-            "context_length": self.max_model_len,
-            "trust_remote_code": self.trust_remote_code,
-        }
-        self.engine = sgl.Engine(**{key: value for key, value in engine_kwargs.items() if value is not None})
-
-    def count_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=False))
-
-    def count_prompt_tokens(self, prompt: str) -> int:
-        return len(self.tokenizer.encode(self._format_prompt(prompt), add_special_tokens=False))
-
-    def _format_prompt(self, prompt: str) -> str:
-        if not getattr(self.tokenizer, "chat_template", None):
-            return prompt
-        if isinstance(prompt, ConversationPrompt):
-            messages = []
-            for message in prompt.messages:
-                item: dict[str, Any] = {"role": message.role, "content": message.content}
-                if message.reasoning_content is not None:
-                    item["reasoning_content"] = message.reasoning_content
-                if message.tool_calls:
-                    item["tool_calls"] = [
-                        {
-                            "id": tool_call.id,
-                            "type": tool_call.type,
-                            "function": {
-                                "name": tool_call.name,
-                                "arguments": tool_call.arguments,
-                            },
-                        }
-                        for tool_call in message.tool_calls
-                    ]
-                if message.tool_call_id is not None:
-                    item["tool_call_id"] = message.tool_call_id
-                messages.append(item)
-        else:
-            messages = [{"role": "user", "content": prompt}]
-        try:
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=self.enable_thinking,
-            )
-        except TypeError:
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-
-    def generate(self, prompt: str) -> str:
-        outputs = self.generate_batch([prompt])
-        return outputs[0] if outputs else ""
-
-    def _sampling_params(self) -> dict[str, Any]:
-        sampling_params = {
-            "max_new_tokens": self.max_new_tokens,
-            "temperature": self.temperature if self.do_sample else 0.0,
-        }
-        if self.do_sample:
-            sampling_params["top_p"] = self.top_p
-            sampling_params.update(self.sampling_extra)
-        return sampling_params
-
-    def _generate_outputs(self, prompts: list[str], *, return_logprob: bool = False) -> list[dict[str, Any]]:
-        if not prompts:
-            return []
-        outputs = self.engine.generate(
-            prompts,
-            self._sampling_params(),
-            return_logprob=return_logprob,
-        )
-        return outputs if isinstance(outputs, list) else [outputs]
-
-    def generate_batch(self, prompts: list[str]) -> list[str]:
-        formatted_prompts = [self._format_prompt(prompt) for prompt in prompts]
-        return [str(output.get("text") or "") for output in self._generate_outputs(formatted_prompts)]
-
-    def generate_batch_with_metadata(self, prompts: list[str]) -> list[GenerationResult]:
-        formatted_prompts = [self._format_prompt(prompt) for prompt in prompts]
-        outputs = self._generate_outputs(formatted_prompts, return_logprob=True)
-        completions: list[GenerationResult] = []
-        for prompt, output in zip(formatted_prompts, outputs):
-            completion_token_ids, token_logprobs = _extract_sglang_completion_logprobs(output)
-            completions.append(
-                GenerationResult(
-                    text=str(output.get("text") or ""),
-                    prompt_token_ids=list(self.tokenizer.encode(prompt, add_special_tokens=False)),
-                    completion_token_ids=completion_token_ids,
-                    cumulative_logprob=sum(token_logprobs) if token_logprobs is not None else None,
-                    token_logprobs=token_logprobs,
-                )
-            )
-        return completions
-
-    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
-        if not requests:
-            return []
-        outputs = self.engine.generate(input_ids=[list(r.prompt_token_ids) for r in requests],
-                                       sampling_params=[{**self._sampling_params(),
-                                                         **({"regex": r.response_regex} if r.response_regex else {}),
-                                                         "max_new_tokens": r.max_new_tokens or self.max_new_tokens}
-                                                        for r in requests], return_logprob=True)
-        outputs = outputs if isinstance(outputs, list) else [outputs]
-        if len(outputs) != len(requests):
-            raise RuntimeError("SGLang returned the wrong number of token generations")
-        results = []
-        for request, output in zip(requests, outputs):
-            ids, logprobs = _extract_sglang_completion_logprobs(output)
-            if ids is None:
-                raise RuntimeError("SGLang did not return exact sampled token IDs")
-            meta = output.get("meta_info") or {}
-            echoed = meta.get("input_token_ids")
-            if echoed is not None and list(echoed) != list(request.prompt_token_ids):
-                raise RuntimeError("SGLang changed the submitted token prompt")
-            reason = meta.get("finish_reason") or {}
-            results.append(GenerationResult(
-                text=self.tokenizer.decode(ids, skip_special_tokens=False),
-                prompt_token_ids=list(request.prompt_token_ids), completion_token_ids=ids,
-                token_logprobs=logprobs,  # Rescore: SGLang raw-policy provenance is not assumed.
-                finish_reason=reason.get("type") if isinstance(reason, dict) else str(reason)))
-        return results
-
-
-def _extract_sglang_completion_logprobs(output: Any) -> tuple[list[int] | None, list[float] | None]:
-    if not isinstance(output, dict):
-        return None, None
-    meta_info = output.get("meta_info")
-    if not isinstance(meta_info, dict):
-        return None, None
-    raw_logprobs = meta_info.get("output_token_logprobs")
-    if not isinstance(raw_logprobs, list):
-        return None, None
-    token_ids: list[int] = []
-    logprobs: list[float] = []
-    for item in raw_logprobs:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
-            return None, None
-        logprob, token_id = item[0], item[1]
-        if (
-            not isinstance(logprob, (int, float))
-            or isinstance(logprob, bool)
-            or not isinstance(token_id, int)
-            or isinstance(token_id, bool)
-        ):
-            return None, None
-        logprobs.append(float(logprob))
-        token_ids.append(token_id)
-    return token_ids, logprobs
-
-
 def _extract_completion_token_logprobs(completion: Any) -> list[float] | None:
     token_ids = getattr(completion, "token_ids", None)
     raw_logprobs = getattr(completion, "logprobs", None)
@@ -993,23 +671,7 @@ def build_generator(
         if judge_config and judge_config.max_model_len is not None
         else model_config.max_model_len
     )
-    if backend_name == "transformers":
-        return TransformersGenerator(
-            model_path=model_path,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=do_sample,
-            sampling_extra=sampling_extra,
-            dtype=model_config.dtype,
-            device_map=model_config.device_map,
-            trust_remote_code=model_config.trust_remote_code,
-            enable_thinking=model_config.enable_thinking,
-            chat_template_path=model_config.chat_template_path,
-            max_model_len=max_model_len,
-            require_exact_token_ids=model_config.require_exact_token_ids,
-        )
-    if backend_name in {"vllm", "vllm_offline"}:
+    if backend_name in OFFLINE_VLLM_BACKENDS:
         return VLLMGenerator(
             model_path=model_path,
             engine_seed=engine_seed,
@@ -1030,24 +692,7 @@ def build_generator(
             require_exact_token_ids=model_config.require_exact_token_ids,
             gpu_memory_utilization=model_config.gpu_memory_utilization,
         )
-    if backend_name in {"sglang", "sglang_offline"}:
-        return SGLangGenerator(
-            model_path=model_path,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=do_sample,
-            sampling_extra=sampling_extra,
-            dtype=model_config.dtype,
-            tensor_parallel_size=tensor_parallel_size,
-            attention_backend=attention_backend,
-            max_model_len=max_model_len,
-            trust_remote_code=model_config.trust_remote_code,
-            enable_thinking=model_config.enable_thinking,
-            chat_template_path=model_config.chat_template_path,
-            require_exact_token_ids=model_config.require_exact_token_ids,
-        )
-    if backend_name in {"openai", "openai_compatible", "openai-compatible"}:
+    if backend_name in VLLM_SERVER_BACKENDS:
         if not model_config.api_base_url:
             raise ValueError("model.api_base_url is required for backend='openai_compatible'")
         return OpenAICompatibleGenerator(
@@ -1069,19 +714,4 @@ def build_generator(
             enable_thinking=model_config.enable_thinking,
             chat_template_path=model_config.chat_template_path,
         )
-    raise ValueError(f"Unsupported model backend: {model_config.backend}")
-
-
-def _load_transformers_model(
-    model_path: str,
-    *,
-    torch_dtype: Any,
-    device_map: str,
-    trust_remote_code: bool,
-) -> Any:
-    return AutoModelForMultimodalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch_dtype,
-        device_map=device_map,
-        trust_remote_code=trust_remote_code,
-    )
+    raise ValueError(f"Unsupported model backend: {backend_name}")

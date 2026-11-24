@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field
 import math
 import shutil
 import time
@@ -15,7 +15,6 @@ from self_summarization_agent.config import ModelConfig, TrainingConfig
 from self_summarization_agent.trainer import (
     _write_training_progress,
     _validate_grpo_training_config,
-    TransformersPolicyTrainer,
     UpdateMetrics,
     _metrics_without_update,
     _prepare_policy_batch,
@@ -31,9 +30,6 @@ from self_summarization_agent.token_value import validate_token_advantages, adva
 from self_summarization_agent.separate_value import validate_samples, validate_advantages
 
 
-SUPPORTED_VERL_WORKER_BACKENDS = {"transformers", "verl_fsdp"}
-
-
 def _require_verl_ray():
     try:
         import numpy as np
@@ -41,9 +37,7 @@ def _require_verl_ray():
         from verl import DataProto
     except ImportError as exc:
         raise ImportError(
-            "training.backend='verl_ray' requires the optional verl dependencies. "
-            "Install them with `uv sync --extra verl` or install SkillZero/verl and ray "
-            "in the remote GPU environment."
+            "Policy training requires verl and Ray. Install the project dependencies with `uv sync --locked`."
         ) from exc
     return np, ray, DataProto
 
@@ -57,7 +51,7 @@ def _require_verl_worker_group():
     except ImportError as exc:
         raise ImportError(
             "training.verl.worker_backend='verl_fsdp' requires official verl worker-group dependencies. "
-            "Install them in the remote GPU environment with `uv sync --extra verl --group dev`."
+            "Install them in the remote GPU environment with `uv sync --locked`."
         ) from exc
     return OmegaConf, RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ActorRolloutRefWorker, ray
 
@@ -80,114 +74,11 @@ def _mean_metric(metrics: dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
-def _pad_cached_sequences(
-    samples: list[RLSample],
-    max_sequence_length: int | None = None,
-) -> dict[str, torch.Tensor]:
-    if not samples:
-        return {
-            "input_ids": torch.empty((0, 0), dtype=torch.long),
-            "labels": torch.empty((0, 0), dtype=torch.long),
-            "completion_mask": torch.empty((0, 0), dtype=torch.bool),
-            "reference_logprobs": torch.empty((0,), dtype=torch.float32),
-            "token_reference_logprobs": torch.empty((0, 0), dtype=torch.float32),
-            "rewards": torch.empty((0,), dtype=torch.float32),
-            "sequence_lengths": torch.empty((0,), dtype=torch.long),
-            "state_prefix_lengths": torch.empty((0,), dtype=torch.long),
-        }
-    # Interval prefixes always contain the invariant system instructions and
-    # must never be silently removed by left truncation.
-    if max_sequence_length is not None:
-        for sample in samples:
-            sample_len = len(sample.input_ids or [])
-            if sample_len > max_sequence_length:
-                raise ValueError(
-                    f"Interval {sample.turn_id} exceeds training.max_sequence_length: "
-                    f"{sample_len} > {max_sequence_length}; interval prefixes are never left-truncated"
-                )
-    lengths = [len(sample.input_ids or []) for sample in samples]
-    max_length = max(lengths)
-    input_ids = torch.zeros((len(samples), max_length), dtype=torch.long)
-    labels = torch.zeros((len(samples), max_length), dtype=torch.long)
-    completion_mask = torch.zeros((len(samples), max_length), dtype=torch.bool)
-    reference_logprobs = torch.empty((len(samples),), dtype=torch.float32)
-    token_reference_logprobs = torch.zeros((len(samples), max_length), dtype=torch.float32)
-    rewards = torch.empty((len(samples),), dtype=torch.float32)
-    sequence_lengths = torch.tensor(lengths, dtype=torch.long)
-    state_prefix_lengths = torch.tensor(
-        [int(sample.state_prefix_length or 0) for sample in samples], dtype=torch.long
-    )
-    for index, sample in enumerate(samples):
-        length = lengths[index]
-        input_ids[index, :length] = torch.tensor(sample.input_ids or [], dtype=torch.long)
-        labels[index, :length] = torch.tensor(sample.labels or [], dtype=torch.long)
-        completion_mask[index, :length] = torch.tensor(sample.completion_mask or [], dtype=torch.bool)
-        reference_logprobs[index] = float(sample.reference_logprob)
-        if sample.reference_logprobs is not None:
-            if len(sample.reference_logprobs) != length:
-                raise ValueError(f"Sample {sample.turn_id} has misaligned token reference logprobs")
-            token_reference_logprobs[index, :length] = torch.tensor(
-                sample.reference_logprobs, dtype=torch.float32
-            )
-        else:
-            token_reference_logprobs[index, :length] = torch.where(
-                completion_mask[index, :length],
-                torch.full((length,), float(sample.reference_logprob), dtype=torch.float32),
-                torch.zeros((length,), dtype=torch.float32),
-            )
-        rewards[index] = float(sample.reward)
-    return {
-        "input_ids": input_ids,
-        "labels": labels,
-        "completion_mask": completion_mask,
-        "reference_logprobs": reference_logprobs,
-        "token_reference_logprobs": token_reference_logprobs,
-        "rewards": rewards,
-        "sequence_lengths": sequence_lengths,
-        "state_prefix_lengths": state_prefix_lengths,
-    }
-
-
 def _flatten_grouped_samples(grouped_samples: dict[str, list[RLSample]]) -> list[RLSample]:
     flat_samples: list[RLSample] = []
     for samples in grouped_samples.values():
         flat_samples.extend(samples)
     return flat_samples
-
-
-def build_verl_dataproto(
-    grouped_samples: dict[str, list[RLSample]],
-    *,
-    checkpoint_id: str,
-    max_sequence_length: int | None = None,
-):
-    np, _ray, DataProto = _require_verl_ray()
-    flat_samples = _flatten_grouped_samples(grouped_samples)
-    for sample in flat_samples:
-        if not sample.has_training_cache:
-            raise ValueError(f"Sample {sample.turn_id} is missing training cache")
-    tensors = _pad_cached_sequences(flat_samples, max_sequence_length=max_sequence_length)
-    total_tokens = int(tensors["sequence_lengths"].sum().item()) if flat_samples else 0
-    non_tensors = {
-        "query_ids": np.array([sample.query_id for sample in flat_samples], dtype=object),
-        "turn_ids": np.array([sample.turn_id for sample in flat_samples], dtype=object),
-        "trainable_kinds": np.array([sample.trainable_kind for sample in flat_samples], dtype=object),
-        "rollout_ids": np.array([sample.rollout_id for sample in flat_samples], dtype=object),
-        "state_kinds": np.array([sample.state_kind for sample in flat_samples], dtype=object),
-    }
-    return DataProto.from_single_dict(
-        {
-            **tensors,
-            **non_tensors,
-        },
-        meta_info={
-            "policy_checkpoint_id": checkpoint_id,
-            "query_count": len(grouped_samples),
-            "sample_count": len(flat_samples),
-            "total_tokens": total_tokens,
-            "max_sequence_length": max((len(sample.input_ids or []) for sample in flat_samples), default=0),
-        },
-    )
 
 
 def build_verl_actor_dataproto(
@@ -550,57 +441,6 @@ def build_verl_value_actor_dataproto(
     )
 
 
-def grouped_samples_from_verl_dataproto(batch: Any) -> dict[str, list[RLSample]]:
-    grouped: dict[str, list[RLSample]] = {}
-    tensors = batch.batch
-    query_ids = batch.non_tensor_batch["query_ids"]
-    turn_ids = batch.non_tensor_batch["turn_ids"]
-    kinds = batch.non_tensor_batch["trainable_kinds"]
-    rollout_ids = batch.non_tensor_batch.get("rollout_ids", [None] * len(batch))
-    state_kinds = batch.non_tensor_batch.get("state_kinds", ["unknown"] * len(batch))
-    for index in range(len(batch)):
-        length = int(tensors["sequence_lengths"][index].item())
-        sample = RLSample(
-            query_id=str(query_ids[index]),
-            turn_id=str(turn_ids[index]),
-            prompt="",
-            completion="",
-            reward=float(tensors["rewards"][index].item()),
-            trainable_kind=str(kinds[index]),
-            rollout_id=None if rollout_ids[index] is None else str(rollout_ids[index]),
-            input_ids=[int(value) for value in tensors["input_ids"][index, :length].tolist()],
-            labels=[int(value) for value in tensors["labels"][index, :length].tolist()],
-            completion_mask=[bool(value) for value in tensors["completion_mask"][index, :length].tolist()],
-            reference_logprob=float(tensors["reference_logprobs"][index].item()),
-            reference_logprobs=[
-                float(value)
-                for value in tensors["token_reference_logprobs"][index, :length].tolist()
-            ],
-            state_prefix_length=int(tensors["state_prefix_lengths"][index].item()),
-            state_kind=str(state_kinds[index]),
-        )
-        grouped.setdefault(sample.query_id, []).append(sample)
-    return grouped
-
-
-def _metrics_to_dict(metrics: UpdateMetrics) -> dict[str, Any]:
-    return asdict(metrics)
-
-
-def _metrics_from_dict(payload: dict[str, Any]) -> UpdateMetrics:
-    known = {
-        "sample_count",
-        "mean_reward",
-        "mean_advantage",
-        "loss",
-        "optimizer_step_count",
-        "mean_policy_kl",
-        "clip_fraction",
-        "extra_metrics",
-    }
-    return UpdateMetrics(**{key: value for key, value in payload.items() if key in known})
-
-
 def _verl_dtype(model_config: ModelConfig) -> str:
     if model_config.dtype in {"bfloat16", "float16"}:
         return model_config.dtype
@@ -950,57 +790,6 @@ def _promote_huggingface_checkpoint(output_path: Path) -> None:
             shutil.copy2(child, target)
 
 
-class _VerlRayTrainerActor:
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        training_config: TrainingConfig,
-        progress_path: str | None = None,
-    ):
-        worker_backend = training_config.verl.worker_backend
-        if worker_backend != "transformers":
-            raise ValueError(
-                "_VerlRayTrainerActor supports only training.verl.worker_backend='transformers'. "
-                f"Got {worker_backend!r}."
-            )
-        self.trainer = TransformersPolicyTrainer(
-            model_config,
-            replace(training_config, backend=worker_backend),
-            progress_path=progress_path,
-        )
-
-    def evaluate_compaction_values(self, samples, microbatch_size):
-        return self.trainer.evaluate_compaction_values(samples, microbatch_size=microbatch_size)
-
-    def ready(self) -> dict[str, str]:
-        return {"status": "ready", "worker_backend": "transformers"}
-
-    def step_fixed(self, grouped_samples, fixed_advantages):
-        return _metrics_to_dict(self.trainer.step(grouped_samples, fixed_advantages=fixed_advantages))
-
-    def step(self, batch: Any) -> dict[str, Any]:
-        grouped_samples = grouped_samples_from_verl_dataproto(batch)
-        print(
-            f"[VerlRayTrainerActor] Starting update for {sum(len(group) for group in grouped_samples.values())} states",
-            flush=True,
-        )
-        started = time.monotonic()
-        metrics = _metrics_to_dict(self.trainer.step(grouped_samples))
-        metrics.setdefault("extra_metrics", {})
-        metrics["extra_metrics"].update(
-            {
-                "verl_ray/update_seconds": time.monotonic() - started,
-                "verl_ray/worker_backend": "transformers",
-            }
-        )
-        return metrics
-
-    def save_checkpoint(self, path: str) -> None:
-        print(f"[VerlRayTrainerActor] Saving checkpoint to {path}", flush=True)
-        self.trainer.save_checkpoint(path)
-        print(f"[VerlRayTrainerActor] Finished saving checkpoint to {path}", flush=True)
-
-
 @dataclass(slots=True)
 class _PpoMinibatchLoopResult:
     loss: float
@@ -1023,8 +812,7 @@ class VerlRayPolicyTrainer:
     checkpoint_id: str
     progress_path: str | None = None
     _ray: Any = field(init=False, repr=False)
-    _actor: Any = field(default=None, init=False, repr=False)
-    _worker_group: VerlFSDPWorkerGroup | None = field(default=None, init=False, repr=False)
+    _worker_group: VerlFSDPWorkerGroup = field(init=False, repr=False)
     _owns_ray: bool = field(init=False, repr=False)
     _last_batch_meta: dict[str, Any] = field(default_factory=dict, init=False)
 
@@ -1048,48 +836,19 @@ class VerlRayPolicyTrainer:
             print("[VerlRayPolicyTrainer] Initializing local Ray runtime", flush=True)
             ray.init(**init_kwargs)
 
-        worker_backend = self.training_config.verl.worker_backend
-        if worker_backend not in SUPPORTED_VERL_WORKER_BACKENDS:
-            raise ValueError(
-                "training.verl.worker_backend must be one of "
-                f"{sorted(SUPPORTED_VERL_WORKER_BACKENDS)}, got {worker_backend!r}."
-            )
-        if worker_backend == "verl_fsdp":
-            self._worker_group = VerlFSDPWorkerGroup(self.model_config, self.training_config)
-            return
-
-        num_gpus = self.training_config.verl.num_gpus_per_worker
-        if num_gpus is None:
-            num_gpus = float(len(self.training_config.gpu_ids) or self.training_config.data_parallel_size or 1)
-        actor_options: dict[str, Any] = {"num_gpus": num_gpus}
-        if self.training_config.verl.num_cpus is not None:
-            actor_options["num_cpus"] = self.training_config.verl.num_cpus
-        remote_cls = ray.remote(**actor_options)(_VerlRayTrainerActor)
-        print(
-            f"[VerlRayPolicyTrainer] Starting Transformers actor with num_gpus={num_gpus}",
-            flush=True,
-        )
-        actor_started = time.monotonic()
-        self._actor = remote_cls.remote(self.model_config, self.training_config, self.progress_path)
-        ready = self._ray.get(self._actor.ready.remote())
-        print(
-            f"[VerlRayPolicyTrainer] Actor ready after {time.monotonic() - actor_started:.1f}s: {ready}",
-            flush=True,
-        )
+        self._worker_group = VerlFSDPWorkerGroup(self.model_config, self.training_config)
 
     def evaluate_compaction_values(self, samples, *, microbatch_size: int):
         """Evaluate exact critic prefixes without updating or saving a checkpoint."""
         if not self.training_config.value.enabled:
             raise ValueError("Critic evaluation requires training.value.enabled")
-        if self.training_config.verl.worker_backend == "verl_fsdp":
-            batch = build_verl_value_probe_dataproto(
-                samples, checkpoint_id=self.checkpoint_id,
-                alignment=self._worker_group.data_parallel_size,
-                max_sequence_length=self.training_config.max_sequence_length,
-                reward_profile=self.training_config.value.reward_profile,
-            )
-            return self._worker_group.evaluate_compaction_values(batch)
-        return self._ray.get(self._actor.evaluate_compaction_values.remote(samples, microbatch_size))
+        batch = build_verl_value_probe_dataproto(
+            samples, checkpoint_id=self.checkpoint_id,
+            alignment=self._worker_group.data_parallel_size,
+            max_sequence_length=self.training_config.max_sequence_length,
+            reward_profile=self.training_config.value.reward_profile,
+        )
+        return self._worker_group.evaluate_compaction_values(batch)
 
     def _step_compaction_value_fsdp(
         self,
@@ -1099,7 +858,6 @@ class VerlRayPolicyTrainer:
         if not samples:
             return UpdateMetrics(sample_count=0, mean_reward=0.0, mean_advantage=0.0, loss=0.0)
         _validate_compaction_value_samples(samples, self.training_config.value.reward_profile)
-        assert self._worker_group is not None
 
         probe_batch = build_verl_value_probe_dataproto(
             samples,
@@ -1243,7 +1001,6 @@ class VerlRayPolicyTrainer:
         One optimizer minibatch per RPC enables KL stopping without
         replacing the fixed behavior probabilities between epochs.
         """
-        assert self._worker_group is not None
         size = self.training_config.minibatch_size or len(contributing)
         weighted_loss = weighted_kl = weighted_clip = 0.0
         total_tokens = train_tokens = 0
@@ -1374,8 +1131,6 @@ class VerlRayPolicyTrainer:
         advantages = (validate_token_advantages(samples, fixed_advantages)
                 if self.training_config.advantage_estimator == "token_mc_value" else
                 validate_advantages(samples, fixed_advantages, self.training_config.value.reward_profile))
-        if self.training_config.verl.worker_backend != "verl_fsdp":
-            return _metrics_from_dict(self._ray.get(self._actor.step_fixed.remote(grouped_samples, fixed_advantages)))
         contributing = [(s, a) for s, a in zip(samples, advantages) if any(s.completion_mask)]
         metrics = UpdateMetrics(sample_count=len(samples),
             mean_reward=sum(s.reward for s in samples) / max(1, len(samples)),
@@ -1406,51 +1161,18 @@ class VerlRayPolicyTrainer:
             return self._step_fixed(grouped_samples, fixed_advantages)
         if fixed_advantages is not None:
             raise ValueError("Fixed advantages require separate critic mode")
-        if self.training_config.verl.worker_backend == "verl_fsdp":
-            if self.training_config.value.enabled:
-                return self._step_compaction_value_fsdp(grouped_samples)
-            return self._step_grpo_fsdp(grouped_samples)
-
-        batch = build_verl_dataproto(
-            grouped_samples,
-            checkpoint_id=self.checkpoint_id,
-            max_sequence_length=self.training_config.max_sequence_length,
-        )
-        self._last_batch_meta = dict(batch.meta_info)
-        print(
-            "[VerlRayPolicyTrainer] Dispatching update: "
-            f"samples={self._last_batch_meta.get('sample_count', 0)}, "
-            f"total_tokens={self._last_batch_meta.get('total_tokens', 0)}, "
-            f"max_sequence_length={self._last_batch_meta.get('max_sequence_length', 0)}",
-            flush=True,
-        )
-        started = time.monotonic()
-        metrics_payload = self._ray.get(self._actor.step.remote(batch))
-        metrics = _metrics_from_dict(metrics_payload)
-        metrics.extra_metrics.update(
-            {
-                "backend": "verl_ray",
-                "verl_ray/driver_roundtrip_seconds": time.monotonic() - started,
-                "verl_ray/query_count": self._last_batch_meta.get("query_count", 0),
-                "verl_ray/sample_count": self._last_batch_meta.get("sample_count", 0),
-                "verl_ray/total_tokens": self._last_batch_meta.get("total_tokens", 0),
-                "verl_ray/max_sequence_length": self._last_batch_meta.get("max_sequence_length", 0),
-            }
-        )
-        return metrics
+        if self.training_config.value.enabled:
+            return self._step_compaction_value_fsdp(grouped_samples)
+        return self._step_grpo_fsdp(grouped_samples)
 
     def save_checkpoint(self, path: str) -> None:
         output_path = Path(path)
         output_path.mkdir(parents=True, exist_ok=True)
-        if self.training_config.verl.worker_backend == "verl_fsdp":
-            assert self._worker_group is not None
-            started = time.monotonic()
-            self._worker_group.save_checkpoint(str(output_path))
-            _promote_huggingface_checkpoint(output_path)
-            self._last_batch_meta["verl_fsdp/checkpoint_export_seconds"] = time.monotonic() - started
-        else:
-            print(f"[VerlRayPolicyTrainer] Requesting checkpoint save to {output_path}", flush=True)
-            self._ray.get(self._actor.save_checkpoint.remote(str(output_path)))
+        started = time.monotonic()
+        self._worker_group.save_checkpoint(str(output_path))
+        _promote_huggingface_checkpoint(output_path)
+        self._last_batch_meta["verl_fsdp/checkpoint_export_seconds"] = time.monotonic() - started
+
         if self.training_config.verl.shutdown_ray and self._owns_ray:
             print("[VerlRayPolicyTrainer] Shutting down Ray", flush=True)
             self._ray.shutdown()

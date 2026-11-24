@@ -76,8 +76,13 @@ def _run(config, actor, output, resume, command_runner, fitter, allowed_queries)
                                     training=replace(config.training, group_size=settings.samples_per_task))
         collection_path = output / "collection_config.yaml"
         content = yaml.safe_dump(config_to_dict(collection_config), sort_keys=False)
-        if collection_path.exists() and config_to_dict(load_train_config(collection_path)) != config_to_dict(collection_config):
-            raise ValueError("Pretraining collection configuration changed")
+        if collection_path.exists():
+            # Saved collection configs include a model.backend placeholder. When the
+            # judge has its own backend, rollout and judge both select engines explicitly.
+            overrides = {"model.backend": config.model.backend} if config.judge.backend else {}
+            saved = load_train_config(collection_path, overrides)
+            if config_to_dict(saved) != config_to_dict(collection_config):
+                raise ValueError("Pretraining collection configuration changed")
         collection_path.write_text(content)
         rollouts = output / "rollouts.cached.jsonl"
         command = [sys.executable, "-m", "self_summarization_agent.merged_collect_step",

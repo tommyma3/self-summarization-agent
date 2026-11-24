@@ -12,11 +12,9 @@ from self_summarization_agent.verl_ray_trainer import (
     _extract_compaction_value_rows,
     _extract_worker_metrics,
     build_verl_actor_dataproto,
-    build_verl_dataproto,
     build_verl_fsdp_worker_config,
     build_verl_value_actor_dataproto,
     build_verl_value_probe_dataproto,
-    grouped_samples_from_verl_dataproto,
 )
 
 
@@ -140,20 +138,6 @@ def test_verl_actor_batch_zero_masks_alignment_padding(monkeypatch) -> None:
     assert batch.meta_info["train_tokens"] == 4
 
 
-def test_transformers_ray_batch_preserves_token_reference_logprobs(monkeypatch) -> None:
-    patch_fake_dataproto(monkeypatch)
-    interval = sample("trajectory-1", 1.0, -0.5)
-    interval.rollout_id = "q1:0"
-    interval.state_prefix_length = 1
-
-    batch = build_verl_dataproto({"q1": [interval]}, checkpoint_id="step-00001")
-    restored = grouped_samples_from_verl_dataproto(batch)["q1"][0]
-
-    assert restored.reference_logprobs == interval.reference_logprobs
-    assert restored.rollout_id == "q1:0"
-    assert restored.state_prefix_length == 1
-
-
 def test_verl_value_batches_preserve_prefix_and_zero_weight_alignment_padding(monkeypatch) -> None:
     patch_fake_dataproto(monkeypatch)
     first = sample("trajectory-1", 1.0, -0.5)
@@ -215,7 +199,6 @@ def test_verl_fsdp_step_uses_native_worker_group(monkeypatch, tmp_path: Path) ->
     trainer.training_config = training_config
     trainer.checkpoint_id = "step-00001"
     trainer._ray = None
-    trainer._actor = None
     trainer._worker_group = fake_worker
     trainer._owns_ray = False
     trainer._last_batch_meta = {}
@@ -254,7 +237,6 @@ def test_grpo_fsdp_step_keeps_zero_variance_group_traces(monkeypatch, tmp_path: 
     trainer.training_config = training_config
     trainer.checkpoint_id = "step-00001"
     trainer._ray = None
-    trainer._actor = None
     trainer._worker_group = fake_worker
     trainer._owns_ray = False
     trainer._last_batch_meta = {}
@@ -300,7 +282,6 @@ def test_grpo_fsdp_step_pads_minibatches_without_dropping_traces(monkeypatch, tm
     trainer.training_config = training_config
     trainer.checkpoint_id = "step-00001"
     trainer._ray = None
-    trainer._actor = None
     trainer._worker_group = fake_worker
     trainer._owns_ray = False
     trainer._last_batch_meta = {}
@@ -370,7 +351,6 @@ def test_verl_fsdp_value_step_uses_frozen_values_and_zero_weight_padding(monkeyp
     trainer.training_config = training_config
     trainer.checkpoint_id = "step-00001"
     trainer._ray = None
-    trainer._actor = None
     trainer._worker_group = fake_worker
     trainer._owns_ray = False
     trainer._last_batch_meta = {}
@@ -509,7 +489,6 @@ def test_verl_fsdp_value_step_reduces_worker_metric_payloads(monkeypatch, tmp_pa
     trainer.training_config = training_config
     trainer.checkpoint_id = "step-00001"
     trainer._ray = None
-    trainer._actor = None
     trainer._worker_group = FakeMetricWorkerGroup()
     trainer._owns_ray = False
     trainer._last_batch_meta = {}

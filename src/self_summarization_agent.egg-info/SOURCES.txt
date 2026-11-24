@@ -3,6 +3,7 @@ pyproject.toml
 src/self_summarization_agent/__init__.py
 src/self_summarization_agent/backend.py
 src/self_summarization_agent/bcplus_backend.py
+src/self_summarization_agent/cache_scorer.py
 src/self_summarization_agent/cache_step.py
 src/self_summarization_agent/chat_template.py
 src/self_summarization_agent/checkpoints.py
@@ -36,7 +37,6 @@ src/self_summarization_agent/separate_value_trainer.py
 src/self_summarization_agent/token_renderer.py
 src/self_summarization_agent/token_stream.py
 src/self_summarization_agent/train_grpo.py
-src/self_summarization_agent/train_launcher.py
 src/self_summarization_agent/train_step.py
 src/self_summarization_agent/trainer.py
 src/self_summarization_agent/trajectory.py
@@ -82,7 +82,6 @@ tests/test_eval_metrics.py
 tests/test_evaluate_value.py
 tests/test_export.py
 tests/test_generation.py
-tests/test_generation_transformers.py
 tests/test_iteration_launcher.py
 tests/test_judge.py
 tests/test_judge_step.py

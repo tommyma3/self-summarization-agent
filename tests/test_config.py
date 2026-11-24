@@ -1,6 +1,8 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from self_summarization_agent.config import (
     CompactionValueConfig,
     TrainingConfig,
@@ -37,7 +39,7 @@ def test_compaction_mc_value_config_is_opt_in_and_validated(tmp_path: Path) -> N
 experiment: {name: demo, seed: 0, output_root: output, bc_plus_root: bc-plus}
 dataset: {}
 retrieval: {backend: faiss, index_path: index}
-model: {backend: transformers, model_path: model}
+model: {backend: vllm_offline, model_path: model}
 runtime: {context_threshold_tokens: 32, max_context_tokens: 64, tool_budget: 4}
 judge: {enabled: true}
 training:
@@ -74,7 +76,7 @@ def test_exact_token_ceiling_rejects_underpowered_training_cap(tmp_path: Path) -
 experiment: {name: demo, seed: 0, output_root: output, bc_plus_root: bc-plus}
 dataset: {}
 retrieval: {backend: faiss, index_path: index}
-model: {backend: transformers, model_path: model}
+model: {backend: vllm_offline, model_path: model}
 runtime: {context_threshold_tokens: 12000, max_context_tokens: 28000}
 judge: {enabled: true}
 rollout:
@@ -104,7 +106,7 @@ def test_exact_token_ceiling_accepts_aligned_training_cap(tmp_path: Path) -> Non
 experiment: {name: demo, seed: 0, output_root: output, bc_plus_root: bc-plus}
 dataset: {}
 retrieval: {backend: faiss, index_path: index}
-model: {backend: transformers, model_path: model}
+model: {backend: vllm_offline, model_path: model}
 runtime: {context_threshold_tokens: 12000, max_context_tokens: 28000}
 judge: {enabled: true}
 rollout:
@@ -139,7 +141,7 @@ retrieval:
   gpu_ids: [6]
   index_path: indexes/corpus.pkl
 model:
-  backend: transformers
+  backend: vllm_offline
   model_path: model-dir
 rollout:
   backend: vllm_offline
@@ -190,7 +192,7 @@ retrieval:
   snippet_tokenizer_path: /models/qwen-tokenizer
   index_path: indexes/corpus.pkl
 model:
-  backend: transformers
+  backend: vllm_offline
   model_path: model-dir
 runtime:
   context_threshold_tokens: 32
@@ -215,8 +217,12 @@ evaluation:
   extra_sampling_params:
     top_k: 20
     presence_penalty: 1.5
+rollout:
+  gpu_ids: [0, 1, 2, 3]
+  tensor_parallel_size: 4
+  max_model_len: 65536
 training:
-  backend: fsdp2_context_parallel
+  backend: verl_ray
   gpu_ids: [0, 1, 2, 3]
   fsdp_version: 2
   context_parallel_size: 4
@@ -265,7 +271,7 @@ training:
     assert config.judge.gpu_ids == [4, 5]
     assert config.judge.tensor_parallel_size == 2
     assert config.judge.max_model_len == 8192
-    assert config.training.backend == "fsdp2_context_parallel"
+    assert config.training.backend == "verl_ray"
     assert config.training.context_parallel_size == 4
 
 
@@ -283,7 +289,7 @@ retrieval:
   backend: faiss
   index_path: indexes/corpus.pkl
 model:
-  backend: transformers
+  backend: vllm_offline
   model_path: model-dir
 runtime:
   context_threshold_tokens: 32
@@ -493,3 +499,18 @@ def test_load_compact_24k_training_preset() -> None:
         * config.training.verl.fsdp.ulysses_sequence_parallel_size
         >= config.training.max_sequence_length
     )
+
+
+@pytest.mark.parametrize(("key", "backend"), [
+    ("model.backend", "transformers"),
+    ("rollout.backend", "transformers"),
+    ("rollout.backend", "sglang"),
+    ("rollout.backend", "sglang_offline"),
+    ("judge.backend", "sglang"),
+    ("training.backend", "transformers"),
+    ("training.backend", "fsdp2_context_parallel"),
+    ("training.verl.worker_backend", "transformers"),
+])
+def test_retired_backends_rejected_at_config_load(key, backend):
+    with pytest.raises(ValueError, match=key):
+        load_train_config("configs/train/default.yaml", {key: backend})

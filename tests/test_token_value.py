@@ -34,7 +34,6 @@ from self_summarization_agent.token_value_artifacts import (
     read_shard,
     validate_token_frozen,
 )
-from self_summarization_agent.trainer import _clipped_grpo_token_losses
 from self_summarization_agent.trajectory import RLSample
 
 
@@ -219,26 +218,6 @@ def test_fit_microbatch_partition_and_empty_intervals(critic):
     assert m["value/optimizer_step_count"] == 0
 
 
-def test_ppo_distinct_token_advantages_and_scalar_equivalence():
-    logp = torch.tensor([[0.1, -0.2, 0.3], [0.4, -0.5, 0.6]], requires_grad=True)
-    old = torch.zeros_like(logp)
-    mask = torch.tensor([[1, 0, 1], [1, 1, 0]])
-    a = torch.tensor([[1.0, 0.0, -1.0], [-0.5, 1.5, 0.0]])
-    loss, *_ = _clipped_grpo_token_losses(logp, old, a, mask, clip_range=0.2)
-    expected = -torch.minimum(logp.exp() * a, logp.exp().clamp(0.8, 1.2) * a) * mask
-    torch.testing.assert_close(loss, expected)
-    torch.testing.assert_close(
-        torch.autograd.grad(loss.sum(), logp, retain_graph=True)[0],
-        torch.autograd.grad(expected.sum(), logp)[0],
-    )
-    scalar = torch.tensor([0.4, -0.6])
-    x = _clipped_grpo_token_losses(logp, old, scalar, mask, clip_range=0.2)[0]
-    y = _clipped_grpo_token_losses(
-        logp, old, scalar[:, None].expand_as(logp), mask, clip_range=0.2
-    )[0]
-    torch.testing.assert_close(x, y)
-
-
 def test_frozen_shard_retry_and_corruption(critic, tmp_path):
     data = [sample(), sample("b", "0", 0)]
     values, _ = critic.evaluate(data)
@@ -292,62 +271,6 @@ def test_explicit_advantages_and_diagnostics():
     assert m["v/rollout_count"] == 2 and m["v/token_count"] == 6
     assert m["v/ce"] == pytest.approx(0.3)
     assert m["v/weight_sum"] == pytest.approx(1)
-
-
-def test_transformers_actor_token_update_and_resume(critic, monkeypatch, tmp_path):
-    from transformers import GPT2LMHeadModel
-
-    from self_summarization_agent import trainer as module
-    from self_summarization_agent.config import ModelConfig
-    from self_summarization_agent.trainer import TransformersPolicyTrainer
-
-    monkeypatch.setattr(
-        module.AutoModelForMultimodalLM,
-        "from_pretrained",
-        lambda *a, **kw: GPT2LMHeadModel(critic.model.config),
-    )
-    monkeypatch.setattr(module, "configure_tokenizer_chat_template", lambda *a: None)
-    cfg = TrainingConfig(
-        advantage_estimator="token_mc_value",
-        value=critic.config,
-        update_epochs=2,
-        minibatch_size=2,
-        learning_rate=0.001,
-        max_sequence_length=32,
-    )
-    torch.manual_seed(42)
-    a = TransformersPolicyTrainer(
-        ModelConfig(model_path=critic.source, dtype="float32", device_map=None), cfg
-    )
-    torch.manual_seed(42)
-    b = TransformersPolicyTrainer(
-        ModelConfig(model_path=critic.source, dtype="float32", device_map=None),
-        replace(cfg, gradient_accumulation_microbatch_size=2),
-    )
-    data = [sample(), sample("b", "0", 0)]
-    fixed = {
-        sample_key(s): TokenAdvantages(token_positions(s), (1.0, -1.0, 0.0))
-        for s in data
-    }
-    before = deepcopy(data)
-    metrics = a.step({"q": data}, fixed_advantages=fixed)
-    b.step({"q": data}, fixed_advantages=fixed)
-    assert metrics.optimizer_step_count == 2 and data == before
-    assert metrics.mean_advantage == pytest.approx(0.0)
-    for x, y in zip(a.model.parameters(), b.model.parameters()):
-        torch.testing.assert_close(x, y, atol=2e-6, rtol=1e-5)
-    output = tmp_path / "saved"
-    critic.save(output, "saved")
-    with pytest.raises(ValueError, match="method"):
-        SeparateValueTrainer(
-            output,
-            critic.source,
-            critic.config,
-            dtype="float32",
-            device="cpu",
-            resume=True,
-            advantage_estimator="compaction_mc_value",
-        )
 
 
 def test_real_verl_dataproto_alignment():

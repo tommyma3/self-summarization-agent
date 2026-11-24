@@ -37,21 +37,17 @@ def validate_checkpoint(path, config):
             expected["template"] = previous["template"]
         if previous != expected:
             raise ValueError("SWE checkpoint reward/method/task/runtime contract changed")
-        native = config.training.backend == "verl_ray" and config.training.verl.worker_backend == "verl_fsdp"
-        if native:
-            marker = path / "swe_actor_optimizer.json"
-            if not marker.is_file():
-                raise ValueError("SWE checkpoint missing native actor optimizer identity")
-            state = json.loads(marker.read_text())
-            world = state.get("world_size")
-            if (state.get("version") != 1 or state.get("reward_profile") != "binary_zero_one"
-                    or type(world) is not int or world < 1):
-                raise ValueError("Invalid SWE actor optimizer identity")
-            if not all((path / f"{kind}_world_size_{world}_rank_{rank}.pt").is_file()
-                       for rank in range(world) for kind in ("model", "optim", "extra_state")):
-                raise ValueError("SWE checkpoint missing native optimizer/model/RNG shards")
-        elif not (path / "actor_training_state.pt").is_file():
-            raise ValueError("SWE checkpoint missing persistent actor optimizer state")
+        marker = path / "swe_actor_optimizer.json"
+        if not marker.is_file():
+            raise ValueError("SWE checkpoint missing native actor optimizer identity")
+        state = json.loads(marker.read_text())
+        world = state.get("world_size")
+        if (state.get("version") != 1 or state.get("reward_profile") != "binary_zero_one"
+                or type(world) is not int or world < 1):
+            raise ValueError("Invalid SWE actor optimizer identity")
+        if not all((path / f"{kind}_world_size_{world}_rank_{rank}.pt").is_file()
+                   for rank in range(world) for kind in ("model", "optim", "extra_state")):
+            raise ValueError("SWE checkpoint missing native optimizer/model/RNG shards")
     elif (path / ".complete").exists() and path.name != "iteration-00000":
         raise ValueError("SWE resume requires its training contract; use a fresh backbone initialization")
 

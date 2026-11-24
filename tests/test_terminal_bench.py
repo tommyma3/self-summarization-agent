@@ -395,13 +395,11 @@ def test_verification_script_accepts_tool_schema_and_checks_full_successor_state
     assert check(records, model.tokenizer) == []
 
 
-@pytest.mark.parametrize("value_mode", [False, True])
-def test_terminal_intervals_rescore_and_update_both_rl_objectives(value_mode):
+def test_terminal_intervals_rescore_exact_tokens():
     import torch
     from self_summarization_agent.generation import GenerationResult
-    from self_summarization_agent.config import ModelConfig, TrainingConfig, CompactionValueConfig
-    from self_summarization_agent.trainer import TransformersPolicyTrainer
-    from self_summarization_agent.value_model import CompactionValueHead
+    from self_summarization_agent.config import ModelConfig
+    from self_summarization_agent.cache_scorer import PolicyCacheScorer
     from self_summarization_agent.cache_step import _attach_training_caches
 
     class CompactTokenizer(Tokenizer):
@@ -454,30 +452,14 @@ def test_terminal_intervals_rescore_and_update_both_rl_objectives(value_mode):
             selected = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
             return SimpleNamespace(logits=self.lm_head(hidden[:, selected]))
 
-    trainer = TransformersPolicyTrainer.__new__(TransformersPolicyTrainer)
-    trainer.model = TinyPolicy()
-    trainer.tokenizer = SimpleNamespace(pad_token_id=0)  # No tokenization fallback exists.
-    trainer.model_config = ModelConfig(model_path="unused")
-    trainer.training_config = TrainingConfig(update_epochs=1, minibatch_size=4,
-        gradient_accumulation_microbatch_size=1, target_kl=None,
-        advantage_estimator="compaction_mc_value" if value_mode else "group_relative",
-        value=CompactionValueConfig(enabled=value_mode))
-    trainer.value_head = CompactionValueHead(4, zero_initialize=True) if value_mode else None
-    trainer.value_head_loaded = False
-    parameters = list(trainer.model.parameters()) + (list(trainer.value_head.parameters()) if value_mode else [])
-    trainer.optimizer = torch.optim.SGD(parameters, lr=0.01)
+    scorer = PolicyCacheScorer.__new__(PolicyCacheScorer)
+    scorer.model = TinyPolicy()
+    scorer.tokenizer = SimpleNamespace(pad_token_id=0)  # No tokenization fallback exists.
+    scorer.model_config = ModelConfig(model_path="unused")
+    scorer.max_sequence_length = None
     samples = extract_trainable_samples(row["trajectory_records"], row["turn_rewards"], rollout_id="task:0")
-    caches = trainer.cache_samples(samples)
+    caches = scorer.cache_samples(samples)
     row = _attach_training_caches(row, cache_payloads=caches, checkpoint_id="tiny")
     samples = extract_trainable_samples(row["trajectory_records"], row["turn_rewards"], rollout_id="task:0")
-    negative = deepcopy(samples[0])
-    negative.rollout_id, negative.reward = "task:1", 0.0
-    samples.append(negative)
-    before = [p.detach().clone() for p in parameters]
-    metrics = trainer.step({"task": samples})
-    assert metrics.sample_count == 4 and metrics.optimizer_step_count == 1
-    assert any(not torch.equal(a, b) for a, b in zip(before, parameters))
-    assert all(torch.isfinite(p).all() for p in parameters)
-    if value_mode:
-        assert metrics.extra_metrics["value/state_count"] == 4
-        assert metrics.extra_metrics["value/rollout_count"] == 2
+    assert len(samples) == 3
+    assert all(sample.has_training_cache for sample in samples)

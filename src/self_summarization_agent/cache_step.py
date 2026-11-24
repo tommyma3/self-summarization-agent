@@ -3,15 +3,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import json
-import os
 from pathlib import Path
 from typing import Any
-import warnings
 
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
-from self_summarization_agent.config import CompactionValueConfig, load_train_config, parse_cli_overrides
+from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
-from self_summarization_agent.trainer import FSDP2ContextParallelPolicyTrainer, TransformersPolicyTrainer
+from self_summarization_agent.cache_scorer import PolicyCacheScorer
 from self_summarization_agent.rewards import artifact_reward_profile, validate_reward_profile
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
@@ -292,65 +290,10 @@ def _attach_training_caches(
     return cached_row
 
 
-def _cache_training_config(config):
-    if config.training.backend != "verl_ray":
-        return config.training
-    worker_backend = config.training.verl.worker_backend
-    if worker_backend == "transformers":
-        return replace(config.training, backend=worker_backend)
-    if worker_backend == "verl_fsdp":
-        return replace(config.training, backend="transformers")
-    raise NotImplementedError(
-        "training.backend='verl_ray' cache scoring currently supports only "
-        "training.verl.worker_backend='transformers' or 'verl_fsdp'. "
-        f"Got {worker_backend!r}."
-    )
-
-
-def build_cache_scorer(config, *, checkpoint_path: str | Path):
-    checkpoint = Path(checkpoint_path).resolve()
-    model_config = replace(config.model, model_path=str(checkpoint))
-    training_config = _cache_training_config(config)
-    # Cache scoring only needs reference logprobs; the value head is unused and
-    # adds an unnecessary sidecar dependency.
-    scoring_config = replace(
-        training_config,
-        value=CompactionValueConfig(),
-        advantage_estimator="group_relative",
-    )
-    if scoring_config.backend == "fsdp2_context_parallel":
-        if os.environ.get("RANK") is None:
-            warnings.warn(
-                "training.backend='fsdp2_context_parallel' requires accelerate launch. "
-                "Falling back to 'transformers' backend for single-process cache scoring.",
-                stacklevel=2,
-            )
-            return TransformersPolicyTrainer(
-                model_config, replace(scoring_config, backend="transformers")
-            )
-        return FSDP2ContextParallelPolicyTrainer(model_config, scoring_config)
-    if scoring_config.backend == "transformers":
-        return TransformersPolicyTrainer(model_config, scoring_config)
-    raise NotImplementedError(
-        "The local environment cannot execute backend="
-        f"{config.training.backend!r}. Supported backends are 'transformers', "
-        "'fsdp2_context_parallel', and 'verl_ray'."
-    )
-
-
-def _is_main_process(scorer: Any) -> bool:
-    accelerator = getattr(scorer, "accelerator", None)
-    if accelerator is not None:
-        return bool(getattr(accelerator, "is_main_process", True))
-    return int(os.environ.get("RANK", "0")) == 0
-
-
-def _wait_for_everyone(scorer: Any) -> None:
-    accelerator = getattr(scorer, "accelerator", None)
-    if accelerator is not None:
-        wait_for_everyone = getattr(accelerator, "wait_for_everyone", None)
-        if wait_for_everyone is not None:
-            wait_for_everyone()
+def build_cache_scorer(config, *, checkpoint_path: str | Path) -> PolicyCacheScorer:
+    model_config = replace(config.model, model_path=str(Path(checkpoint_path).resolve()),
+                           require_exact_token_ids=config.rollout.require_exact_token_ids)
+    return PolicyCacheScorer(model_config, config.training.max_sequence_length)
 
 
 def run_cache_step(
@@ -436,8 +379,7 @@ def run_cache_step(
             train_compaction_tokens=config.training.train_compaction_tokens,
             retain_critic_only_states=config.training.value.enabled,
         ):
-            if _is_main_process(active_scorer):
-                append_jsonl(output, cache_candidate)
+            append_jsonl(output, cache_candidate)
             continue
         if active_scorer is None:
             active_scorer = build_cache_scorer(config, checkpoint_path=checkpoint)
@@ -451,10 +393,7 @@ def run_cache_step(
             train_compaction_tokens=config.training.train_compaction_tokens,
             retain_critic_only_states=config.training.value.enabled,
         )
-        if _is_main_process(active_scorer):
-            append_jsonl(output, cached_row)
-    if active_scorer is not None:
-        _wait_for_everyone(active_scorer)
+        append_jsonl(output, cached_row)
     return output
 
 

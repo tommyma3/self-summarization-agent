@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import GPT2Config, GPT2Model, GPT2LMHeadModel, PreTrainedTokenizerFast
+from transformers import GPT2Config, GPT2Model, PreTrainedTokenizerFast
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 
@@ -16,7 +16,7 @@ from self_summarization_agent.separate_value import (
 )
 from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
 from self_summarization_agent.trajectory import RLSample
-from self_summarization_agent.trainer import TransformersPolicyTrainer
+from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
 
 
 def samples():
@@ -60,7 +60,7 @@ def test_config_preset_and_compatibility():
         CompactionValueConfig(enabled=True, architecture="separate")
     with pytest.raises(ValueError, match="shared-mode-only"):
         CompactionValueConfig(enabled=True, architecture="separate", model_path="x", loss_coefficient=0.1)
-    with pytest.raises(ValueError, match="supports"):
+    with pytest.raises(ValueError, match="verl_ray"):
         TrainingConfig(backend="fsdp2_context_parallel", advantage_estimator="compaction_mc_value", value=config.training.value)
 
 
@@ -139,50 +139,6 @@ def test_rollout_weighting_matches_reference(tiny):
         torch.testing.assert_close(a, b)
 
 
-def make_actor(tiny, monkeypatch, microbatch=1):
-    from self_summarization_agent import trainer as module
-    path, config, value = tiny
-    torch.manual_seed(9)
-    monkeypatch.setattr(module.AutoModelForMultimodalLM, "from_pretrained", lambda *a, **kw: GPT2LMHeadModel(config))
-    monkeypatch.setattr(module, "configure_tokenizer_chat_template", lambda *a: None)
-    training = TrainingConfig(advantage_estimator="compaction_mc_value", value=value,
-        update_epochs=2, minibatch_size=3, gradient_accumulation_microbatch_size=microbatch,
-        learning_rate=0.001, max_sequence_length=16)
-    return TransformersPolicyTrainer(ModelConfig(model_path=str(path), dtype="float32", device_map=None), training)
-
-
-def test_actor_fixed_advantages_and_accumulation(tiny, monkeypatch):
-    a = make_actor(tiny, monkeypatch)
-    b = make_actor(tiny, monkeypatch, microbatch=3)
-    data = samples()
-    data[0].completion_mask = [True, True, True]
-    data[0].collection_assistant_token_mask = [False, True, True, True]
-    before = deepcopy(data)
-    advantages = {sample_key(s): s.reward - 0.2 for s in data}
-    assert a.value_head is None
-    with pytest.raises(ValueError, match="fitted advantages"):
-        a.step({"q": data})
-    metrics = a.step({"q": data}, fixed_advantages=advantages)
-    b.step({"q": data}, fixed_advantages=advantages)
-    assert metrics.optimizer_step_count == 2
-    assert metrics.mean_advantage == pytest.approx(sum(advantages.values()) / 3)
-    assert data == before
-    for x, y in zip(a.model.parameters(), b.model.parameters()):
-        torch.testing.assert_close(x, y, atol=2e-6, rtol=1e-5)
-
-
-def test_actor_same_reward_and_critic_only(tiny, monkeypatch):
-    actor = make_actor(tiny, monkeypatch)
-    data = samples()
-    for sample in data:
-        sample.reward = 1.
-    data[0].completion_mask = [False] * 3
-    data[0].collection_assistant_token_mask = [False] * 4
-    metrics = actor.step({"q": data}, fixed_advantages={sample_key(s): 0.7 for s in data})
-    assert metrics.optimizer_step_count == 2
-    assert metrics.sample_count == 3
-
-
 def test_tokenizer_mismatch(tiny, tmp_path):
     path, config, value = tiny
     other = tmp_path / "other"
@@ -217,8 +173,30 @@ def test_fixed_artifact_provenance(tiny, tmp_path):
         load_advantages(target, data, "base", tiny[2])
 
 
+class FixtureWorkerGroup:
+    data_parallel_size = 1
+
+    def __init__(self, model_config, training_config):
+        self.checkpoint = Path(model_config.model_path)
+
+    def update_actor(self, batch):
+        return {"actor/pg_loss": 0.3, "actor/ppo_kl": 0.01, "actor/pg_clipfrac": 0.2}
+
+    def save_checkpoint(self, output):
+        from shutil import copy2
+        for filename in ("model.safetensors", "config.json", "tokenizer.json", "tokenizer_config.json"):
+            copy2(self.checkpoint / filename, Path(output) / filename)
+
+
+def patch_fsdp_driver(monkeypatch):
+    from self_summarization_agent import verl_ray_trainer
+    np, _, proto = verl_ray_trainer._require_verl_ray()
+    ray = SimpleNamespace(is_initialized=lambda: True)
+    monkeypatch.setattr(verl_ray_trainer, "_require_verl_ray", lambda: (np, ray, proto))
+    monkeypatch.setattr(verl_ray_trainer, "VerlFSDPWorkerGroup", FixtureWorkerGroup)
+
+
 def test_fsdp_fixed_batches_keep_rows_and_old_logprobs(tiny):
-    from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
     data = samples()
     calls = []
     class Group:
@@ -286,7 +264,6 @@ def test_two_iteration_orchestration_uses_post_fit_values(tiny, tmp_path, monkey
     import json
     from self_summarization_agent import train_step, critic_step
     from self_summarization_agent import separate_value_trainer as value_module
-    from self_summarization_agent.trainer import UpdateMetrics
     from self_summarization_agent.separate_value import ADVANTAGES, load_advantages
     path, _, value = tiny
     config = load_train_config("configs/train/compact_separate_mc_ppo.yaml")
@@ -306,11 +283,8 @@ def test_two_iteration_orchestration_uses_post_fit_values(tiny, tmp_path, monkey
                         args["output"], args["output-id"], args.get("progress"))
     monkeypatch.setattr(train_step.subprocess, "run", subprocess_run)
     failures = []
-    from self_summarization_agent import trainer as actor_module
-    monkeypatch.setattr(actor_module.AutoModelForMultimodalLM, "from_pretrained",
-                        lambda source, **kw: GPT2LMHeadModel.from_pretrained(source))
-    monkeypatch.setattr(actor_module, "configure_tokenizer_chat_template", lambda *a: None)
-    class Actor(TransformersPolicyTrainer):
+    patch_fsdp_driver(monkeypatch)
+    class Actor(VerlRayPolicyTrainer):
         def __init__(self, model_config, training_config, **kw):
             assert order[-1] == "critic"
             super().__init__(model_config, training_config, **kw)
@@ -327,7 +301,7 @@ def test_two_iteration_orchestration_uses_post_fit_values(tiny, tmp_path, monkey
                 failures.append("save")
                 raise RuntimeError("injected save failure")
             super().save_checkpoint(output)
-    monkeypatch.setattr(train_step, "TransformersPolicyTrainer", Actor)
+    monkeypatch.setattr(train_step, "VerlRayPolicyTrainer", Actor)
     rollouts = tmp_path / "rollouts.jsonl"
     rollouts.write_text("{}\n")
     for iteration in (1, 2):
@@ -366,7 +340,7 @@ def test_resume_rejects_uncommitted_pair(tiny, tmp_path):
 
 
 @pytest.mark.parametrize("compactions,malformed", [(0, False), (1, False), (2, False), (1, True)])
-def test_runtime_intervals_remain_immutable_during_fixed_update(compactions, malformed):
+def test_runtime_intervals_remain_immutable_during_fixed_update(compactions, malformed, monkeypatch):
     # Reuse the exact-token runtime fixture: its tokenizer rejects history re-encoding.
     from test_tito import TokenModel, runtime, SEARCH, SUMMARY, FINISH
     from self_summarization_agent.trajectory import build_rollout_native_training_cache, extract_training_samples
@@ -381,19 +355,10 @@ def test_runtime_intervals_remain_immutable_during_fixed_update(compactions, mal
     data = extract_training_samples(result.trajectory_records, rewards, rollout_id="q:0")
     assert len(data) == (1 if malformed else compactions + 1)
     before = deepcopy((result.trajectory_records, data))
-    class TokenOnlyActor(TransformersPolicyTrainer):
-        def _sequence_token_logprobs_and_mask(self, samples):
-            assert len(samples) == 1
-            s = samples[0]
-            return self.model.weight.expand(1, len(s.input_ids)), torch.tensor([s.completion_mask])
-        def _model_device(self):
-            return torch.device("cpu")
-    actor = TokenOnlyActor.__new__(TokenOnlyActor)
-    actor.training_config = TrainingConfig(advantage_estimator="compaction_mc_value",
+    patch_fsdp_driver(monkeypatch)
+    actor = VerlRayPolicyTrainer(ModelConfig(), TrainingConfig(advantage_estimator="compaction_mc_value",
         value=CompactionValueConfig(enabled=True, architecture="separate", model_path="unused"),
-        update_epochs=2, minibatch_size=2)
-    actor.model = torch.nn.Linear(1, 1, bias=False)
-    actor.optimizer = torch.optim.SGD(actor.model.parameters(), lr=0.01)
+        update_epochs=2, minibatch_size=2), checkpoint_id="base")
     metrics = actor.step({"q": data}, fixed_advantages={sample_key(s): s.reward - 0.1 for s in data})
     assert metrics.optimizer_step_count >= 2
     assert (result.trajectory_records, data) == before

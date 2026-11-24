@@ -266,10 +266,7 @@ Signed heads, legacy targets and other benchmarks keep their historical defaults
 SWE checkpoint contracts bind task/image/verifier identity, runtime, sampling,
 reward support and training method. Actor optimizer moments/RNG and separate
 critic optimizer state persist. Head manifests and actor/critic pair manifests
-reject incompatible reward scales or target provenance. Native verl persistence
-also records topology and requires model/optimizer/RNG shards; its distributed
-execution remains a separate real-GPU validation gate. The CPU integration tests
-exercise the Transformers path, not the native FSDP engine.
+reject incompatible reward scales or target provenance. The verl FSDP checkpoints also record topology and require model, optimizer, and RNG shards from every rank.
 
 The end-to-end tests collect four attempts with mixed `0/1` outcomes and unequal
 interval counts, verify candidate code, rescore exact IDs, perform finite updates,

@@ -5,7 +5,7 @@ import json
 import pytest
 import torch
 
-from test_separate_value import tiny, samples
+from test_separate_value import tiny, samples, patch_fsdp_driver
 from self_summarization_agent.config import CompactionValueConfig, TrainingConfig, load_train_config, ModelConfig
 from self_summarization_agent.segment_returns import ordered_rollout_chains, segment_gae
 from self_summarization_agent.separate_value import (
@@ -167,12 +167,10 @@ def test_gae_config_and_invalid_combinations(tiny):
 def test_gae_cache_scorer_has_no_critic_dependency(monkeypatch):
     from self_summarization_agent import cache_step
     cfg = load_train_config("configs/train/compact_separate_gae_ppo.yaml")
-    seen = []
-    monkeypatch.setattr(cache_step, "TransformersPolicyTrainer", lambda model, training: seen.append(training))
-    cache_step.build_cache_scorer(cfg, checkpoint_path="unused-actor")
-    assert len(seen) == 1
-    assert not seen[0].value.enabled
-    assert seen[0].advantage_estimator == "group_relative"
+    monkeypatch.setattr(cache_step, "PolicyCacheScorer", lambda model, limit: (model, limit))
+    model, limit = cache_step.build_cache_scorer(cfg, checkpoint_path="unused-actor")
+    assert model.model_path.endswith("unused-actor")
+    assert limit == cfg.training.max_sequence_length
     assert cfg.training.value.num_bins == 51
 
 
@@ -232,8 +230,7 @@ def test_gae_fit_preserves_runtime_tokens(tiny, compactions, malformed):
 def test_two_iterations_use_prefit_values_and_retry_immutable_targets(tiny, tmp_path, monkeypatch,
                                                                     failure, estimator, bins):
     from self_summarization_agent import train_step, critic_step, separate_value_trainer as value_module
-    from self_summarization_agent import trainer as actor_module
-    from transformers import GPT2LMHeadModel
+    from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
     path, _, value = tiny
     value = replace(value, baseline_timing="pre_fit", num_bins=bins, evalset_interval=0)
     cfg = load_train_config("configs/train/compact_separate_gae_ppo.yaml")
@@ -284,11 +281,9 @@ def test_two_iterations_use_prefit_values_and_retry_immutable_targets(tiny, tmp_
         critic_step.run(load_train_config(args["config"]), args["checkpoint"], args["rollouts"],
                         args["output"], args["output-id"])
     monkeypatch.setattr(train_step.subprocess, "run", run_subprocess)
-    monkeypatch.setattr(actor_module.AutoModelForMultimodalLM, "from_pretrained",
-                        lambda source, **kw: GPT2LMHeadModel.from_pretrained(source))
-    monkeypatch.setattr(actor_module, "configure_tokenizer_chat_template", lambda *a: None)
+    patch_fsdp_driver(monkeypatch)
     expected_actor = {}
-    class Actor(actor_module.TransformersPolicyTrainer):
+    class Actor(VerlRayPolicyTrainer):
         def step(self, grouped_samples, *, fixed_advantages):
             assert fixed_advantages == pytest.approx(expected_actor)
             fail("actor_update")
@@ -296,7 +291,7 @@ def test_two_iterations_use_prefit_values_and_retry_immutable_targets(tiny, tmp_
         def save_checkpoint(self, output):
             super().save_checkpoint(output)
             fail("actor_save")
-    monkeypatch.setattr(train_step, "TransformersPolicyTrainer", Actor)
+    monkeypatch.setattr(train_step, "VerlRayPolicyTrainer", Actor)
     rollouts = tmp_path / "rollouts.jsonl"
     for iteration in (1, 2):
         source = path if iteration == 1 else path / CRITIC_DIR

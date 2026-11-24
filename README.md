@@ -11,11 +11,7 @@ Current scope:
 - BrowseComp-style run export
 - smoke and unit-test entrypoints
 
-Partially implemented / still minimal:
-- the legacy training loop is a small custom group-normalized policy-gradient update, structured to swap to `trl` later
-- retrieval and judge dependencies still come from the local `bc-plus` environment
-- process-isolated rollout/training orchestration supports OpenAI-compatible vLLM serving, plus legacy offline vLLM or SGLang collection
-- the FSDP2/context-parallel full-training backend is represented in config and launcher contracts, but must be run in the GPU training environment
+Policy rollouts use vLLM, either in-process with `vllm_offline` or through a vLLM server with `openai_compatible`. Policy updates run on verl FSDP workers managed by Ray.
 
 ## Setup
 
@@ -25,16 +21,10 @@ Python requirement:
 Install dependencies with `uv`:
 
 ```powershell
-uv sync --group dev
+uv sync --locked
 ```
 
-The default Qwen3.5 rollout path expects an OpenAI-compatible vLLM server. The server must support native chat tool calls and vLLM's `return_token_ids` Chat Completions extension. The GPU training environment also needs an Accelerate release with FSDP2/context-parallel support available to the Python environment used for training subprocesses.
-
-For the optional official verl/Ray training backend, install the extra in the remote GPU environment:
-
-```powershell
-uv sync --extra verl --group dev
-```
+The training presets load vLLM offline. The standalone run preset connects to a vLLM server that supports token-ID prompts and returns sampled token IDs.
 
 If you prefer the project virtualenv directly:
 
@@ -144,21 +134,21 @@ Expected output shape:
 For remote validation, run:
 
 ```powershell
-uv run --group dev pytest -q
+uv run pytest -q
 ```
 
 If you want to focus on the runtime path first:
 
 ```powershell
-uv run --group dev pytest tests/test_runtime.py -q
+uv run pytest tests/test_runtime.py -q
 ```
 
 Other useful subsets:
 
 ```powershell
-uv run --group dev pytest tests/test_context.py -q
-uv run --group dev pytest tests/test_rewards.py -q
-uv run --group dev pytest tests/test_export.py -q
+uv run pytest tests/test_context.py -q
+uv run pytest tests/test_rewards.py -q
+uv run pytest tests/test_export.py -q
 ```
 
 ## Current Experiment Workflow
@@ -166,9 +156,7 @@ uv run --group dev pytest tests/test_export.py -q
 There are now two primary experiment launchers:
 
 - `run_launcher` for benchmark execution and artifact export
-- `iteration_launcher` for process-isolated API rollout collection, judging, and clipped GRPO training updates
-
-The legacy `train_launcher` remains available only for `training.backend: transformers`.
+- `iteration_launcher` for process-isolated vLLM rollout collection, judging, and clipped GRPO training updates
 
 The runtime modules are still reusable directly if you want a custom server-side driver.
 
@@ -250,45 +238,16 @@ python -m self_summarization_agent.run_launcher --config configs/run/default.yam
 python -m self_summarization_agent.run_launcher --config configs/run/default.yaml --model-path /models/qwen
 ```
 
-### Legacy train launcher
+### Training rollout configuration
 
-Example:
+Training uses offline vLLM by default. To collect through a vLLM server, set `rollout.backend: openai_compatible` and `rollout.api_base_url`. BrowseComp presets with `rollout.browsecomp_native_tools: true` require offline vLLM.
 
-```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers
-```
-
-Outputs:
-
-- `artifacts/train/<experiment_name>/metrics.jsonl`
-- `artifacts/train/<experiment_name>/accuracy_history.jsonl`
-- `artifacts/train/<experiment_name>/rollouts/step-xxxxx.jsonl`
-- `artifacts/train/<experiment_name>/checkpoints/...`
-- `artifacts/train/<experiment_name>/manifest.json`
-
-Typical overrides:
-
-```powershell
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers --set training.epochs=20
-python -m self_summarization_agent.train_launcher --config configs/train/default.yaml --set training.backend=transformers --set rollout.backend=transformers --set training.group_size=4
-python scripts/plot_accuracy.py artifacts/train/qwen-bcplus-train/accuracy_history.jsonl
-```
-
-Training notes:
-
-- the default training config uses queries 1-780 for training and 781-830 for evaluation
-- reward verification is done in-process with the same local base model family as judge
-- `bm25` and `faiss` retrieval are both supported from config
-- legacy `train_launcher` expects `training.backend: transformers`
-- the default `rollout.backend: openai_compatible` uses Chat Completions against `rollout.api_base_url`; `openai`, `openai-compatible`, and `openai_compatible` are accepted aliases
 - `rollout.api_model` must be the model name exposed by the server; when it is unset the resolved checkpoint path is sent as the model name
 - `rollout.enable_prefix_caching` defaults to `true`; `vllm_offline` passes it directly to the owned vLLM engine
 - the external server must already be serving the exact checkpoint selected by the launcher, with Qwen3.5 reasoning, native tool parsing, and `--enable-prefix-caching`; prefix caching is an engine-startup option and cannot be enabled by a Chat Completions request, while restarting or hot-swapping that server at an iteration boundary remains an external orchestration responsibility
-- legacy `rollout.backend: vllm_offline` and `rollout.backend: sglang` remain available; SGLang is an optional runtime dependency and must be installed separately
-- the training backend remains independent of the rollout backend; for example, `training.backend: fsdp2_context_parallel` and `training.backend: verl_ray` consume the same cached trajectory contract
 - each iteration evaluates the selected checkpoint, collects its training trajectories, caches the exact collected token sequences plus reference logprobs, runs clipped GRPO updates, writes the next vLLM-loadable checkpoint, then advances the `latest` checkpoint pointer
 
-Before collection, verify the server with the included compatibility probe:
+For server-based collection, verify the server with the included compatibility probe:
 
 ```powershell
 uv run python scripts/probe_openai_compatible_runtime.py --base-url http://127.0.0.1:8000/v1 --model /path/to/checkpoint --tokenizer /path/to/checkpoint
@@ -576,8 +535,7 @@ silently reinitializes it. An incomplete update restarts from the prior
 committed pair. Critic optimizer state persists across iterations; the actor
 retains the existing per-iteration optimizer reset behavior.
 
-The local Transformers actor and `verl_ray` Transformers/FSDP actor backends
-support this mode. Training consumes exact token caches and never truncates or
+The verl FSDP actor consumes exact token caches and never truncates or
 retokenizes interval histories. The existing read-only `evaluate_value` command
 also supports paired separate-critic checkpoints and loads only the small
 critic. Same-collection critic metrics remain labeled as training metrics.
@@ -602,7 +560,7 @@ Missing optional metrics remain gaps. Use `--artifacts-dir`, `--default-run`,
 
 [`configs/train/compact_value_mc.yaml`](configs/train/compact_value_mc.yaml) enables the Monte Carlo actor-critic experiment. At the start of each interval, the shared language-model backbone feeds a zero-initialized two-class value head from the hidden state at the exact end of the first collected generation prompt. Before any update, the trainer freezes `V_old` for the whole batch and uses `R - V_old` as every generated token's interval advantage. Critic cross-entropy is averaged within each rollout before averaging across rollouts, so extra compactions do not give a rollout extra critic weight.
 
-Both value backends exploit causal prefix equivalence for the frozen `V_old` pass and evaluate only through the exact state anchor. The Transformers compatibility backend additionally uses Qwen's `logits_to_keep` path to materialize vocabulary logits only for the state anchor and trainable assistant-token positions. The distributed backend uses verl's packed remove-padding/Ulysses log-probability path. The value-specific changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing loss path.
+The verl FSDP worker evaluates frozen `V_old` through the exact state anchor and uses verl’s packed remove-padding/Ulysses path for policy log probabilities. The value-specific changes are gated by `training.value.enabled`; ordinary group-relative GRPO keeps its existing loss path.
 
 The policy remains a normal Hugging Face checkpoint for vLLM. The value head is saved in a `compaction_value/` sidecar subdirectory as `compaction_value/compaction_value_head.safetensors` plus `compaction_value/compaction_value_config.json`; value-enabled resumes after iteration zero require both policy and sidecar state. The preset uses `training.backend: verl_ray` with `training.verl.worker_backend: verl_fsdp`. A repository-owned verl actor adds the shared-backbone value loss while the four FSDP/Ulysses ranks keep the exported policy namespace unchanged. Frozen values are evaluated from exact causal prefixes, and alignment padding is explicitly zero-weighted instead of dropping intervals. `runtime.train_update_timeout_seconds` can give this update a separate wall-clock limit without weakening collection and judge timeouts; progress is written atomically to `iteration-NNNNN.train-progress.json`.
 
@@ -631,12 +589,6 @@ python -m self_summarization_agent.evaluate_value \
 
 Both query manifests are JSON arrays of string IDs and must cover the full intended splits, not just one collection batch. The evaluator rejects overlap and missing exact token evidence, records the generating policy separately from the evaluated checkpoint, and never calls an optimizer update or saves weights. Fixed outcome labels belong to the generating policy, so account for their staleness when evaluating later checkpoints. Compare against a constant predictor estimated from training outcomes; keep final policy evaluation separate.
 
-To use the legacy SGLang policy rollout path, install SGLang in the runtime environment and set the backend explicitly (the `sglang_offline` alias is also accepted):
-
-```powershell
-python -m self_summarization_agent.iteration_launcher --config configs/train/default.yaml --iteration 1 --latest-root /path/to/train-artifacts --set rollout.backend=sglang --set rollout.attention_backend=flashinfer
-```
-
 ### Qwen3.5 recurrent interval isolation
 
 All repository-owned verl FSDP actors (GRPO, shared value, and separate value) install
@@ -657,9 +609,9 @@ so its memory and runtime costs are higher than the incorrect shard-local path.
 This adapter supports the text-only, cache-free training path and rejects
 ambiguous packed position metadata.
 
-### Optional verl/Ray training backend
+### Policy training with verl FSDP
 
-The `training.backend: verl_ray` path is an optional infrastructure path for running the policy update through Ray while preserving the existing rollout, judge, cache, checkpoint, and `latest` pointer contracts. It converts cached rollout samples into a `verl.DataProto` batch, sends that batch to a Ray worker, saves a normal vLLM-loadable checkpoint, and then returns metrics to `step_metrics.jsonl`.
+The iteration launcher uses `training.backend: verl_ray` and `training.verl.worker_backend: verl_fsdp`. The driver packs cached intervals into verl batches, dispatches them to the FSDP worker group, and exports the updated policy as a vLLM-loadable checkpoint. When updating an older training YAML, remove any `model.backend: transformers` line so the model inherits the vLLM default.
 
 Example override:
 
@@ -671,11 +623,8 @@ Useful `training.verl` knobs:
 
 - `address`: connect to an existing Ray cluster; leave unset for local Ray initialization inside the remote training job.
 - `num_gpus_per_worker`: GPU resources requested by the training actor; defaults to `len(training.gpu_ids)` or `training.data_parallel_size`.
-- `worker_backend`: `transformers` runs the compatibility Ray actor around the existing trainer; `verl_fsdp` uses official verl's Ray WorkerGroup plus `ActorRolloutRefWorker` for the policy update.
 - `fsdp`: native verl/FSDP knobs such as `strategy`, per-GPU microbatch/token limits, remove-padding, torch compile, Ulysses sequence parallelism, and CPU offload.
 - `shutdown_ray`: shuts down Ray after checkpoint save when the train step owns Ray initialization.
-
-Rollback is config-only: set `training.backend` back to `fsdp2_context_parallel` or `transformers`.
 
 ## Notes
 
@@ -721,8 +670,7 @@ Token mode derives its anchor from the estimator: `before_each_sampled_token`.
 The legacy `training.value.state_anchor` default belongs to interval estimators;
 it does not select token granularity. Other anchor overrides are rejected.
 Token mode requires two bins, pre-fit timing, exact collection,
-all compaction tokens, and either Transformers or `verl_ray` with the
-Transformers/`verl_fsdp` worker. Token and interval critic checkpoints and warmup
+all compaction tokens, and the `verl_fsdp` worker. Token and interval critic checkpoints and warmup
 artifacts cannot be interchanged, even when their heads have the same shape.
 
 Full intervals cost more critic compute than interval-start prefixes. The preset

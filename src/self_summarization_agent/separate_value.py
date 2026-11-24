@@ -244,8 +244,7 @@ def separate_checkpoint_complete(path, *, expected_id=None):
                     or head != value_head_manifest(head["hidden_size"], bins, method.get("reward_profile", BINARY_REWARD))
                     or pair.get("method") != method or pair.get("version") != 2):
                 return False
-            if pair.get("actor_optimizer") == "persistent" and not (
-                    (path / "actor_training_state.pt").is_file() or (path / "swe_actor_optimizer.json").is_file()):
+            if pair.get("actor_optimizer") == "persistent" and not (path / "swe_actor_optimizer.json").is_file():
                 return False
             advantages = json.loads((path / ADVANTAGES).read_text())
             if (pair.get("advantages_digest") != digest(advantages)
