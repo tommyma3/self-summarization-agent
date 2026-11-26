@@ -82,6 +82,9 @@ def test_build_verl_fsdp_worker_config_maps_repo_training_knobs() -> None:
     training_config.verl.fsdp.ppo_max_token_len_per_gpu = 32768
     training_config.verl.fsdp.use_torch_compile = False
 
+    training_config.verl.fsdp.sparse_policy_head = True
+    training_config.verl.fsdp.zero_advantage_forward_only = True
+
     config = build_verl_fsdp_worker_config(model_config, training_config)
 
     assert config["model"]["path"] == "/models/policy"
@@ -98,6 +101,10 @@ def test_build_verl_fsdp_worker_config_maps_repo_training_knobs() -> None:
     assert config["actor"]["fsdp_config"]["strategy"] == "fsdp2"
     assert config["actor"]["fsdp_config"]["use_torch_compile"] is False
     assert config["compaction_value"]["enabled"] is False
+    assert config["sparse_policy_head"] and config["zero_advantage_forward_only"]
+    training_config.value.enabled = True
+    value_config = build_verl_fsdp_worker_config(model_config, training_config)
+    assert not value_config["sparse_policy_head"] and not value_config["zero_advantage_forward_only"]
 
 
 def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> None:

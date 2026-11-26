@@ -168,6 +168,10 @@ training:
     worker_backend: verl_fsdp
     fsdp:
       strategy: fsdp
+      # Project the vocabulary head only at retained policy targets.
+      sparse_policy_head: true
+      # Keep zero-advantage intervals in group statistics and PPO diagnostics.
+      zero_advantage_forward_only: true
       ppo_micro_batch_size_per_gpu: 1
       ppo_max_token_len_per_gpu: 12288
       log_prob_micro_batch_size_per_gpu: 1

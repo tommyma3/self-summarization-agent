@@ -298,6 +298,8 @@ class VerlFSDPConfig:
     optimizer_offload: bool = False
     fsdp_size: int = -1
     save_hf_model: bool = True
+    sparse_policy_head: bool = False
+    zero_advantage_forward_only: bool = False
 
 
 @dataclass(slots=True)
