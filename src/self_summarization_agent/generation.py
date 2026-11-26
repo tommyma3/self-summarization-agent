@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import sys
+import time
 from typing import Any, Protocol
 
 from transformers import AutoTokenizer
@@ -400,6 +401,8 @@ class VLLMGenerator(TokenInputGenerator):
     require_exact_token_ids: bool = True
     gpu_memory_utilization: float | None = None
     engine_seed: int | None = None
+    completion_driven: bool = False
+    _pending_requests: dict[str, tuple[TokenRequest, str]] = field(default_factory=dict, init=False)
     supports_native_tools: bool = False
     tokenizer: Any = field(init=False)
     llm: Any = field(init=False)
@@ -563,51 +566,85 @@ class VLLMGenerator(TokenInputGenerator):
             )
         return completions
 
-    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
-        if not requests:
-            return []
+    def _token_sampling_params(self, request: TokenRequest):
         sampling_kwargs = self._sampling_kwargs(include_logprobs=True)
         # Decode the exact IDs once below. Stop strings need vLLM's
         # incremental detokenizer to determine the generation boundary.
         if not sampling_kwargs.get("stop"):
             sampling_kwargs.setdefault("detokenize", False)
-        params = []
-        logprob_modes = []
-        for request in requests:
-            regex = request.response_regex
-            if self.supports_native_tools and request.generation_kind in {"summary", "forced_answer"}:
-                thinking = r"[^<]*</think>\s*" if self.enable_thinking else ""
-                regex = regex or thinking + _native_control_body_regex(request.generation_kind)
-            kwargs = dict(sampling_kwargs, max_tokens=request.max_new_tokens or self.max_new_tokens)
-            if regex:
-                from vllm.sampling_params import StructuredOutputsParams
-                kwargs["structured_outputs"] = StructuredOutputsParams(regex=regex)
-            logprob_modes.append(self._decode_logprobs_mode(kwargs))
-            params.append(self._sampling_params_cls(**kwargs))
+        regex = request.response_regex
+        if self.supports_native_tools and request.generation_kind in {"summary", "forced_answer"}:
+            thinking = r"[^<]*</think>\s*" if self.enable_thinking else ""
+            regex = regex or thinking + _native_control_body_regex(request.generation_kind)
+        kwargs = dict(sampling_kwargs, max_tokens=request.max_new_tokens or self.max_new_tokens)
+        if regex:
+            from vllm.sampling_params import StructuredOutputsParams
+            kwargs["structured_outputs"] = StructuredOutputsParams(regex=regex)
+        return self._sampling_params_cls(**kwargs), self._decode_logprobs_mode(kwargs)
+
+    def _token_result(self, request: TokenRequest, output: Any, mode: str) -> GenerationResult:
+        prompt_ids = list(output.prompt_token_ids)
+        if prompt_ids != list(request.prompt_token_ids) or len(output.outputs) != 1:
+            raise RuntimeError("vLLM changed the submitted token prompt or response count")
+        completion = output.outputs[0]
+        ids = _required_int_list(list(completion.token_ids), field_name="completion token_ids")
+        logprobs = _extract_completion_token_logprobs(completion)
+        raw = self.tokenizer.decode(ids, skip_special_tokens=False)
+        message = (_native_routing_message(raw, prompt_ids, ids, thinking=self.enable_thinking)
+                   if self.supports_native_tools else None)
+        return GenerationResult(
+            text=raw, message=message,
+            prompt_token_ids=prompt_ids, completion_token_ids=ids,
+            token_logprobs=logprobs, token_logprobs_mode=mode if logprobs is not None else None,
+            cumulative_logprob=getattr(completion, "cumulative_logprob", None),
+            finish_reason=getattr(completion, "finish_reason", None))
+
+    def generate_token_batch(self, requests: list[TokenRequest]) -> list[GenerationResult]:
+        if not requests:
+            return []
+        params, modes = zip(*(self._token_sampling_params(request) for request in requests))
         outputs = self.llm.generate(
-            [{"prompt_token_ids": list(r.prompt_token_ids)} for r in requests],
-            params,
+            [{"prompt_token_ids": list(request.prompt_token_ids)} for request in requests],
+            list(params),
         )
-        results = []
         if len(outputs) != len(requests):
             raise RuntimeError("vLLM returned the wrong number of token generations")
-        for request, output, mode in zip(requests, outputs, logprob_modes, strict=True):
-            prompt_ids = list(output.prompt_token_ids)
-            if prompt_ids != list(request.prompt_token_ids) or len(output.outputs) != 1:
-                raise RuntimeError("vLLM changed the submitted token prompt or response count")
-            completion = output.outputs[0]
-            ids = _required_int_list(list(completion.token_ids), field_name="completion token_ids")
-            logprobs = _extract_completion_token_logprobs(completion)
-            raw = self.tokenizer.decode(ids, skip_special_tokens=False)
-            message = (_native_routing_message(raw, prompt_ids, ids, thinking=self.enable_thinking)
-                       if self.supports_native_tools else None)
-            results.append(GenerationResult(
-                text=raw, message=message,
-                prompt_token_ids=prompt_ids, completion_token_ids=ids,
-                token_logprobs=logprobs, token_logprobs_mode=mode if logprobs is not None else None,
-                cumulative_logprob=getattr(completion, "cumulative_logprob", None),
-                finish_reason=getattr(completion, "finish_reason", None)))
-        return results
+        return [self._token_result(request, output, mode)
+                for request, output, mode in zip(requests, outputs, modes, strict=True)]
+
+    def submit_token_request(self, request_id: str, request: TokenRequest) -> None:
+        from vllm.inputs import tokens_input
+        from vllm.sampling_params import RequestOutputKind
+
+        params, mode = self._token_sampling_params(request)
+        params.output_kind = RequestOutputKind.FINAL_ONLY
+        self.llm.llm_engine.add_request(request_id, tokens_input(list(request.prompt_token_ids)), params)
+        self._pending_requests[request_id] = (request, mode)
+
+    def completed_token_requests(self) -> list[tuple[str, GenerationResult]]:
+        # The engine core continues decoding while the collector runs tools.
+        # Briefly coalesce nearby finishes so searches still share a retrieval batch.
+        engine = self.llm.llm_engine
+        completed = []
+        deadline = None
+        while self._pending_requests:
+            if not engine.has_unfinished_requests():
+                raise RuntimeError("vLLM lost an outstanding rollout request")
+            for output in engine.step():
+                if output.finished:
+                    request, mode = self._pending_requests.pop(output.request_id)
+                    completed.append((output.request_id, self._token_result(request, output, mode)))
+            if completed:
+                if deadline is None:
+                    deadline = time.monotonic() + 0.025
+                if time.monotonic() >= deadline:
+                    break
+        return completed
+
+    def abort_token_requests(self) -> None:
+        if self._pending_requests:
+            self.llm.llm_engine.abort_request(list(self._pending_requests))
+            self._pending_requests.clear()
 
 
 def _extract_completion_token_logprobs(completion: Any) -> list[float] | None:

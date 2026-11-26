@@ -1004,3 +1004,61 @@ def test_merged_collect_overlap_feed_failure_falls_back_to_fresh_judge(
     # The fallback re-judges from scratch (resume flag stays False) because the
     # overlap feed only managed a partial, discarded write.
     assert resumes == ["eval:False", "train:False"]
+
+
+def test_parallel_cache_reassembles_reordered_worker_results_and_resumes(tmp_path, monkeypatch):
+    import pytest
+
+    checkpoint = tmp_path / "checkpoint"
+    rows = [
+        {"query_id": str(i), "rollout_index": 0, "policy_checkpoint_id": checkpoint.name,
+         "turn_records": [], "turn_rewards": {}, "trainable_sample_count": 0,
+         "trajectory_records": [{"collection_tokens": {"full_token_ids": [0] * (i + 1)}}]}
+        for i in range(12)
+    ]
+    judged = tmp_path / "judged.jsonl"
+    cached = tmp_path / "cached.jsonl"
+    judged.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    monkeypatch.setattr(merged_collect_step, "_materialize_rollout_native_training_caches",
+                        lambda row, **kwargs: row)
+    monkeypatch.setattr(merged_collect_step, "_row_has_current_training_cache",
+                        lambda row, **kwargs: False)
+    seen = {}
+    lose_row = True
+
+    class Worker:
+        def __init__(self, gpu_id, **kwargs):
+            self.gpu_id = gpu_id
+            self.process = None
+            self.submitted_row_count = self.completed_row_count = self.queue_block_seconds = self.pending_count = 0
+
+        def submit(self, batch):
+            self.batch = batch
+            seen.setdefault(self.gpu_id, []).extend(row["query_id"] for row in batch)
+
+        def finish(self):
+            batch = self.batch[::-1]
+            if lose_row and self.gpu_id == 1 and any(int(row["query_id"]) >= 8 for row in batch):
+                return batch[1:]
+            return batch
+
+        def metrics(self):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(merged_collect_step, "_CacheOverlapClient", Worker)
+    kwargs = dict(config=SimpleNamespace(training=SimpleNamespace(train_compaction_tokens=True),
+                                         rollout=SimpleNamespace(cache_gpu_ids=[0, 1], overlap_queue_max_batches=1)),
+                  config_path="cfg", overrides=[], checkpoint_path=checkpoint,
+                  judged_rollout_path=judged, cached_output_path=cached)
+    with pytest.raises(RuntimeError, match="requested rollout keys"):
+        merged_collect_step._run_cache_inline(**kwargs, resume=False)
+    assert list(map(json.loads, cached.read_text().splitlines())) == rows[:8]
+    lose_row = False
+    seen.clear()
+    merged_collect_step._run_cache_inline(**kwargs, resume=True)
+    assert set(seen) == {0, 1}
+    assert sorted(seen[0] + seen[1], key=int) == [str(i) for i in range(8, 12)]
+    assert list(map(json.loads, cached.read_text().splitlines())) == rows

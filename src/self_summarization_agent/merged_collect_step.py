@@ -4,7 +4,7 @@ The parent process remains CUDA-free and supervises three sequential phases::
 
     collection workers (policy GPUs): eval, then train + native logprobs
     judge worker (judge GPUs):        eval and train answer judging
-    cache fallback (GPU 0):           only rows missing native logprobs
+    cache fallback (configured GPUs): only rows missing native logprobs
 
 The retrieval worker is owned by the collection phase.  It and every policy
 worker must exit before the judge worker is allowed to start.  Process exit,
@@ -27,6 +27,7 @@ from self_summarization_agent.collection_contract import collection_profile_id, 
 from self_summarization_agent.token_stream import TITO_CONTRACT
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import multiprocessing as mp
 import os
@@ -53,8 +54,8 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.config import (
     load_train_config,
     parse_cli_overrides,
-    resolved_rollout_sampling_profile,
     resolved_rollout_runtime,
+    resolved_rollout_sampling_profile,
     sampling_profile_id,
 )
 from self_summarization_agent.dataset import load_query_examples, split_train_eval_examples
@@ -87,7 +88,7 @@ from self_summarization_agent.rollout_collection import (
 )
 
 # ---------------------------------------------------------------------------
-# Cache fallback worker (spawned process on GPU 0 after judging)
+# Cache fallback worker (one process per configured GPU after judging)
 # ---------------------------------------------------------------------------
 
 _CACHE_SHUTDOWN = "__cache_shutdown__"
@@ -107,10 +108,10 @@ def _run_cache_overlap_worker(
     checkpoint_path: str,
     request_queue: mp.queues.Queue,
     response_queue: mp.queues.Queue,
+    gpu_id: int = 0,
 ) -> None:
-    """Spawned process that loads the policy checkpoint on GPU 0 and computes
-    reference logprob caches for judged rollout rows."""
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    """Score exact intervals on one GPU using the frozen collection checkpoint."""
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     config = load_train_config(config_path, parse_cli_overrides(overrides))
     scorer = build_cache_scorer(config, checkpoint_path=checkpoint_path)
     response_queue.put(READY)
@@ -129,8 +130,10 @@ def _run_cache_overlap_worker(
                 1,
                 config.training.gradient_accumulation_microbatch_size,
             )
+            score_started = time.monotonic()
             for sample_batch in iter_batches(all_samples, cache_microbatch_size):
                 all_cache_payloads.extend(scorer.cache_samples(sample_batch))
+            score_seconds = time.monotonic() - score_started
             cached_rows: list[dict[str, Any]] = []
             payload_offset = 0
             for row, row_samples in zip(rows, samples_by_row):
@@ -149,7 +152,7 @@ def _run_cache_overlap_worker(
                     **_critic_only_cache_kwargs(config),
                 )
                 cached_rows.append(cached_row)
-            response_queue.put({"batch_id": batch_id, "rows": cached_rows})
+            response_queue.put({"batch_id": batch_id, "rows": cached_rows, "score_seconds": score_seconds})
         except BaseException as exc:
             response_queue.put(
                 {
@@ -165,7 +168,7 @@ def _run_cache_overlap_worker(
 # ---------------------------------------------------------------------------
 
 class _CacheOverlapClient:
-    """Lazily manages a post-judge cache-fallback process on GPU 0."""
+    """Lazily manages one post-judge cache scoring process."""
 
     def __init__(
         self,
@@ -176,6 +179,7 @@ class _CacheOverlapClient:
         checkpoint_id: str,
         queue_max_batches: int = 8,
         drain_timeout_seconds: float = 600,
+        gpu_id: int = 0,
     ) -> None:
         self._context = mp.get_context("spawn")
         self.request_queue = self._context.Queue(maxsize=max(1, queue_max_batches))
@@ -184,9 +188,12 @@ class _CacheOverlapClient:
             "config_path": config_path,
             "overrides": overrides,
             "checkpoint_path": checkpoint_path,
+            "gpu_id": gpu_id,
             "request_queue": self.request_queue,
             "response_queue": self.response_queue,
         }
+        self.score_seconds = 0.0
+        self.startup_seconds = 0.0
         self.process: mp.Process | None = None
         self.checkpoint_id = checkpoint_id
         self.next_batch_id = 0
@@ -205,6 +212,7 @@ class _CacheOverlapClient:
             target=_run_cache_overlap_worker,
             kwargs=self._worker_kwargs,
         )
+        started = time.monotonic()
         self.process.start()
         # Wait for worker to signal successful initialization (model load).
         try:
@@ -220,6 +228,7 @@ class _CacheOverlapClient:
                 f"Cache overlap worker exited during startup "
                 f"(exit_code={self.process.exitcode})"
             )
+        self.startup_seconds = time.monotonic() - started
         if signal != READY:
             self.process.kill()
             self.process.join(timeout=30)
@@ -286,6 +295,8 @@ class _CacheOverlapClient:
         if not isinstance(rows, list):
             raise RuntimeError(f"Cache overlap worker returned invalid response: {response!r}")
         self.completed_row_count += len(rows)
+        if "score_seconds" in response:
+            self.score_seconds += response["score_seconds"]
         self._drain_deadline = (
             time.monotonic() + self._drain_timeout_seconds
             if self.pending_count
@@ -318,6 +329,7 @@ class _CacheOverlapClient:
         if self.process.is_alive():
             self.process.kill()
             self.process.join(timeout=10)
+        raise TimeoutError("Cache worker timed out before returning all requested rows")
 
     def drain_available(self) -> list[dict[str, Any]]:
         self._ensure_drain_deadline()
@@ -370,6 +382,8 @@ class _CacheOverlapClient:
             "pending_batches": self.pending_count,
             "queue_block_seconds": self.queue_block_seconds,
             "fallback_worker_started": self.process is not None,
+            "score_seconds": self.score_seconds,
+            "startup_seconds": self.startup_seconds,
         }
 
     def close(self) -> None:
@@ -585,6 +599,8 @@ def _collect_split(
     collection_started = time.monotonic()
     completed_batch_count = 0
     generated_row_count = 0
+    serialize_seconds = 0.0
+    generated_tokens = 0
     with _temporary_sampling_profile(generator, sampling_profile):
         runtime = build_runtime(generator, backend, resolved_rollout_runtime(config, split=split))
         episode_inputs = [
@@ -594,6 +610,7 @@ def _collect_split(
             episode_inputs,
             max_active_episodes=config.rollout.max_concurrent_episodes,
         ):
+            write_started = time.monotonic()
             completed_batch_count += 1
             for request_index, result in completed_batch:
                 example, rollout_index = rollout_requests[request_index]
@@ -631,6 +648,8 @@ def _collect_split(
                 if row_feed_queue is not None:
                     row_feed_queue.put((split, row))
                 generated_row_count += 1
+                generated_tokens += row.get("token_usage", {}).get("total_generated_tokens", 0)
+            serialize_seconds += time.monotonic() - write_started
 
     print(
         "[merged_collect] "
@@ -639,6 +658,9 @@ def _collect_split(
                 "event": "streaming_collection_complete",
                 "split": split,
                 "generated_rows": generated_row_count,
+                "generated_tokens": generated_tokens,
+                "serialize_cache_and_feed_seconds": serialize_seconds,
+                **getattr(runtime, "collection_metrics", {}),
                 "completion_batches": completed_batch_count,
                 "elapsed_seconds": time.monotonic() - collection_started,
             },
@@ -706,7 +728,10 @@ def _run_split_collection_worker(
             config.retrieval,
             worker_url=retrieval_worker_url,
         )
+        startup = time.monotonic()
         generator = _build_rollout_generator(config, checkpoint, split=split)
+        print("[merged_collect] " + json.dumps({"event": "policy_startup", "split": split,
+              "elapsed_seconds": time.monotonic() - startup}), flush=True)
         _collect_split(
             config=config,
             checkpoint_id=checkpoint_id,
@@ -1315,6 +1340,7 @@ def run_merged_collect(
                 checkpoint_id=checkpoint_id,
                 queue_max_batches=config.rollout.overlap_queue_max_batches,
             )
+        drain_started = time.monotonic()
         try:
             if eval_judge_needed and has_eval and eval_judged_output is not None:
                 _judge_split(
@@ -1351,6 +1377,7 @@ def run_merged_collect(
                 outputs["train_judged"] = Path(train_judged_output)
         finally:
             judge_metrics = judge_client.metrics()
+            judge_metrics["drain_seconds"] = time.monotonic() - drain_started
             if overlap_requested:
                 judge_metrics["overlap_feed"] = {
                     "fed_rows": overlap_feed_stats.get("fed_rows", 0),
@@ -1480,35 +1507,60 @@ def _run_cache_inline(
     if not fallback_rows:
         return
 
-    print(
-        f"[merged_collect] Launching post-judge GPU 0 cache fallback for "
-        f"{len(fallback_rows)} row(s)...",
-        flush=True,
-    )
-    cache_client = _CacheOverlapClient(
-        config_path=config_path,
-        overrides=overrides,
-        checkpoint_path=str(checkpoint_path),
-        checkpoint_id=checkpoint_id,
-        queue_max_batches=config.rollout.overlap_queue_max_batches,
-    )
+    gpu_ids = config.rollout.cache_gpu_ids[:len(fallback_rows)]
+    started = time.monotonic()
+    clients = [
+        _CacheOverlapClient(config_path=config_path, overrides=overrides, checkpoint_path=str(checkpoint_path),
+                            checkpoint_id=checkpoint_id, queue_max_batches=config.rollout.overlap_queue_max_batches,
+                            gpu_id=gpu_id)
+        for gpu_id in gpu_ids
+    ]
+    print(f"[merged_collect] Rescoring {len(fallback_rows)} rows on GPUs {gpu_ids}", flush=True)
     try:
-        for rows in iter_batches(fallback_rows, config.judge.batch_size):
-            cache_client.submit(rows)
-            for cached_row in cache_client.drain_available():
-                append_jsonl(cached_output_path, cached_row)
-        for cached_row in cache_client.finish():
-            append_jsonl(cached_output_path, cached_row)
+        # Limit the number of large trajectory payloads in IPC. Balance each
+        # wave by exact interval lengths and write results in input order.
+        with ThreadPoolExecutor(max_workers=len(clients)) as pool:
+            for wave in iter_batches(fallback_rows, 4 * len(clients)):
+                shards = [[] for _ in clients]
+                loads = [0] * len(clients)
+                costs = [sum(len((rec.get("collection_tokens") or {}).get("full_token_ids", []))
+                             for rec in row["trajectory_records"]) for row in wave]
+                for index in sorted(range(len(wave)), key=costs.__getitem__, reverse=True):
+                    worker = min(range(len(clients)), key=loads.__getitem__)
+                    shards[worker].append(wave[index])
+                    loads[worker] += max(1, costs[index])
+                futures = [pool.submit(_rescore_rows, client, shard)
+                           for client, shard in zip(clients, shards) if shard]
+                returned = {}
+                for future in futures:
+                    for row in future.result():
+                        key = (row["query_id"], row["rollout_index"])
+                        if key in returned:
+                            raise RuntimeError(f"Duplicate rescored rollout {key}")
+                        returned[key] = row
+                keys = [(row["query_id"], row["rollout_index"]) for row in wave]
+                if returned.keys() != set(keys) or len(returned) != len(keys):
+                    raise RuntimeError("Cache worker results differ from requested rollout keys")
+                for key in keys:
+                    append_jsonl(cached_output_path, returned[key])
     finally:
-        print(
-            "[merged_collect] "
-            + json.dumps(
-                {"event": "post_judge_cache_fallback_metrics", **cache_client.metrics()},
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        cache_client.close()
+        for client in clients:
+            client.close()
+        print("[merged_collect] " + json.dumps({
+            "event": "post_judge_cache_fallback_metrics", "gpu_ids": gpu_ids,
+            "elapsed_seconds": time.monotonic() - started, "workers": [c.metrics() for c in clients],
+            "rollout_native_rows": len(pending_rows) - len(fallback_rows),
+            "queue_block_seconds": sum(c.queue_block_seconds for c in clients),
+            "fallback_worker_started": any(c.process is not None for c in clients),
+            "pending_batches": sum(c.pending_count for c in clients),
+            "completed_rows": sum(c.completed_row_count for c in clients),
+            "submitted_rows": sum(c.submitted_row_count for c in clients),
+        }), flush=True)
+
+
+def _rescore_rows(client, rows):
+    client.submit(rows)
+    return client.finish()
 
 
 # ---------------------------------------------------------------------------

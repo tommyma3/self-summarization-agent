@@ -56,7 +56,9 @@ rollout:
   max_model_len: 27000
   enable_prefix_caching: true
   max_concurrent_episodes: 50
-  # Deprecated compatibility fields; merged_collect is strictly sequential.
+  completion_driven: true
+  # Each scorer loads the frozen policy after collection and judging finish.
+  cache_gpu_ids: [0, 1, 2, 3]
   overlap_judge: true
   overlap_queue_max_batches: 16
   max_new_tokens: 8192
@@ -116,7 +118,7 @@ judge:
   temperature: 0.0
   top_p: 1.0
   do_sample: false
-  # Batch completed eval and training answers after policy/retrieval teardown.
+  # Judge completed answers in batches while the policy collects more rollouts.
   batch_size: 32
   batch_wait_ms: 25
   # Maximum seconds a single judge micro-batch may take before the worker

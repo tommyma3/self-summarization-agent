@@ -167,6 +167,8 @@ class RolloutConfig:
     attention_backend: str | None = None
     max_model_len: int | None = None
     enable_prefix_caching: bool = True
+    completion_driven: bool = False
+    cache_gpu_ids: list[int] = field(default_factory=lambda: [0])
     max_concurrent_episodes: int = 32
     # Judge completed raw rows concurrently with policy collection. Both the
     # standalone collector and the merged path honor this; merged overlap
@@ -200,6 +202,11 @@ class RolloutConfig:
                 or not 0 <= self.sampling_seed < 2**32 or self.backend != "vllm_offline"):
             raise ValueError("rollout.sampling_seed requires vllm_offline and an integer in [0, 2**32)")
         _validate_generation_backend(self.backend, "rollout.backend")
+        if self.completion_driven and self.backend not in OFFLINE_VLLM_BACKENDS:
+            raise ValueError("rollout.completion_driven requires an offline vLLM backend")
+        if (not self.cache_gpu_ids or any(type(i) is not int or i < 0 for i in self.cache_gpu_ids)
+                or len(set(self.cache_gpu_ids)) != len(self.cache_gpu_ids)):
+            raise ValueError("rollout.cache_gpu_ids requires distinct nonnegative GPU IDs")
         if self.max_concurrent_episodes < 1:
             raise ValueError("rollout.max_concurrent_episodes must be at least 1")
         if self.overlap_queue_max_batches < 1:
@@ -727,13 +734,6 @@ def config_to_dict(config: RunConfig | TrainConfig) -> dict[str, Any]:
     return raw
 
 
-def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dict[str, Any]:
-    if split not in {"train", "eval"}:
-        raise ValueError(f"Unsupported rollout split: {split}")
-
-    profile = {
-        "max_new_tokens": (
-            config.rollout.max_new_tokens
 def _voluntary_stopping_eval(config: TrainConfig, split: str) -> bool:
     return split == "eval" and config.benchmark.reward_profile == VOLUNTARY_STOPPING
 
@@ -744,6 +744,13 @@ def resolved_rollout_runtime(config: TrainConfig, *, split: str) -> RuntimeConfi
     return config.runtime
 
 
+def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dict[str, Any]:
+    if split not in {"train", "eval"}:
+        raise ValueError(f"Unsupported rollout split: {split}")
+
+    profile = {
+        "max_new_tokens": (
+            config.rollout.max_new_tokens
             if config.rollout.max_new_tokens is not None
             else config.model.max_new_tokens
         ),
@@ -764,6 +771,9 @@ def resolved_rollout_runtime(config: TrainConfig, *, split: str) -> RuntimeConfi
     if split == "train" and getattr(config.rollout, "sampling_seed", None) is not None:
         profile["engine_seed"] = config.rollout.sampling_seed
     if split == "eval":
+        # Resume checks use this profile to identify compatible eval rows and metrics.
+        if _voluntary_stopping_eval(config, split):
+            profile["force_answer_at_compaction_limit"] = False
         evaluation = config.evaluation
         for key in ("max_new_tokens", "temperature", "top_p", "do_sample"):
             value = getattr(evaluation, key)
@@ -771,9 +781,6 @@ def resolved_rollout_runtime(config: TrainConfig, *, split: str) -> RuntimeConfi
                 profile[key] = value
         profile["extra_sampling_params"].update(evaluation.extra_sampling_params)
     return profile
-        # Resume checks use this profile to identify compatible eval rows and metrics.
-        if _voluntary_stopping_eval(config, split):
-            profile["force_answer_at_compaction_limit"] = False
 
 
 def sampling_profile_id(profile: dict[str, Any]) -> str:

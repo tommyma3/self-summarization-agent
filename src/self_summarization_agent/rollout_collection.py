@@ -528,11 +528,14 @@ def _build_rollout_generator(config, checkpoint: Path, *, split: str) -> Any:
     engine_options = {"engine_seed": seed} if seed is not None else {}
     if config.rollout.browsecomp_native_tools:
         engine_options["browsecomp_native_tools"] = True
-    return build_generator(
+    generator = build_generator(
         rollout_model_config,
         sampling_extra=sampling_profile["extra_sampling_params"],
         **engine_options,
     )
+    if config.rollout.completion_driven:
+        generator.completion_driven = True
+    return generator
 
 
 @contextmanager

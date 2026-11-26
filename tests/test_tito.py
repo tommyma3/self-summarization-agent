@@ -1151,3 +1151,98 @@ def test_voluntary_stopping_judgment_through_segment_returns(outputs, limit, out
         interval = returns[tuple(item["key"])]
         assert interval["transition_reward"] == (expected if item["terminal"] else 0)
         assert interval["target"] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("threshold,limit,summary", [
+    (15000, None, SUMMARY), (1, 2, SUMMARY), (1, 2, "</think>bad<|im_end|>"),
+    (1, 0, SUMMARY),
+])
+def test_completion_driven_refills_while_another_generation_is_pending(threshold, limit, summary):
+    class ScheduledModel(TokenModel):
+        completion_driven = True
+
+        def __init__(self):
+            super().__init__([], native=True)
+            self.pending = {}
+            self.resolved = []
+            self.fast_actions = 0
+
+        def generate_token_batch(self, requests):
+            outputs = []
+            for request in requests:
+                prompt = self.tokenizer.decode(request.prompt_token_ids)
+                if request.generation_kind == "summary":
+                    outputs.append(summary)
+                elif "fast-query" in prompt and request.generation_kind == "action" and self.fast_actions == 0:
+                    self.fast_actions += 1
+                    outputs.append(native_call("search", "query", "q"))
+                elif request.generation_kind == "forced_answer":
+                    outputs.append(PLAIN_FINISH)
+                else:
+                    outputs.append(native_call("finish", "answer", "done"))
+            self.outputs = iter(outputs)
+            return super().generate_token_batch(requests)
+
+        def submit_token_request(self, key, request):
+            self.pending[key] = request
+
+        def completed_token_requests(self):
+            # The first slot finishes last, even after the other slot is refilled.
+            key, request = self.pending.popitem()
+            self.resolved.append(key)
+            result, = self.generate_token_batch([request])
+            return [(key, result)]
+
+        def abort_token_requests(self):
+            self.pending.clear()
+
+    episodes = [("a", "slow-query"), ("b", "fast-query"), ("c", "new-query")]
+    settings = dict(context_threshold_tokens=threshold, max_compactions=limit,
+                    force_answer_at_compaction_limit=True)
+    reference = ScheduledModel()
+    reference.completion_driven = False
+    expected = runtime(reference, **settings).run_many(episodes)
+    model = ScheduledModel()
+    batches = runtime(model, **settings).run_many_stream(episodes, max_active_episodes=2)
+    completed = [(index, result) for batch in batches for index, result in batch]
+    assert [index for index, _ in completed] == [1, 2, 0]
+    fast = completed[0][1]
+    assert fast.tool_call_counts["search"] == 1
+    if threshold == 1 and limit:
+        assert len(fast.summary_turns) == int(summary == SUMMARY)
+        assert fast.status == ("completed" if summary == SUMMARY else "malformed_tool_call")
+    if limit == 0:
+        assert fast.turn_records[-1]["generation_kind"] == "forced_answer"
+    assert model.resolved[-1] == "0"
+    for index, result in completed:
+        assert result == expected[index]
+
+
+def test_closing_completion_stream_aborts_only_outstanding_work():
+    class Model(TokenModel):
+        completion_driven = True
+
+        def __init__(self):
+            super().__init__([FINISH])
+            self.pending = {}
+            self.cancelled = []
+
+        def submit_token_request(self, key, request):
+            self.pending[key] = request
+
+        def completed_token_requests(self):
+            key, request = self.pending.popitem()
+            result, = self.generate_token_batch([request])
+            return [(key, result)]
+
+        def abort_token_requests(self):
+            self.cancelled.extend(self.pending)
+            self.pending.clear()
+
+    model = Model()
+    stream = runtime(model).run_many_stream([("a", "slow"), ("b", "fast")], max_active_episodes=2)
+    (index, result), = next(stream)
+    assert index == 1 and result.final_answer == "done"
+    stream.close()
+    assert model.cancelled == ["0"]
+    assert not model.pending

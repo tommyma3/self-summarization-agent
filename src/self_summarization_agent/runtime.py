@@ -380,6 +380,7 @@ class EpisodeRuntime:
     max_compactions: int | None = None
     force_answer_at_compaction_limit: bool = False
     token_renderer: Any = field(init=False, default=None)
+    collection_metrics: dict[str, float] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.max_summary_tokens < 1:
@@ -833,54 +834,56 @@ class EpisodeRuntime:
         doc_ids = [str(result["docid"]) for result in search_results if result.get("docid") is not None]
         self._record_retrieved_docids(retrieved_docids, doc_ids)
 
+    def _generated_output(self, result) -> _GeneratedOutput:
+        text = str(getattr(result, "text", ""))
+        completion_token_ids = getattr(result, "completion_token_ids", None)
+        completion_tokens = (
+            len(completion_token_ids)
+            if completion_token_ids is not None
+            else self._completion_token_count(text)
+        )
+        return _GeneratedOutput(
+            text=text,
+            completion_tokens=completion_tokens,
+            prompt_token_ids=(
+                list(result.prompt_token_ids)
+                if getattr(result, "prompt_token_ids", None) is not None
+                else None
+            ),
+            completion_token_ids=(
+                list(completion_token_ids) if completion_token_ids is not None else None
+            ),
+            cumulative_logprob=(
+                float(result.cumulative_logprob)
+                if getattr(result, "cumulative_logprob", None) is not None
+                else None
+            ),
+            token_logprobs=(
+                list(result.token_logprobs)
+                if getattr(result, "token_logprobs", None) is not None
+                else None
+            ),
+            token_logprobs_mode=getattr(result, "token_logprobs_mode", None),
+            message=getattr(result, "message", None),
+            finish_reason=getattr(result, "finish_reason", None),
+            usage=getattr(result, "usage", None),
+        )
+
     def _generate_batch(self, prompts: list[str]) -> list[_GeneratedOutput]:
         generate_batch_with_metadata = (getattr(self.model, "generate_token_batch", None)
             if prompts and isinstance(prompts[0], TokenRequest)
             else getattr(self.model, "generate_batch_with_metadata", None))
         if generate_batch_with_metadata is not None:
+            started = time.monotonic()
             results = generate_batch_with_metadata(prompts)
+            self.collection_metrics["generation_wait_seconds"] = (
+                self.collection_metrics.get("generation_wait_seconds", 0.0) + time.monotonic() - started
+            )
             if len(results) != len(prompts):
                 raise ValueError(
                     f"Batch generator returned {len(results)} metadata results for {len(prompts)} prompts"
                 )
-            generated: list[_GeneratedOutput] = []
-            for result in results:
-                text = str(getattr(result, "text", ""))
-                completion_token_ids = getattr(result, "completion_token_ids", None)
-                completion_tokens = (
-                    len(completion_token_ids)
-                    if completion_token_ids is not None
-                    else self._completion_token_count(text)
-                )
-                generated.append(
-                    _GeneratedOutput(
-                        text=text,
-                        completion_tokens=completion_tokens,
-                        prompt_token_ids=(
-                            list(result.prompt_token_ids)
-                            if getattr(result, "prompt_token_ids", None) is not None
-                            else None
-                        ),
-                        completion_token_ids=(
-                            list(completion_token_ids) if completion_token_ids is not None else None
-                        ),
-                        cumulative_logprob=(
-                            float(result.cumulative_logprob)
-                            if getattr(result, "cumulative_logprob", None) is not None
-                            else None
-                        ),
-                        token_logprobs=(
-                            list(result.token_logprobs)
-                            if getattr(result, "token_logprobs", None) is not None
-                            else None
-                        ),
-                        token_logprobs_mode=getattr(result, "token_logprobs_mode", None),
-                        message=getattr(result, "message", None),
-                        finish_reason=getattr(result, "finish_reason", None),
-                        usage=getattr(result, "usage", None),
-                    )
-                )
-            return generated
+            return [self._generated_output(result) for result in results]
         generate_batch = getattr(self.model, "generate_batch", None)
         if generate_batch is None:
             outputs = [self.model.generate(prompt) for prompt in prompts]
@@ -1290,6 +1293,9 @@ class EpisodeRuntime:
             # Every sampled call needs a linked response, including calls skipped by the budget.
             results.extend(["Error: Tool call budget exhausted."] * (len(action.calls) - len(calls)))
             self._apply_tool_results(action, results)
+        self.collection_metrics["tool_seconds"] = (
+            self.collection_metrics.get("tool_seconds", 0.0) + time.monotonic() - tool_started
+        )
 
     def _retrieve_document(self, active: _ActiveEpisode, doc_id: str, tool_started: float) -> str:
         if (
@@ -1587,89 +1593,145 @@ class EpisodeRuntime:
         active.summary_turns.append(summary_turn_id)
         self._initialize_ledger(active)
 
+    def _next_prompt(self, active: _ActiveEpisode) -> ConversationPrompt | None:
+        if active.pending_summary is not None:
+            prompt = active.pending_summary
+            active.pending_summary = None
+            return prompt
+        reasons = active.token_usage.forced_answer_reasons
+        if self._remaining_tool_calls(active) == 0:
+            reasons.append("tool_budget")
+        if self._generated_token_budget_exhausted(active):
+            reasons.append("generated_token_budget")
+        prompt = (self._build_forced_answer_prompt(active) if reasons
+                  else self._build_runtime_prompt(active.state))
+        if self._terminate_on_context_overflow(active, prompt):
+            return None
+        return prompt
+
+    def _route_generation(
+        self, active: _ActiveEpisode, prompt: ConversationPrompt, prompt_tokens: int, output: _GeneratedOutput,
+    ) -> _PendingToolRound | None:
+        if prompt.generation_kind == "summary":
+            self._apply_summary_output(active, prompt, prompt_tokens, output)
+        elif prompt.generation_kind == "forced_answer":
+            self._apply_forced_answer_output(active, output, prompt, prompt_tokens)
+        else:
+            return self._prepare_action_output(active, output, prompt, prompt_tokens)
+        return None
+
+    def _tool_round_boundary(self, active: _ActiveEpisode) -> ConversationPrompt | None:
+        if active.result is None and active.interval_round_count:
+            return self._build_summary_prompt_for_active(active)
+        return None
+
     def _advance_active_episodes(self, active_episodes: list[_ActiveEpisode]) -> None:
-        """Advance every unfinished episode by one action and compaction round.
-
-        Keeping this as a round-sized operation preserves batched generation and
-        batched tool execution while allowing callers to retire completed
-        episodes and refill their slots before the next round.
-        """
-
-        generation_items: list[tuple[_ActiveEpisode, ConversationPrompt, int]] = []
+        generation_items = []
         for active in active_episodes:
-            if active.result is not None:
-                continue
-            if active.pending_summary is not None:
-                prompt = active.pending_summary
+            if active.result is None and (prompt := self._next_prompt(active)) is not None:
                 generation_items.append((active, prompt, self._prompt_token_count(active, prompt)))
-                active.pending_summary = None
-                continue
-            remaining_tool_calls = self._remaining_tool_calls(active)
-            forced_reasons = active.token_usage.forced_answer_reasons
-            if remaining_tool_calls == 0:
-                forced_reasons.append("tool_budget")
-            if self._generated_token_budget_exhausted(active):
-                forced_reasons.append("generated_token_budget")
-
-            acting_prompt = (
-                self._build_forced_answer_prompt(active) if forced_reasons
-                else self._build_runtime_prompt(active.state)
-            )
-            if self._terminate_on_context_overflow(active, acting_prompt):
-                continue
-            prompt_tokens = self._prompt_token_count(active, acting_prompt)
-            generation_items.append((active, acting_prompt, prompt_tokens))
 
         if generation_items:
             outputs = self._generate_batch([
                 self._commit_token_input(active, prompt) for active, prompt, _ in generation_items
             ])
-            pending_tool_actions: list[_PendingToolRound] = []
-            for (active, prompt, prompt_tokens), generated_output in zip(
-                generation_items,
-                outputs,
-            ):
-                if prompt.generation_kind == "summary":
-                    self._apply_summary_output(active, prompt, prompt_tokens, generated_output)
-                elif prompt.generation_kind == "forced_answer":
-                    self._apply_forced_answer_output(active, generated_output, prompt, prompt_tokens)
-                else:
-                    pending_action = self._prepare_action_output(
-                        active,
-                        generated_output,
-                        prompt,
-                        prompt_tokens,
-                    )
-                    if pending_action is not None:
-                        pending_tool_actions.append(pending_action)
-            if pending_tool_actions:
-                self._execute_pending_tool_actions(pending_tool_actions)
+            actions = []
+            for (active, prompt, count), output in zip(generation_items, outputs, strict=True):
+                action = self._route_generation(active, prompt, count, output)
+                if action is not None:
+                    actions.append(action)
+            if actions:
+                self._execute_pending_tool_actions(actions)
 
-        summary_items: list[tuple[_ActiveEpisode, str, int]] = []
+        summary_items = []
         for active in active_episodes:
-            if active.result is not None or active.interval_round_count == 0:
-                continue
-            # The generation budget has priority over context compaction.
-            # If both thresholds are reached by the latest action, the next
-            # invocation must be the forced-answer continuation.
-            if self._generated_token_budget_exhausted(active):
-                continue
-            summary_request = self._build_summary_prompt_for_active(active)
-            if summary_request is None:
+            summary_prompt = self._tool_round_boundary(active)
+            if summary_prompt is None:
                 continue
             if len(active_episodes) > 1 and getattr(self.model, "supports_mixed_control_batches", False):
-                # The next scheduler tick can refill retired slots and submit
-                # other episodes' actions alongside this terminal control.
-                active.pending_summary = summary_request
-                continue
-            summary_prompt = summary_request
-            prompt_tokens = self._prompt_token_count(active, summary_prompt)
-            summary_items.append((active, summary_prompt, prompt_tokens))
+                active.pending_summary = summary_prompt
+            else:
+                summary_items.append((active, summary_prompt, self._prompt_token_count(active, summary_prompt)))
 
         if summary_items:
             summary_outputs = self._generate_batch([self._commit_token_input(active, prompt) for active, prompt, _ in summary_items])
             for (active, prompt, prompt_tokens), generated_output in zip(summary_items, summary_outputs):
                 self._apply_summary_output(active, prompt, prompt_tokens, generated_output)
+
+    def _run_completion_driven(
+        self, episodes: Iterable[tuple[str, str]], max_active: int,
+    ) -> Iterator[list[tuple[int, RuntimeResult]]]:
+        """Admit one committed request per episode and route replies by request ID."""
+        inputs = iter(enumerate(episodes))
+        inflight = {}
+        ready = []
+        serial = 0
+        latencies = []
+        completed_batches = 0
+        peak_inflight = 0
+        try:
+            while True:
+                while len(ready) + len(inflight) < max_active:
+                    item = next(inputs, None)
+                    if item is None:
+                        break
+                    index, (query_id, query) = item
+                    ready.append((index, self._new_active_episode(query_id, query)))
+
+                finished = []
+                for index, active in ready:
+                    prompt = self._next_prompt(active) if active.result is None else None
+                    if prompt is None:
+                        assert active.result is not None
+                        finished.append((index, active.result))
+                        continue
+                    count = self._prompt_token_count(active, prompt)
+                    request = self._commit_token_input(active, prompt)
+                    request_id = str(serial)
+                    serial += 1
+                    self.model.submit_token_request(request_id, request)
+                    inflight[request_id] = (index, active, prompt, count, time.monotonic())
+                peak_inflight = max(peak_inflight, len(inflight))
+                ready.clear()
+                if finished:
+                    yield finished
+                    continue
+                if not inflight:
+                    return
+
+                actions = []
+                started = time.monotonic()
+                completions = self.model.completed_token_requests()
+                self.collection_metrics["generation_wait_seconds"] = (
+                    self.collection_metrics.get("generation_wait_seconds", 0.0) + time.monotonic() - started
+                )
+                if not completions:
+                    raise RuntimeError("No completions for outstanding rollout requests")
+                completed_batches += 1
+                received = time.monotonic()
+                for request_id, result in completions:
+                    index, active, prompt, count, submitted = inflight.pop(request_id)
+                    latencies.append(received - submitted)
+                    action = self._route_generation(active, prompt, count, self._generated_output(result))
+                    if action is not None:
+                        actions.append(action)
+                    ready.append((index, active))
+                if actions:
+                    self._execute_pending_tool_actions(actions)
+                    for action in actions:
+                        action.active.pending_summary = self._tool_round_boundary(action.active)
+        finally:
+            self.model.abort_token_requests()
+            if latencies:
+                latencies.sort()
+                self.collection_metrics.update({
+                    "generation_requests": len(latencies),
+                    "generation_completion_batches": completed_batches,
+                    "peak_inflight_requests": peak_inflight,
+                    "request_latency_p50_seconds": latencies[(len(latencies) - 1) // 2],
+                    "request_latency_p90_seconds": latencies[(len(latencies) - 1) * 9 // 10],
+                    "request_latency_max_seconds": latencies[-1],
+                })
 
     def run_many_stream(
         self,
@@ -1689,6 +1751,9 @@ class EpisodeRuntime:
             raise ValueError(
                 f"max_active_episodes must be at least 1, got {max_active_episodes}"
             )
+        if getattr(self.model, "completion_driven", False):
+            yield from self._run_completion_driven(episodes, max_active_episodes)
+            return
         pending = iter(enumerate(episodes))
         active_slots: list[tuple[int, _ActiveEpisode]] = []
 
