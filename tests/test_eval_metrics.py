@@ -152,13 +152,13 @@ def test_voluntary_stopping_reports_correctness_and_cap_hits(tmp_path):
     rows = [
         {"judge": {"outcome": outcome}, "token_usage": {"forced_answer_reasons": reasons}}
         for outcome, reasons in [("correct_answer", []), ("correct_answer", ["max_compactions"]),
-                                 ("malformed_tool_call", ["max_compactions"])]
+                                 ("malformed_tool_call", ["max_compactions"]), ("overlong", [])]
     ]
     kwargs = dict(judged_rollout_path=path, metrics_path=metrics, iteration=0, policy_checkpoint_id="base")
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     write_eval_metrics(**kwargs)
     path.write_text("".join(json.dumps(dict(row, reward_profile="voluntary_stopping")) + "\n" for row in rows))
     record = write_eval_metrics(**kwargs)
-    assert record["eval_accuracy"] == 2 / 3
-    assert record["eval_compaction_cap_hits"] == 2
+    assert record["eval_accuracy"] == 2 / 4
+    assert record["eval_compaction_cap_hits"] == 3
     assert record["eval_cap_forced_correct"] == record["eval_voluntary_correct"] == 1

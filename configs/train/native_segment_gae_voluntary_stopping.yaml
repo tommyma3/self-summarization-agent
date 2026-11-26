@@ -100,7 +100,7 @@ runtime:
   max_context_tokens: 28000
   # Summary-body cap. An overlong summary terminates the rollout with reward 0.
   max_summary_tokens: 6400
-  # Request a final answer when a tool round reaches the threshold in the fourth interval.
+  # At the fourth-interval threshold, training requests a final answer and evaluation ends as overlong.
   max_compactions: 3
   force_answer_at_compaction_limit: true
   # Per-phase subprocess timeout (seconds). If a rollout/judge/train subprocess

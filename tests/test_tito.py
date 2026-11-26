@@ -702,6 +702,39 @@ def test_force_answer_at_compaction_limit_appends_one_terminal_control(native, l
     assert len(extract_trainable_samples(result.trajectory_records, result.turn_rewards)) == limit + 1
 
 
+@pytest.mark.parametrize("method", ["grpo", "segment_gae"])
+def test_voluntary_stopping_collection_only_forces_training_answers(tmp_path, method):
+    from self_summarization_agent.config import load_train_config
+    from self_summarization_agent.dataset import QueryExample
+    from self_summarization_agent.rollout_collection import collect_rollouts
+
+    config = load_train_config(f"configs/train/native_{method}_voluntary_stopping.yaml", {
+        "runtime.context_threshold_tokens": 1, "runtime.max_compactions": 1,
+        "dataset.train_limit": 1, "dataset.eval_limit": 1,
+        "collection.train_task_count": 1, "collection.eval_task_count": 1, "training.group_size": 1,
+    })
+    examples = [QueryExample(query_id=q, query="question", answer="done") for q in ("q1", "q2")]
+    backend = FakeBackend(search_index={"q": ["d"]}, documents={"d": "fact"})
+    search = native_call("search", "query", "q")
+    finish = native_call("finish", "answer", "done")
+    for split in ("eval", "train"):
+        model = TokenModel([search, SUMMARY, search, finish], native=True)
+        path = collect_rollouts(config, checkpoint_path=tmp_path, output_path=tmp_path / f"{split}.jsonl",
+                                examples=examples, backend=backend, generator=model, split=split)
+        row = json.loads(path.read_text())
+        expected = ["action", "summary", "action"]
+        if split == "train":
+            expected.append("forced_answer")
+            assert row["final_answer"] == "done"
+            assert row["token_usage"]["forced_answer_reasons"] == ["max_compactions"]
+        else:
+            assert row["status"] == "overlong"
+            assert row["final_answer"] is None
+            assert row["token_usage"]["forced_answer_reasons"] == []
+            assert row["sampling_profile"]["force_answer_at_compaction_limit"] is False
+        assert [request.generation_kind for request in model.requests] == expected
+
+
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("case", ["below_threshold", "answer_at_limit", "malformed_summary"])
 def test_compaction_limit_still_allows_completion_and_rejects_malformed_summaries(native, case):

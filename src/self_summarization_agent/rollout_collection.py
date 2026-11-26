@@ -17,6 +17,7 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path, resolv
 from self_summarization_agent.config import (
     load_train_config,
     parse_cli_overrides,
+    resolved_rollout_runtime,
     resolved_rollout_sampling_profile,
     sampling_profile_id,
 )
@@ -702,7 +703,7 @@ def collect_rollouts(
         judge = judge or RewardJudge(build_generator(config.model, judge_config=config.judge))
     try:
         with _temporary_sampling_profile(generator, sampling_profile):
-            runtime = build_runtime(generator, backend, config.runtime)
+            runtime = build_runtime(generator, backend, resolved_rollout_runtime(config, split=split))
             for request_batch in iter_batches(
                 rollout_requests,
                 config.rollout.max_concurrent_episodes,

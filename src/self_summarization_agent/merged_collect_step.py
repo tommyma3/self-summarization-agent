@@ -54,6 +54,7 @@ from self_summarization_agent.config import (
     load_train_config,
     parse_cli_overrides,
     resolved_rollout_sampling_profile,
+    resolved_rollout_runtime,
     sampling_profile_id,
 )
 from self_summarization_agent.dataset import load_query_examples, split_train_eval_examples
@@ -585,7 +586,7 @@ def _collect_split(
     completed_batch_count = 0
     generated_row_count = 0
     with _temporary_sampling_profile(generator, sampling_profile):
-        runtime = build_runtime(generator, backend, config.runtime)
+        runtime = build_runtime(generator, backend, resolved_rollout_runtime(config, split=split))
         episode_inputs = [
             (example.query_id, example.query) for example, _ in rollout_requests
         ]

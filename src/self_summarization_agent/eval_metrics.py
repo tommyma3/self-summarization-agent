@@ -200,7 +200,8 @@ def write_eval_metrics(
         "eval_correct_per_1k_budget_consumed_tokens": _per_1k(correct, budget_consumed_tokens),
     }
     if reward_profile == VOLUNTARY_STOPPING:
-        cap_rows = [row for row in rows if "max_compactions" in _token_usage(row).get("forced_answer_reasons", ())]
+        cap_rows = [row for row in rows if row["judge"]["outcome"] == "overlong"
+                    or "max_compactions" in _token_usage(row).get("forced_answer_reasons", ())]
         cap_correct = sum(row["judge"]["outcome"] == "correct_answer" for row in cap_rows)
         record.update(eval_reward_profile=reward_profile, eval_compaction_cap_hits=len(cap_rows),
                       eval_cap_forced_correct=cap_correct, eval_voluntary_correct=correct - cap_correct)

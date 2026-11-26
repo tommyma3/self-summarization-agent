@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -734,6 +734,16 @@ def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dic
     profile = {
         "max_new_tokens": (
             config.rollout.max_new_tokens
+def _voluntary_stopping_eval(config: TrainConfig, split: str) -> bool:
+    return split == "eval" and config.benchmark.reward_profile == VOLUNTARY_STOPPING
+
+
+def resolved_rollout_runtime(config: TrainConfig, *, split: str) -> RuntimeConfig:
+    if _voluntary_stopping_eval(config, split):
+        return replace(config.runtime, force_answer_at_compaction_limit=False)
+    return config.runtime
+
+
             if config.rollout.max_new_tokens is not None
             else config.model.max_new_tokens
         ),
@@ -761,6 +771,9 @@ def resolved_rollout_sampling_profile(config: TrainConfig, *, split: str) -> dic
                 profile[key] = value
         profile["extra_sampling_params"].update(evaluation.extra_sampling_params)
     return profile
+        # Resume checks use this profile to identify compatible eval rows and metrics.
+        if _voluntary_stopping_eval(config, split):
+            profile["force_answer_at_compaction_limit"] = False
 
 
 def sampling_profile_id(profile: dict[str, Any]) -> str:
