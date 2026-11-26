@@ -91,8 +91,8 @@ def validate_samples(samples, max_sequence_length=None, reward_profile=BINARY_RE
             raise ValueError("Misaligned exact interval tensors")
         if ids != sample.collection_full_token_ids[:-1] or labels != sample.collection_full_token_ids[1:]:
             raise ValueError("Cached IDs differ from collected interval")
-        if mask != sample.collection_assistant_token_mask[1:]:
-            raise ValueError("Separate MC requires the exact all-assistant mask")
+        if mask != sample.policy_mask(sample.collection_assistant_token_mask[1:], reward_profile):
+            raise ValueError("Separate MC requires the exact policy mask")
         if require_reference_logprobs and len(sample.reference_logprobs) != len(ids):
             raise ValueError("Misaligned exact interval tensors")
         if require_reference_logprobs and not all(math.isfinite(x) for x in sample.reference_logprobs):

@@ -383,8 +383,9 @@ scripts/train_iterations.sh --iterations 10 \
 ```
 
 Warmup collects exactly 50 training questions with four attempts each. The 200
-traces include failures; 40 questions (160 traces) fit the critic and 10 questions
-(40 traces) select its checkpoint. It requests no extra evaluation rollouts and
+traces include failures; 40 questions (up to 160 eligible traces) fit the critic and 10 questions
+(up to 40 eligible traces) select its checkpoint. Malformed tool calls and empty summaries
+are excluded from both splits. Warmup requests no extra evaluation rollouts and
 preserves the existing 730/100 benchmark partition. The 10-question holdout is
 temporary warmup validation; its fixed-policy labels are not used to select
 checkpoints once the actor changes. A small number of positive outcomes limits
@@ -632,12 +633,25 @@ Useful `training.verl` knobs:
 - Summarization happens only after a completed tool round.
 - `runtime.generated_token_budget` limits `budget_consumed_tokens`: all model completion tokens, including thinking, actions, summaries, and forced answers, plus each raw appended tool result counted once. `total_generated_tokens` remains model-output-only for reporting. Budget exhaustion takes priority over compaction.
 - Set `runtime.max_compactions` to a nonnegative integer (for example, `--set runtime.max_compactions=2`) to disable tool and generated-token budgets and their forced answers. After that many successful compactions, reaching `runtime.context_threshold_tokens` after a tool round ends the rollout as `overlong` with reward 0 on every interval by default. Add `--set runtime.force_answer_at_compaction_limit=true` to request one final answer at that boundary and judge it normally. With `max_compactions=0`, this boundary applies to the initial interval.
-- To test voluntary stopping on BrowseComp, use a fresh output directory and add `--set benchmark.reward_profile=voluntary_stopping` to a force-answer training run, such as `configs/train/native_segment_gae_force_answer.yaml`. A judged correct answer earns 1 when submitted voluntarily and 0.9 when requested at the compaction cap. All failures earn 0. Every interval shares the rollout label, and both kinds of correct answer count fully toward evaluation accuracy. The profile supports GRPO and interval value training.
+- The BrowseComp voluntary-stopping presets give a correct voluntary answer 1, a correct cap-forced answer 0.9, and a wrong answer 0. Both kinds of correct answer count fully toward evaluation accuracy. GRPO and interval value training use the rollout label for earlier actions, but the entire forced completion (including reasoning) has no policy loss. Voluntary answers remain trainable. The default binary reward profile does not mask forced answers.
 - Compaction and forced-answer instructions are appended to the current interval; they never replace or reconstruct its preceding context.
 - `model.chat_template_path` selects the agent chat template. The bundled Qwen3.5 template formats the initial system and user messages, including tool definitions and any carried summary. During the interval, the runtime appends generated tokens, tool results, and controls to the token ledger.
 - A successful compaction starts a fresh interval with the unchanged system instructions, unchanged original user request, and the latest `<summary>...</summary>`-wrapped compressed agent history; no raw assistant/tool tail is retained.
 - RL training data is produced as one sparse-masked sample per interval: action, tool-call, summary, and final-answer tokens are trainable, while tool results and runtime-control prompts are context-only.
-- Malformed tool calls terminate the rollout immediately and assign reward 0 to every interval.
+- Malformed tool calls and empty summaries terminate the rollout with reward 0. GRPO counts that rollout once in group reward normalization but masks every interval, including earlier actions, summaries, and the failing turn’s reasoning. Value training excludes the whole rollout. These training masks do not change the raw token ledger or the stored behavior log probabilities.
+
+### Launch voluntary-stopping runs
+
+Run each command separately from the repository root. Both presets use three compactions and a 16,000-token threshold. On a new machine, initialize each run root's `latest` pointer to the same base actor first; artifact directories are not version-controlled. The Segment Value command disables critic warmup so the two runs collect the same rollout budget.
+
+```bash
+scripts/train_iterations.sh --iterations 10 --config configs/train/native_grpo_voluntary_stopping.yaml \
+  --latest-root artifacts/train/qwen-bcplus-native-grpo-voluntary-stopping
+
+scripts/train_iterations.sh --iterations 10 --config configs/train/native_segment_gae_voluntary_stopping.yaml \
+  --latest-root artifacts/train/qwen-bcplus-native-segment-gae-voluntary-stopping \
+  --set training.value_pretraining.enabled=false
+```
 
 Token Monte Carlo critic for BrowseComp-Plus
 -------------------------------------------

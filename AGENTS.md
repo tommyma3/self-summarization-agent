@@ -90,10 +90,12 @@ Already-collected records that fail this verification raise `ProviderHistoryRewr
 
 One `trajectory_record` is one complete interval ending in compaction, final answer, forced answer, or malformed output. `turn_records` are diagnostics; training consumes `trajectory_records`.
 
-The sparse training mask is:
+The sparse mask recorded at collection is:
 
 - Trainable: every model-generated assistant token, including reasoning, tool actions, summary reasoning/body, and final-answer reasoning/body.
 - Conditioning only: system instructions, the original query, any wrapped compressed state, tool results, summary requests, and forced-answer controls.
+
+Training may narrow this mask without changing the collected evidence. Under `voluntary_stopping`, the entire cap-forced answer completion is masked from policy loss. For `malformed_tool_call` and `empty_summary`, GRPO masks the entire rollout but retains its group reward; value methods exclude the entire rollout.
 
 All intervals from one rollout share the same judged rollout reward. Do not give a rollout more independent reward-normalization weight merely because it compacted more often.
 

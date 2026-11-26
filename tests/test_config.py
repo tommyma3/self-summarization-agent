@@ -32,6 +32,15 @@ def test_segment_gae_ppo_matches_native_grpo_preset() -> None:
     )
 
 
+@pytest.mark.parametrize("method", ["grpo", "segment_gae"])
+def test_voluntary_stopping_presets_match_force_answer_controls(method: str) -> None:
+    control = load_train_config(f"configs/train/native_{method}_force_answer.yaml",
+                                {"benchmark.reward_profile": "voluntary_stopping"})
+    preset = load_train_config(f"configs/train/native_{method}_voluntary_stopping.yaml")
+    name = f"qwen-bcplus-native-{method.replace('_', '-')}-voluntary-stopping"
+    assert preset == replace(control, experiment=replace(control.experiment, name=name))
+
+
 def test_compaction_mc_value_config_is_opt_in_and_validated(tmp_path: Path) -> None:
     config_path = tmp_path / "train.yaml"
     config_path.write_text(

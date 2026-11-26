@@ -167,7 +167,8 @@ def audit_evidence(run, dataset_path, iterations):
                     if turn.get('format_anomaly'):
                         stats['anomaly/' + str(turn['format_anomaly'])] += 1
                 if split == 'train':
-                    samples = samples_from_rollout_rows([row], expected_checkpoint_id=row['policy_checkpoint_id'])
+                    samples = samples_from_rollout_rows([row], expected_checkpoint_id=row['policy_checkpoint_id'],
+                                                       retain_critic_only_states=True)
                     validate_samples(samples, max_sequence_length=27000)
                     if samples:
                         ordered_rollout_chains([row], samples)

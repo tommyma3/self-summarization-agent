@@ -23,7 +23,9 @@ from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.train_grpo import group_samples_by_query
 from self_summarization_agent.trainer import _write_training_progress
 from self_summarization_agent.verl_ray_trainer import VerlRayPolicyTrainer
-from self_summarization_agent.rewards import BINARY_REWARD, validate_reward_profile
+from self_summarization_agent.rewards import (
+    BINARY_REWARD, MASKED_ROLLOUT_STATUSES, skip_rollout_samples, validate_reward_profile,
+)
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
     extract_training_samples,
@@ -101,6 +103,11 @@ def samples_from_rollout_rows(
     retain_critic_only_states: bool = False,
     reward_profile=BINARY_REWARD,
 ) -> list[Any]:
+    """Load verified caches, then apply rollout-level masks to training views only.
+
+    GRPO keeps fully masked failures for its per-rollout baseline. Value runs
+    retain critic-only states from eligible rollouts, never from those failures.
+    """
     samples = []
     for index, row in enumerate(rows, start=1):
         validate_reward_profile(row, reward_profile)
@@ -120,7 +127,7 @@ def samples_from_rollout_rows(
             raise ValueError(
                 f"Rollout row {index} is missing turn_records, trajectory_records, or turn_rewards"
             )
-        if row.get("trainable_sample_count") == 0:
+        if skip_rollout_samples(row, for_value=retain_critic_only_states):
             continue
         row_samples = extract_training_samples(
             trajectory_records,
@@ -155,6 +162,15 @@ def samples_from_rollout_rows(
             raise ValueError(
                 f"Rollout row {index} has uncached trainable samples: {', '.join(missing_cache_turn_ids)}"
             )
+        masked_rollout = row.get("status") in MASKED_ROLLOUT_STATUSES
+        for sample in row_samples:
+            mask = ([False] * len(sample.completion_mask) if masked_rollout
+                    else sample.policy_mask(sample.completion_mask, reward_profile))
+            if mask is not sample.completion_mask:
+                sample.completion_mask = mask
+                sample.reference_logprob = sum(
+                    prob for prob, keep in zip(sample.reference_logprobs, mask, strict=True) if keep
+                ) / max(1, sum(mask))
         samples.extend(row_samples)
     return samples
 
@@ -208,6 +224,8 @@ def run_train_step(
     grouped_samples = group_samples_by_query(samples)
     if config.benchmark.name == "swe-dev" and not samples:
         raise ValueError("Empty selected SWE batch; refusing to publish a training checkpoint")
+    if config.training.value.enabled and not samples:
+        raise ValueError("No eligible rollout states for value training")
     diagnostics = _sample_diagnostics(samples)
     print(
         f"[train_step] Loaded {len(rows)} rollout rows, {len(samples)} samples, "

@@ -84,7 +84,8 @@ def test_evalset_metrics_on_same_policy_eval_states(tmp_path):
     for gen in row_a["trajectory_records"][0]["collection_tokens"]["generations"]:
         gen["logprobs_mode"] = "grammar_masked_logprobs"
     eval_file = rollouts / "iteration-00000.eval.jsonl"
-    write_jsonl(eval_file, [row_a, row_b])
+    write_jsonl(eval_file, [row_a, row_b, dict(row_a, rollout_index=1, status="empty_summary"),
+                            dict(row_b, rollout_index=1, status="malformed_tool_call")])
     before = eval_file.read_bytes()
 
     metrics = critic_step.evaluate_on_eval_collection(ConstantCritic(), rollouts / "iteration-00001.jsonl", "iteration-00000")

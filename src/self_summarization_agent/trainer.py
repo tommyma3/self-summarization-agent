@@ -102,7 +102,7 @@ def _prepare_policy_batch(
         contributing = [
             (sample, advantage)
             for sample, advantage in zip(flat_samples, advantages)
-            if abs(advantage) >= 1e-8
+            if abs(advantage) >= 1e-8 and any(sample.completion_mask or [])
         ]
     return _PolicyBatch(
         flat_samples=flat_samples,

@@ -9,7 +9,7 @@ import re
 import time
 
 from self_summarization_agent.config import load_train_config
-from self_summarization_agent.rewards import BINARY_REWARD, validate_reward_profile
+from self_summarization_agent.rewards import BINARY_REWARD, skip_rollout_samples, validate_reward_profile
 from self_summarization_agent.separate_value import (
     ADVANTAGES, CRITIC_DIR, atomic_json, digest, sample_fingerprint, sample_key,
     validate_resume_checkpoint, validate_samples, FROZEN_TARGETS, frozen_target_artifact,
@@ -56,7 +56,7 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     profile = getattr(getattr(critic, "config", None), "reward_profile", BINARY_REWARD)
     for row in rows:
         validate_reward_profile(row, profile)
-        if row.get("trainable_sample_count") == 0:
+        if skip_rollout_samples(row, for_value=True):
             continue
         records = []
         rewards = dict(row["turn_rewards"])
@@ -77,7 +77,7 @@ def evaluate_on_eval_collection(critic, rollouts_path, checkpoint_name):
     for sample in eval_samples:
         sample.input_ids = sample.collection_full_token_ids[:-1]
         sample.labels = sample.collection_full_token_ids[1:]
-        sample.completion_mask = sample.collection_assistant_token_mask[1:]
+        sample.completion_mask = sample.policy_mask(sample.collection_assistant_token_mask[1:], profile)
     if not eval_samples:
         return {f"{EVALSET_PREFIX}_skipped": "no_eval_states",
                 f"{EVALSET_PREFIX}/native_cache_fail_count": native_cache_fail_count, **tags}

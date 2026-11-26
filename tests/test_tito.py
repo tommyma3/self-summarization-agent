@@ -1055,11 +1055,14 @@ def test_exact_tito_segments_rescore_on_cpu():
 
 @pytest.mark.parametrize(("outputs", "limit", "outcome", "expected"), [
     ([FINISH], 0, "correct_answer", 1.0),
+    ([FINISH], 0, "wrong_answer", 0.0),
     ([SEARCH, SUMMARY, FINISH], 1, "correct_answer", 1.0),
     ([SEARCH, FINISH], 0, "correct_answer", 0.9),
     ([SEARCH, SUMMARY, SEARCH, FINISH], 1, "correct_answer", 0.9),
     ([SEARCH, FINISH], 0, "wrong_answer", 0.0),
     ([SEARCH, "</think><summary></summary><|im_end|>"], 1, "wrong_answer", 0.0),
+    ([SEARCH, SUMMARY, SEARCH, "</think>bad tool<|im_end|>"], 1, "wrong_answer", 0.0),
+    ([SEARCH, SUMMARY, SEARCH, "</think><summary> </summary><|im_end|>"], 2, "wrong_answer", 0.0),
 ])
 def test_voluntary_stopping_judgment_through_segment_returns(outputs, limit, outcome, expected):
     from self_summarization_agent.config import load_train_config
@@ -1067,6 +1070,7 @@ def test_voluntary_stopping_judgment_through_segment_returns(outputs, limit, out
     from self_summarization_agent.judge_step import apply_decision_to_rollout_row
     from self_summarization_agent.launcher_utils import serialize_runtime_result
     from self_summarization_agent.segment_returns import ordered_rollout_chains, segment_gae
+    from self_summarization_agent.separate_value import validate_samples
     from self_summarization_agent.train_step import samples_from_rollout_rows
 
     config = load_train_config("configs/train/native_segment_gae_force_answer.yaml",
@@ -1082,7 +1086,31 @@ def test_voluntary_stopping_judgment_through_segment_returns(outputs, limit, out
     assert row["judge"]["outcome"] == (outcome if result.status == "completed" else result.status)
     for record in row["trajectory_records"]:
         record["training_cache"] = build_rollout_native_training_cache(record["collection_tokens"])
-    samples = samples_from_rollout_rows([row], expected_checkpoint_id="test", reward_profile=profile)
+    original = deepcopy(row)
+    args = dict(expected_checkpoint_id="test", reward_profile=profile)
+    grpo = samples_from_rollout_rows([row], **args)
+    samples = samples_from_rollout_rows([row], **args, retain_critic_only_states=True)
+    assert row == original
+    assert len(grpo) == len(row["trajectory_records"])
+    with pytest.raises(ValueError, match="reward profile"):
+        samples_from_rollout_rows([row], expected_checkpoint_id="test")
+    if result.status in {"malformed_tool_call", "empty_summary"}:
+        assert all(not any(sample.completion_mask) for sample in grpo)
+        assert not samples and not ordered_rollout_chains([row], samples, profile)
+        return
+    validate_samples(samples, reward_profile=profile)
+    for sample, actor_sample, record in zip(samples, grpo, row["trajectory_records"], strict=True):
+        tokens = record["collection_tokens"]
+        expected_mask = tokens["assistant_token_mask"][1:]
+        if record["termination_kind"] == "forced_answer":
+            length = len(tokens["generations"][-1]["completion_token_ids"])
+            expected_mask[-length:] = [False] * length
+        assert any(expected_mask)
+        assert sample.completion_mask == actor_sample.completion_mask == expected_mask
+        assert sample.collection_assistant_token_mask == tokens["assistant_token_mask"]
+    binary_row = dict(row, reward_profile="binary_zero_one", turn_rewards=dict.fromkeys(row["turn_rewards"], float(expected > 0)))
+    binary = samples_from_rollout_rows([binary_row], expected_checkpoint_id="test")
+    assert all(sample.completion_mask == sample.collection_assistant_token_mask[1:] for sample in binary)
     chain, = ordered_rollout_chains([row], samples, profile)
     values = {tuple(item["key"]): 0.5 for item in chain}
     returns = segment_gae([chain], values, 1.0, profile)
@@ -1090,5 +1118,3 @@ def test_voluntary_stopping_judgment_through_segment_returns(outputs, limit, out
         interval = returns[tuple(item["key"])]
         assert interval["transition_reward"] == (expected if item["terminal"] else 0)
         assert interval["target"] == pytest.approx(expected)
-    with pytest.raises(ValueError, match="reward profile"):
-        samples_from_rollout_rows([row], expected_checkpoint_id="test")

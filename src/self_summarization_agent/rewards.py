@@ -26,6 +26,7 @@ def read_rollout_reward(reward, profile=BINARY_REWARD):
 
 Outcome = Literal["correct_answer", "wrong_answer", "budget_exhausted", "overlong"]
 TRAINABLE_TURN_KINDS = {"trajectory"}
+MASKED_ROLLOUT_STATUSES = frozenset({"malformed_tool_call", "empty_summary"})
 PENALIZED_RUNTIME_STATUSES = frozenset(
     {
         "malformed_tool_call",
@@ -39,6 +40,10 @@ PENALIZED_RUNTIME_STATUSES = frozenset(
 
 def is_penalized_runtime_status(status: object) -> bool:
     return isinstance(status, str) and status in PENALIZED_RUNTIME_STATUSES
+
+
+def skip_rollout_samples(row: Mapping[str, object], *, for_value: bool) -> bool:
+    return row.get("trainable_sample_count") == 0 or (for_value and row.get("status") in MASKED_ROLLOUT_STATUSES)
 
 
 def has_runtime_reward(status: object) -> bool:

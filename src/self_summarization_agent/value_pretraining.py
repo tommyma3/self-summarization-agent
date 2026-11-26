@@ -14,7 +14,7 @@ import time
 from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.collection_contract import collection_profile_id, validate_artifact_lineage
 from self_summarization_agent.config import resolved_rollout_sampling_profile, runtime_config_identity, sampling_profile_id
-from self_summarization_agent.rewards import BINARY_REWARD, correct_answer_reward, read_rollout_reward
+from self_summarization_agent.rewards import BINARY_REWARD, MASKED_ROLLOUT_STATUSES, correct_answer_reward, read_rollout_reward
 from self_summarization_agent.separate_value import (
     CRITIC_MANIFEST, CRITIC_STATE, atomic_json, digest, model_files_complete,
     sample_key, source_critic_identity, validate_samples,
@@ -60,6 +60,7 @@ def initialization_binding(config, actor, *, existing_id=None):
         "version": 1, **({"estimator": "token_mc_value", "state_anchor": "before_each_sampled_token"}
             if config.training.advantage_estimator == "token_mc_value" else {}),
         "actor_path": str(actor), "actor_id": checkpoint_id_from_path(actor),
+        "excluded_rollout_statuses": sorted(MASKED_ROLLOUT_STATUSES),
         "actor_digest": source_critic_identity(actor, resume=False),
         "critic_path": str(Path(config.training.value.model_path).resolve()),
         "critic_digest": source_critic_identity(config.training.value.model_path, resume=False),

@@ -1,7 +1,7 @@
 from self_summarization_agent.trajectory import TOKEN_CACHE_VERSION
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from self_summarization_agent.config import (
@@ -16,6 +16,7 @@ from self_summarization_agent.config import (
     TrainingConfig,
 )
 from self_summarization_agent.train_step import run_train_step
+from self_summarization_agent.trainer import _prepare_policy_batch
 
 
 @dataclass(slots=True)
@@ -295,7 +296,7 @@ def test_run_train_step_rejects_checkpoint_mismatch_before_trainer_mutation(tmp_
     assert trainer.saved_checkpoints == []
 
 
-def test_run_train_step_consumes_malformed_negative_samples(tmp_path: Path) -> None:
+def test_grpo_keeps_malformed_rollout_reward_but_masks_every_interval(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoints" / "step-00001"
     checkpoint.mkdir(parents=True)
     rollout_path = tmp_path / "rollouts.jsonl"
@@ -314,6 +315,12 @@ def test_run_train_step_consumes_malformed_negative_samples(tmp_path: Path) -> N
     assert trainer.grouped_samples is not None
     assert [sample.turn_id for sample in trainer.grouped_samples["q1"]] == ["trajectory-1", "trajectory-2"]
     assert [sample.reward for sample in trainer.grouped_samples["q1"]] == [0.0, 0.0]
+    assert all(not any(sample.completion_mask) for sample in trainer.grouped_samples["q1"])
+    failed = trainer.grouped_samples["q1"]
+    success = replace(failed[0], rollout_id="q1:1", reward=1., completion_mask=[False, True])
+    batch = _prepare_policy_batch({"q1": [*failed, success]}, include_zero_advantage=True)
+    assert [sample for sample, _ in batch.contributing] == [success]
+    assert batch.contributing[0][1] > 0
     assert trainer.saved_checkpoints == [str(output_checkpoint)]
 
 

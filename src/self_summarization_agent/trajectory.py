@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import logging
 import math
 from typing import Any
-from self_summarization_agent.rewards import BINARY_REWARD, read_rollout_reward, rollout_reward_values
+from self_summarization_agent.rewards import BINARY_REWARD, VOLUNTARY_STOPPING, read_rollout_reward, rollout_reward_values
 from self_summarization_agent.token_stream import FULL_VOCAB_LOGPROBS, TITO_COLLECTION_VERSION, TITO_CONTRACT
 
 
@@ -62,6 +62,18 @@ class RLSample:
     reference_logprob_source: str | None = None
     reference_logprobs_mode: str | None = None
     collection_token_spans: list[dict[str, Any]] | None = None
+    forced_completion_length: int | None = None
+
+    def policy_mask(self, mask: list[bool], reward_profile: str) -> list[bool]:
+        if reward_profile != VOLUNTARY_STOPPING or self.trainable_kind != "forced_answer":
+            return mask
+        length = self.forced_completion_length
+        if (not length or length > len(mask) or not all(mask[-length:])
+                or self.collection_full_token_ids is None
+                or self.input_ids != self.collection_full_token_ids[:-1]
+                or self.labels != self.collection_full_token_ids[1:]):
+            raise ValueError(f"Forced answer {self.turn_id} needs an exact final sampled completion")
+        return mask[:-length] + [False] * length
 
     @property
     def has_training_cache(self) -> bool:
@@ -745,6 +757,12 @@ def extract_trainable_samples(
             continue
         state_prefix_length = cached_state_prefix_length or collection_state_prefix_length
         collection = record.get("collection_tokens")
+        forced_length = None
+        if reward_profile == VOLUNTARY_STOPPING and record.get("termination_kind") == "forced_answer" and collection:
+            final_generation = collection["generations"][-1]
+            if final_generation["full_token_ids"] != collection_full_token_ids:
+                raise ValueError(f"Forced answer {record_id} is not the final collected generation")
+            forced_length = len(final_generation["completion_token_ids"])
         cache = record.get(TOKEN_CACHE_FIELD)
         if isinstance(collection, Mapping) and collection.get("version") == TITO_COLLECTION_VERSION and isinstance(cache, Mapping):
             if (cache.get("renderer_fingerprint") != collection.get("renderer_fingerprint")
@@ -796,6 +814,7 @@ def extract_trainable_samples(
                 reference_logprob_source=(record.get(TOKEN_CACHE_FIELD) or {}).get("reference_logprob_source"),
                 reference_logprobs_mode=(record.get(TOKEN_CACHE_FIELD) or {}).get("logprobs_mode"),
                 collection_token_spans=deepcopy((record.get("collection_tokens") or {}).get("spans")),
+                forced_completion_length=forced_length,
             )
         )
     unknown_reward_ids = sorted(set(rewards) - seen_record_ids - skipped_history_rewrite_ids)

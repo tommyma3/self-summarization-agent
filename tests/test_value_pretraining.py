@@ -57,7 +57,9 @@ def test_config_round_trip_and_legacy_value_fingerprint(tmp_path):
 def test_split_exact_prefixes_and_source_immutability(batch):
     original = batch.path.read_bytes()
     train, validation, manifest = module.prepare_dataset(batch.config, batch.actor, batch.path, batch.allowed)
-    assert len({s.rollout_id for s in train}) == 12
+    assert len({s.rollout_id for s in train}) == 11
+    assert 'q3:1' not in {s.rollout_id for s in [*train, *validation]}
+    assert manifest['excluded_rollout_count'] == 1
     assert len({s.rollout_id for s in validation}) == 4
     assert {s.query_id for s in train}.isdisjoint(s.query_id for s in validation)
     assert {s.state_kind for s in [*train, *validation]} == {'initial', 'post_compaction'}
@@ -68,13 +70,14 @@ def test_split_exact_prefixes_and_source_immutability(batch):
     assert batch.path.read_bytes() == original
 
 
-def test_default_budget_is_200_attempts_with_160_40_split(tmp_path):
+def test_default_budget_collects_200_attempts_before_excluding_malformed_sessions(tmp_path):
     data = make_batch(tmp_path, task_count=50)
     data.config.training.value_pretraining.validation_task_count = 10
     _, _, manifest = module.prepare_dataset(data.config, data.actor, data.path, data.allowed)
     assert manifest['requested_rollout_count'] == 200
-    assert manifest['train_rollout_count'] == 160
+    assert manifest['train_rollout_count'] == 159
     assert manifest['validation_rollout_count'] == 40
+    assert manifest['excluded_rollout_count'] == 1
 
 
 @pytest.mark.parametrize('corruption', ['count', 'duplicate', 'actor', 'sampling', 'reward', 'cache', 'query'])

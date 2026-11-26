@@ -10,7 +10,7 @@ from self_summarization_agent.checkpoints import checkpoint_id_from_path
 from self_summarization_agent.config import load_train_config, parse_cli_overrides
 from self_summarization_agent.launcher_utils import append_jsonl, ensure_dir
 from self_summarization_agent.cache_scorer import PolicyCacheScorer
-from self_summarization_agent.rewards import artifact_reward_profile, validate_reward_profile
+from self_summarization_agent.rewards import artifact_reward_profile, skip_rollout_samples, validate_reward_profile
 from self_summarization_agent.trajectory import (
     TOKEN_CACHE_FIELD,
     REFERENCE_LOGPROB_SOURCE_VLLM_ROLLOUT,
@@ -75,7 +75,7 @@ def _validate_cached_row(
     retain_critic_only_states: bool = False,
 ) -> None:
     _validate_judged_row(row, index=index, expected_checkpoint_id=expected_checkpoint_id)
-    if row.get("trainable_sample_count") == 0:
+    if skip_rollout_samples(row, for_value=retain_critic_only_states):
         return
     samples = extract_training_samples(
         row["trajectory_records"],
@@ -99,7 +99,7 @@ def _row_has_current_training_cache(
     train_compaction_tokens: bool = True,
     retain_critic_only_states: bool = False,
 ) -> bool:
-    if row.get("trainable_sample_count") == 0:
+    if skip_rollout_samples(row, for_value=retain_critic_only_states):
         return True
     rewards = row.get("turn_rewards")
     if not isinstance(rewards, dict):
@@ -368,6 +368,9 @@ def run_cache_step(
 
     active_scorer = scorer
     for row in pending_rows:
+        if skip_rollout_samples(row, for_value=config.training.value.enabled):
+            append_jsonl(output, row)
+            continue
         cache_candidate = _materialize_rollout_native_training_caches(
             row,
             checkpoint_id=checkpoint_id,

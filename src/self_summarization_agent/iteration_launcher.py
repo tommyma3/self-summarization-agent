@@ -20,6 +20,7 @@ from self_summarization_agent.checkpoints import (
     is_vllm_loadable_checkpoint,
     resolve_latest_checkpoint,
 )
+from self_summarization_agent.rewards import skip_rollout_samples
 from self_summarization_agent.config import (
     load_train_config,
     parse_cli_overrides,
@@ -565,7 +566,7 @@ def _has_complete_cached_rollouts(
         )
         if not isinstance(turn_rewards, dict):
             raise ValueError(f"Cannot resume from {path}: row {index} is missing turn_rewards")
-        if row.get("trainable_sample_count") == 0:
+        if skip_rollout_samples(row, for_value=retain_critic_only_states):
             continue
         trainable_turn_ids = {
             record.get("turn_id")
@@ -634,7 +635,7 @@ def _has_inline_cached_rollouts(
             trajectory_records,
             context=f"Cannot use inline cache from {path}: row {index}",
         )
-        if row.get("trainable_sample_count") == 0:
+        if skip_rollout_samples(row, for_value=retain_critic_only_states):
             continue
         trainable_turn_ids = {
             record.get("turn_id")
