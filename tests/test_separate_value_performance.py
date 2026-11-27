@@ -26,6 +26,32 @@ def test_segment_microbatch_budget_is_per_replica(tiny):
     assert batches == [[0, 1, 2, 3], [4, 5], [6], [7], [8]]
 
 
+def test_concurrent_fla_dispatch_preserves_kernel_arguments():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from time import sleep
+    from self_summarization_agent.separate_value_trainer import _guard_fla_autotuners
+
+    class Tuner:
+        def run(self, value):
+            self.nargs = value
+            sleep(0.01)  # Release the GIL during simulated kernel dispatch.
+            result = self.nargs
+            self.nargs = None
+            return result
+
+    _guard_fla_autotuners(Tuner)
+    tuner = Tuner()
+    ready = Barrier(4)
+
+    def dispatch(value):
+        ready.wait()
+        return tuner.run(value)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert list(pool.map(dispatch, range(4))) == list(range(4))
+
+
 @pytest.mark.skipif(not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(including_emulation=False),
                     reason="requires CUDA bf16 Qwen kernels")
 @torch.random.fork_rng(devices=[0])

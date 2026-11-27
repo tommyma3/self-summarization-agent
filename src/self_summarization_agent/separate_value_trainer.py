@@ -1,8 +1,11 @@
 """Exact-prefix categorical value fitting with an independent text model."""
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import asdict, dataclass
+from functools import cache, wraps
 from pathlib import Path
+from threading import Lock
 import json
 import random
 import sys
@@ -27,6 +30,22 @@ from .token_value_trainer import TokenValueTrainerMixin
 def tokenizer_signature(tokenizer):
     # Do not compare chat templates: collection already rendered authoritative IDs.
     return digest({"vocab": tokenizer.get_vocab(), "special_ids": sorted(tokenizer.all_special_ids)})
+
+
+@cache
+def _guard_fla_autotuners(tuner_class):
+    # DataParallel forward and autograd backward both dispatch from replica
+    # threads. Triton's run() uses mutable per-kernel scratch (including nargs)
+    # even on cache hits. Guard host dispatch; CUDA execution stays asynchronous.
+    run = tuner_class.run
+    locks = defaultdict(Lock)
+
+    @wraps(run)
+    def locked_run(tuner, *args, **kwargs):
+        with locks[tuner]:
+            return run(tuner, *args, **kwargs)
+
+    tuner_class.run = locked_run
 
 
 @dataclass
@@ -122,6 +141,9 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
             count = len(config.gpu_ids)
             if self.device.index != 0 or torch.cuda.device_count() < count:
                 raise ValueError("Multi-GPU critic requires cuda:0 and all configured GPUs visible")
+            fla_cache = sys.modules.get("fla.ops.utils.cache")
+            if fla_cache is not None:
+                _guard_fla_autotuners(fla_cache.CachedAutotuner)
             self._value_devices = list(range(count))
             self._value_forward = torch.nn.DataParallel(self._value_forward, device_ids=self._value_devices)
         self.optimizer = torch.optim.AdamW([
