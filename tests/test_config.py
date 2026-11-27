@@ -34,8 +34,16 @@ def test_segment_gae_ppo_matches_native_grpo_preset() -> None:
 
 @pytest.mark.parametrize("method", ["grpo", "segment_gae"])
 def test_voluntary_stopping_presets_match_force_answer_controls(method: str) -> None:
-    control = load_train_config(f"configs/train/native_{method}_force_answer.yaml",
-                                {"benchmark.reward_profile": "voluntary_stopping"})
+    overrides = {
+        "benchmark.reward_profile": "voluntary_stopping",
+        "training.verl.fsdp.sparse_policy_head": True,
+        "training.verl.fsdp.zero_advantage_forward_only": True,
+        "rollout.completion_driven": True,
+        "rollout.cache_gpu_ids": [0, 1, 2, 3],
+    }
+    if method == "segment_gae":
+        overrides["training.value.gpu_ids"] = [0, 1, 2, 3]
+    control = load_train_config(f"configs/train/native_{method}_force_answer.yaml", overrides)
     preset = load_train_config(f"configs/train/native_{method}_voluntary_stopping.yaml")
     name = f"qwen-bcplus-native-{method.replace('_', '-')}-voluntary-stopping"
     assert preset == replace(control, experiment=replace(control.experiment, name=name))

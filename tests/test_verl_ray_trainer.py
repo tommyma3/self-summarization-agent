@@ -105,6 +105,9 @@ def test_build_verl_fsdp_worker_config_maps_repo_training_knobs() -> None:
     training_config.value.enabled = True
     value_config = build_verl_fsdp_worker_config(model_config, training_config)
     assert not value_config["sparse_policy_head"] and not value_config["zero_advantage_forward_only"]
+    training_config.value.architecture = "separate"
+    separate_config = build_verl_fsdp_worker_config(model_config, training_config)
+    assert separate_config["sparse_policy_head"] and separate_config["zero_advantage_forward_only"]
 
 
 def test_verl_actor_batch_preserves_sparse_interval_token_order(monkeypatch) -> None:

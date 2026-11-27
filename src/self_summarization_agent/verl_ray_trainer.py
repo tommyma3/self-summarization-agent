@@ -467,8 +467,9 @@ def build_verl_fsdp_worker_config(model_config: ModelConfig, training_config: Tr
     if training_config.persist_actor_optimizer:
         save_contents = list(dict.fromkeys([*save_contents, "model", "optimizer", "extra"]))
     return {
-        "sparse_policy_head": fsdp_config.sparse_policy_head and not training_config.value.enabled,
-        "zero_advantage_forward_only": fsdp_config.zero_advantage_forward_only and not training_config.value.enabled,
+        # A separate critic supplies fixed advantages to a policy-only actor.
+        "sparse_policy_head": fsdp_config.sparse_policy_head and not training_config.value.shared,
+        "zero_advantage_forward_only": fsdp_config.zero_advantage_forward_only and not training_config.value.shared,
         "compaction_value": {
             "enabled": training_config.value.shared,
             "reward_profile": training_config.value.reward_profile,
