@@ -18,27 +18,6 @@ class PreparedTokens:
     position_tensors: list
 
 
-class TokenValueForward(torch.nn.Module):
-    """Keep the backbone and head together when replicating across devices."""
-
-    def __init__(self, model, head):
-        super().__init__()
-        self.model, self.head = model, head
-
-    def forward(self, ids, lengths, sampled_positions):
-        positions = torch.arange(ids.shape[1], device=ids.device)[None, :].expand_as(ids)
-        hidden = self.model(
-            input_ids=ids,
-            attention_mask=positions < lengths[:, None],
-            position_ids=positions,
-            use_cache=False,
-        ).last_hidden_state
-        # Gather only sampled states before the head; never transfer hidden states
-        # between GPUs. Padding here is ignored by the caller.
-        rows = torch.arange(ids.shape[0], device=ids.device)[:, None]
-        return self.head(hidden[rows, sampled_positions])
-
-
 class TokenValueTrainerMixin:
     def _prepare_tokens(self, samples, max_sequence_length=None, *, require_reference_logprobs=True):
         validate_token_samples(samples, max_sequence_length, require_reference_logprobs=require_reference_logprobs)
@@ -75,10 +54,7 @@ class TokenValueTrainerMixin:
         sampled_positions = self._to_device(torch.nn.utils.rnn.pad_sequence(
             [prepared.position_tensors[i] for i in indices], batch_first=True,
         ))
-        forward = getattr(self, "_token_parallel", None)
-        if forward is None:
-            forward = TokenValueForward(self.model, self.head)
-        logits = forward(ids, lengths, sampled_positions)
+        logits = self._value_forward(ids, lengths, sampled_positions)
         return [logits[row, :len(prepared.positions[i])] for row, i in enumerate(indices)]
 
     def evaluate_tokens(self, samples, *, require_reference_logprobs=True):
@@ -88,7 +64,7 @@ class TokenValueTrainerMixin:
     def _evaluate_tokens(self, samples, prepared):
         values, losses = [[] for _ in samples], [[] for _ in samples]
         modes = self.model.training, self.head.training
-        devices = getattr(self, "_token_devices", [self.device]) if self.device.type == "cuda" else []
+        devices = self._value_devices if self.device.type == "cuda" else []
         try:
             self.model.eval()
             self.head.eval()
@@ -223,7 +199,7 @@ class TokenValueTrainerMixin:
         )
         metrics.update(
             {
-                "value/data_parallel_devices": len(getattr(self, "_token_devices", [self.device])),
+                "value/data_parallel_devices": len(self._value_devices),
                 "value/optimizer_step_count": self.update_count - initial,
                 "value/total_optimizer_steps": self.update_count,
                 "value/fit_seconds": elapsed,

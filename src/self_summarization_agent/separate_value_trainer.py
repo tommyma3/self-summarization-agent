@@ -21,7 +21,7 @@ from self_summarization_agent.value_model import (
 )
 from self_summarization_agent.value_diagnostics import value_diagnostics
 from self_summarization_agent.trainer import _write_training_progress
-from .token_value_trainer import TokenValueTrainerMixin, TokenValueForward
+from .token_value_trainer import TokenValueTrainerMixin
 
 
 def tokenizer_signature(tokenizer):
@@ -36,6 +36,25 @@ class _PreparedPrefixes:
     lengths: list[int]
     targets: torch.Tensor
     rewards: torch.Tensor
+
+
+class SeparateValueForward(torch.nn.Module):
+    """Project on each replica; only the selected states' logits need gathering."""
+
+    def __init__(self, model, head, estimator):
+        super().__init__()
+        self.model, self.head = model, head
+        self.use_causal_mask_only = estimator == "compaction_gae_value" and model.config.model_type == "qwen3_5_text"
+
+    def forward(self, ids, lengths, sampled_positions=None):
+        positions = torch.arange(ids.shape[1], device=ids.device)[None, :].expand_as(ids)
+        mask = None if self.use_causal_mask_only else positions < lengths[:, None]
+        hidden = self.model(input_ids=ids, position_ids=positions, attention_mask=mask,
+                            use_cache=False).last_hidden_state
+        rows = torch.arange(ids.shape[0], device=ids.device)
+        if sampled_positions is None:
+            return self.head(hidden[rows, lengths - 1])
+        return self.head(hidden[rows[:, None], sampled_positions])
 
 
 class SeparateValueTrainer(TokenValueTrainerMixin):
@@ -96,19 +115,15 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
         if resume and not found:
             raise ValueError("Resumed critic is missing its value head")
         self.head.to(device=self.device, dtype=torch_dtype)
-        self._token_devices = [self.device]
-        if config.gpu_ids and len(config.gpu_ids) > 1:
-            if advantage_estimator != "token_mc_value":
-                raise ValueError("Multi-GPU separate critic currently requires token_mc_value")
-            if self.device.type == "cuda":
-                # Launchers map the requested physical devices to consecutive local IDs.
-                count = len(config.gpu_ids)
-                if self.device.index != 0 or torch.cuda.device_count() < count:
-                    raise ValueError("Multi-GPU critic requires cuda:0 and all configured GPUs visible")
-                self._token_devices = list(range(count))
-                self._token_parallel = torch.nn.DataParallel(
-                    TokenValueForward(self.model, self.head), device_ids=self._token_devices,
-                )
+        self._value_forward = SeparateValueForward(self.model, self.head, advantage_estimator)
+        self._value_devices = [self.device]
+        if self.device.type == "cuda" and len(config.gpu_ids) > 1:
+            # Launchers map the requested physical devices to consecutive local IDs.
+            count = len(config.gpu_ids)
+            if self.device.index != 0 or torch.cuda.device_count() < count:
+                raise ValueError("Multi-GPU critic requires cuda:0 and all configured GPUs visible")
+            self._value_devices = list(range(count))
+            self._value_forward = torch.nn.DataParallel(self._value_forward, device_ids=self._value_devices)
         self.optimizer = torch.optim.AdamW([
             {"params": list(self.model.parameters()), "lr": config.learning_rate},
             {"params": list(self.head.parameters()), "lr": config.head_learning_rate or config.learning_rate},
@@ -126,7 +141,8 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
     def synchronize(self):
         """Use only at phase boundaries, not for each microbatch."""
         if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+            for device in self._value_devices:
+                torch.cuda.synchronize(device)
 
     def kernel_diagnostics(self):
         module = sys.modules[type(self.model).__module__]
@@ -166,10 +182,12 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
             indices.sort(key=lambda i: prepared.lengths[i])
         batch, longest = [], 0
         budget = self.config.max_prefix_tokens_per_batch
+        replicas = 1 if self.method["estimator"] == "token_mc_value" else len(self._value_devices)
         for index in indices:
             length = prepared.lengths[index]
-            if batch and (len(batch) >= batch_size or
-                          (budget is not None and max(longest, length) * (len(batch) + 1) > budget)):
+            shard_rows = len(batch) // replicas + 1
+            if batch and (shard_rows > batch_size or
+                          (budget is not None and max(longest, length) * shard_rows > budget)):
                 yield batch
                 batch, longest = [], 0
             # A valid prefix larger than the batching budget runs alone, never truncated.
@@ -190,11 +208,7 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
         ids = self._to_device(torch.nn.utils.rnn.pad_sequence(
             [prepared.prefixes[i] for i in indices], batch_first=True, padding_value=pad_id))
         lengths = self._to_device(torch.tensor([prepared.lengths[i] for i in indices]))
-        mask = torch.arange(ids.shape[1], device=self.device)[None, :] < lengths[:, None]
-        positions = torch.arange(ids.shape[1], device=self.device)[None, :].expand_as(ids)
-        hidden = self.model(input_ids=ids, attention_mask=mask, position_ids=positions,
-                            use_cache=False).last_hidden_state
-        return self.head(hidden[torch.arange(len(indices), device=self.device), lengths - 1])
+        return self._value_forward(ids, lengths)
 
     def logits(self, samples):
         if self.method["estimator"] == "token_mc_value":
@@ -219,7 +233,7 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
         modes = self.model.training, self.head.training
         padded_tokens = 0
         # Diagnostic scheduling must not change the training RNG or module mode.
-        devices = [self.device] if self.device.type == "cuda" else []
+        devices = self._value_devices if self.device.type == "cuda" else []
         try:
             self.model.eval()
             self.head.eval()
@@ -263,7 +277,8 @@ class SeparateValueTrainer(TokenValueTrainerMixin):
             torch.cuda.reset_peak_memory_stats(self.device)
         prepared = self._prepare(samples, scalar_targets)
         metrics = {"value/prepare_seconds": time.monotonic() - started, **self.kernel_diagnostics(),
-                   "value/detailed_diagnostics": self.detailed_diagnostics}
+                   "value/detailed_diagnostics": self.detailed_diagnostics,
+                   "value/data_parallel_devices": len(self._value_devices)}
         if self.config.eval_before_fit:
             before, before_losses, stats = self._evaluate_prepared(prepared)
             metrics.update(value_diagnostics(samples, before, before_losses, prefix="value/eval_before",

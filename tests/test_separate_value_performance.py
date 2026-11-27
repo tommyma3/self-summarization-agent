@@ -16,6 +16,80 @@ def variable_samples():
     return data
 
 
+def test_segment_microbatch_budget_is_per_replica(tiny):
+    trainer = critic(tiny, advantage_estimator="compaction_gae_value")
+    trainer.config = replace(trainer.config, max_prefix_tokens_per_batch=4)
+    trainer._value_devices = [0, 1]
+    prepared = trainer._prepare(variable_samples())
+    prepared.lengths = [2, 2, 2, 2, 2, 3, 3, 5, 5]
+    batches = list(trainer._batches(prepared, range(9), 3))
+    assert batches == [[0, 1, 2, 3], [4, 5], [6], [7], [8]]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(including_emulation=False),
+                    reason="requires CUDA bf16 Qwen kernels")
+@torch.random.fork_rng(devices=[0])
+def test_qwen_causal_prefix_matches_masked_logits_and_gradients():
+    from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
+    from self_summarization_agent.separate_value_trainer import SeparateValueForward
+
+    torch.random.default_generator.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    config = Qwen3_5TextConfig(vocab_size=32, hidden_size=64, intermediate_size=128,
+        num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1, head_dim=32,
+        linear_num_key_heads=2, linear_num_value_heads=2, linear_key_head_dim=32, linear_value_head_dim=32,
+        layer_types=["linear_attention", "full_attention"])
+    model = Qwen3_5TextModel(config).to(device="cuda", dtype=torch.bfloat16)
+    head = torch.nn.Linear(64, 51, device="cuda", dtype=torch.bfloat16)
+    forward = SeparateValueForward(model, head, "compaction_gae_value")
+    ids = torch.randint(32, (3, 128), device="cuda")
+    lengths = torch.tensor([1, 53, 128], device="cuda")
+    expected = SeparateValueForward(model, head, "compaction_mc_value")(ids, lengths)
+    actual = forward(ids, lengths)
+    torch.testing.assert_close(actual, expected, atol=0.015, rtol=0.02)
+    parameters = tuple(forward.parameters())
+    gradient = torch.randn_like(actual)
+    for left, right in zip(torch.autograd.grad(actual, parameters, gradient),
+                           torch.autograd.grad(expected, parameters, gradient)):
+        torch.testing.assert_close(left.float(), right.float(), atol=0.025 * max(1, right.abs().max().item()), rtol=0.02)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires multiple GPUs")
+def test_parallel_voluntary_segment_fit_matches_single_device(tiny):
+    from self_summarization_agent.separate_value import sample_key
+    from self_summarization_agent.separate_value_trainer import SeparateValueTrainer
+
+    path, _, config = tiny
+    config = replace(config, num_bins=51, reward_profile="voluntary_stopping", baseline_timing="pre_fit",
+                     prefix_microbatch_size=2, rollout_minibatch_size=2, fitting_epochs=2)
+
+    def make_trainer(settings):
+        return SeparateValueTrainer(path, path, settings, dtype="float32", device="cuda:0",
+                                    activation_checkpointing=False, advantage_estimator="compaction_gae_value")
+
+    single = make_trainer(config)
+    parallel = make_trainer(replace(config, gpu_ids=[0, 1]))
+    data = variable_samples()
+    for sample in data[1:]:
+        sample.reward = 0.9
+    before = deepcopy(data)
+    targets = {sample_key(sample): target for sample, target in zip(data, [0.0, 0.87, 0.9])}
+    with torch.no_grad():
+        single.head.projection.weight.normal_(std=0.1)
+    parallel.head.load_state_dict(single.head.state_dict())
+    for trainer in (single, parallel):
+        trainer.optimizer = torch.optim.SGD([
+            {"params": trainer.model.parameters()}, {"params": trainer.head.parameters()}], lr=0.01)
+    expected, expected_metrics = single.fit(data, scalar_targets=targets)
+    actual, metrics = parallel.fit(data, scalar_targets=targets)
+    assert metrics["value/data_parallel_devices"] == 2
+    assert metrics["value/optimizer_step_count"] == expected_metrics["value/optimizer_step_count"] == 2
+    assert actual == pytest.approx(expected, abs=2e-6)
+    for left, right in zip(single._value_forward.parameters(), parallel._value_forward.parameters()):
+        torch.testing.assert_close(left, right, atol=2e-6, rtol=1e-5)
+    assert data == before
+
+
 def test_batched_evaluation_preserves_order_padding_and_modes(tiny):
     trainer = critic(tiny)
     torch.nn.init.normal_(trainer.head.projection.weight, std=0.2)

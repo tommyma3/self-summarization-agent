@@ -60,6 +60,9 @@ def main():
     baseline = replace(value, prefix_microbatch_size=1, eval_prefix_microbatch_size=1,
         max_prefix_tokens_per_batch=None, length_bucketing=False, activation_checkpointing=True,
         eval_before_fit=True, eval_every_n_epochs=1)
+    compare_devices = config.training.advantage_estimator == "compaction_gae_value" and len(value.gpu_ids) > 1
+    if compare_devices:
+        baseline = replace(value, gpu_ids=[])
     report = {"checkpoint": str(args.checkpoint.resolve()), "rollouts": str(args.rollouts.resolve()),
         "rollout_count": len({s.rollout_id for s in samples}), "state_count": len(samples),
         "rollout_ids": sorted({s.rollout_id for s in samples}),
@@ -77,14 +80,14 @@ def main():
                 advantage_estimator=config.training.advantage_estimator)
             trainer.synchronize()
             loaded = time.monotonic()
-            trainer.detailed_diagnostics = name == "baseline"
+            trainer.detailed_diagnostics = name == "baseline" and not compare_devices
             fit_kwargs = {}
             if config.training.advantage_estimator == "compaction_gae_value":
                 from self_summarization_agent.segment_returns import ordered_rollout_chains, segment_gae
                 from self_summarization_agent.separate_value import sample_key
                 values, _ = trainer.evaluate(samples)
-                returns = segment_gae(ordered_rollout_chains(rows, samples),
-                    dict(zip(map(sample_key, samples), values)), settings.gae_lambda)
+                returns = segment_gae(ordered_rollout_chains(rows, samples, settings.reward_profile),
+                    dict(zip(map(sample_key, samples), values)), settings.gae_lambda, settings.reward_profile)
                 fit_kwargs["scalar_targets"] = {key: row["target"] for key, row in returns.items()}
             predictions, metrics = trainer.fit(samples, max_sequence_length=config.training.max_sequence_length,
                                                 **fit_kwargs)
@@ -98,7 +101,10 @@ def main():
                 # Check padding/pooling with identical fitted weights separately
                 # from update-rounding differences. Excluded from timed fitting.
                 trainer.config = replace(settings, eval_prefix_microbatch_size=1, length_bucketing=False)
-                unbatched, _ = trainer.evaluate(samples)
+                if compare_devices:
+                    unbatched = [trainer.evaluate([sample])[0][0] for sample in samples]
+                else:
+                    unbatched, _ = trainer.evaluate(samples)
                 run["max_frozen_batching_value_difference"] = max(
                     abs(a - b) for a, b in zip(unbatched, predictions))
             report["runs"].append(run)

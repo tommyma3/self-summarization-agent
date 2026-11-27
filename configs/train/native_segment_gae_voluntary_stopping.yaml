@@ -154,7 +154,7 @@ training:
     diagnostics_interval: 5
     progress_interval_seconds: 30
     max_grad_norm: 1.0
-    gpu_id: 0
+    gpu_ids: [0, 1, 2, 3]
     seed: 0
     zero_initialize_head: true
     state_anchor: first_generation_prompt_end

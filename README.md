@@ -653,6 +653,16 @@ scripts/train_iterations.sh --iterations 10 --config configs/train/native_segmen
   --set training.value_pretraining.enabled=false
 ```
 
+The Segment GAE preset fits its critic on GPUs 0–3 before the actor starts.
+The 32-rollout optimizer minibatch is **global**; the 8-prefix training limit
+and 8,192 padded-token budget are **per GPU**. Only prefix-end logits are
+gathered, so every interval keeps its original rollout weight and frozen GAE
+target. Qwen3.5 needs no padding mask here: padding is on the right, and the
+causal model is scored only at the last real token. Token-level critics still
+use their explicit mask. To fit on one GPU, add `--set 'training.value.gpu_ids=[0]'`.
+To compare one GPU with the configured set on saved data, use
+`scripts/benchmark_separate_value.py` with this preset and all four GPUs visible.
+
 Token Monte Carlo critic for BrowseComp-Plus
 -------------------------------------------
 
